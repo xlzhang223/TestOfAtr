@@ -84,7 +84,9 @@
 #include "thread_list.h"
 #include "verify_object-inl.h"
 #include "well_known_classes.h"
-
+// zhangxianlong
+#include "leakleak/leakleak.h"
+//end
 namespace art {
 
 namespace gc {
@@ -288,6 +290,9 @@ Heap::Heap(size_t initial_size,
     CHECK_EQ(foreground_collector_type_, kCollectorTypeCC);
     CHECK_EQ(background_collector_type_, kCollectorTypeCCBackground);
   }
+  // zhangxianlong
+  //leakleak::dump_init();
+  //end
   verification_.reset(new Verification(this));
   CHECK_GE(large_object_threshold, kMinLargeObjectThreshold);
   ScopedTrace trace(__FUNCTION__);

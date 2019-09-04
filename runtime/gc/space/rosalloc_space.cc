@@ -29,6 +29,9 @@
 #include "utils.h"
 #include "memory_tool_malloc_space-inl.h"
 
+//zhangxianlong
+#include "leakleak/leakleak.h"
+//end
 namespace art {
 namespace gc {
 namespace space {
@@ -193,6 +196,9 @@ size_t RosAllocSpace::Free(Thread* self, mirror::Object* ptr) {
     CHECK(ptr != nullptr);
     CHECK(Contains(ptr)) << "Free (" << ptr << ") not in bounds of heap " << *this;
   }
+  //zhangxianlong
+    // leakleak::dump_obj(ptr,__FUNCTION__);
+  //end
   if (kRecentFreeCount > 0) {
     MutexLock mu(self, lock_);
     RegisterRecentFree(ptr);
@@ -202,7 +208,10 @@ size_t RosAllocSpace::Free(Thread* self, mirror::Object* ptr) {
 
 size_t RosAllocSpace::FreeList(Thread* self, size_t num_ptrs, mirror::Object** ptrs) {
   DCHECK(ptrs != nullptr);
-
+  //zhangxianlong
+  // for (size_t i = 0; i < num_ptrs; i++)
+  //   leakleak::dump_obj(ptrs[i],__FUNCTION__);
+  //end
   size_t verify_bytes = 0;
   for (size_t i = 0; i < num_ptrs; i++) {
     if (kPrefetchDuringRosAllocFreeList && i + kPrefetchLookAhead < num_ptrs) {

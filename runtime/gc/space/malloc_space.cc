@@ -30,8 +30,11 @@
 #include "thread.h"
 #include "thread_list.h"
 #include "utils.h"
-
+//zhangxianlong
+#include "leakleak/leakleak.h"
+//end
 namespace art {
+
 namespace gc {
 namespace space {
 
@@ -118,6 +121,9 @@ mirror::Class* MallocSpace::FindRecentFreedObject(const mirror::Object* obj) {
 }
 
 void MallocSpace::RegisterRecentFree(mirror::Object* ptr) {
+  //zhangxianlong
+  // leakleak::dump_obj(ptr,__FUNCTION__);
+  //end
   // No verification since the object is dead.
   recent_freed_objects_[recent_free_pos_] = std::make_pair(ptr, ptr->GetClass<kVerifyNone>());
   recent_free_pos_ = (recent_free_pos_ + 1) & kRecentFreeMask;
@@ -245,6 +251,11 @@ void MallocSpace::SweepCallback(size_t num_ptrs, mirror::Object** ptrs, void* ar
       bitmap->Clear(ptrs[i]);
     }
   }
+  //zhangxianlong
+  // for (size_t i = 0; i < num_ptrs; ++i)
+  // leakleak::dump_obj(ptrs[i],__FUNCTION__);
+  // //end
+
   // Use a bulk free, that merges consecutive objects before freeing or free per object?
   // Documentation suggests better free performance with merging, but this may be at the expensive
   // of allocation.

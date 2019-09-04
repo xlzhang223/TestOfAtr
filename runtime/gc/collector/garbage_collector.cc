@@ -34,7 +34,9 @@
 #include "thread-inl.h"
 #include "thread_list.h"
 #include "utils.h"
-
+//zhangxianlong
+#include "../../leakleak/leakleak.h"
+//end
 namespace art {
 namespace gc {
 namespace collector {
@@ -84,6 +86,10 @@ void GarbageCollector::ResetCumulativeStatistics() {
 }
 
 void GarbageCollector::Run(GcCause gc_cause, bool clear_soft_references) {
+  //zhangxianlong
+  leakleak::gc_begin();
+  // leakleak::check_file();
+  //end
   ScopedTrace trace(android::base::StringPrintf("%s %s GC", PrettyCause(gc_cause), GetName()));
   Thread* self = Thread::Current();
   uint64_t start_time = NanoTime();
@@ -92,7 +98,14 @@ void GarbageCollector::Run(GcCause gc_cause, bool clear_soft_references) {
   // Note transaction mode is single-threaded and there's no asynchronous GC and this flag doesn't
   // change in the middle of a GC.
   is_transaction_active_ = Runtime::Current()->IsActiveTransaction();
+  //zhangxianlong
+  // leakleak::dump_str("GC begin");
+  //end
   RunPhases();  // Run all the GC phases.
+  //zhangxianlong
+  // leakleak::dump_str("GC end");
+
+  //end
   // Add the current timings to the cumulative timings.
   cumulative_timings_.AddLogger(*GetTimings());
   // Update cumulative statistics with how many bytes the GC iteration freed.

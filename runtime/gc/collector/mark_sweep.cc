@@ -44,7 +44,9 @@
 #include "scoped_thread_state_change-inl.h"
 #include "thread-inl.h"
 #include "thread_list.h"
-
+//zhangxianlong
+#include "leakleak/leakleak.h"
+//end
 namespace art {
 namespace gc {
 namespace collector {
@@ -142,6 +144,9 @@ void MarkSweep::InitializePhase() {
 }
 
 void MarkSweep::RunPhases() {
+  //zhangxianlong
+  // leakleak::dump_str("MarkSweep");
+  //end
   Thread* self = Thread::Current();
   InitializePhase();
   Locks::mutator_lock_->AssertNotHeld(self);
@@ -1234,6 +1239,11 @@ void MarkSweep::SweepArray(accounting::ObjectStack* allocations, bool swap_bitma
             freed.bytes += alloc_space->FreeList(self, chunk_free_pos, chunk_free_buffer);
             chunk_free_pos = 0;
           }
+
+          //zhangxianlong
+          // leakleak::dump_obj(obj,__FUNCTION__);
+          //end
+
           chunk_free_buffer[chunk_free_pos++] = obj;
         }
       } else {
@@ -1266,6 +1276,11 @@ void MarkSweep::SweepArray(accounting::ObjectStack* allocations, bool swap_bitma
       }
       if (!large_mark_objects->Test(obj)) {
         ++freed_los.objects;
+
+        //zhangxianlong
+        // leakleak::dump_obj(obj,__FUNCTION__);
+        //end
+
         freed_los.bytes += large_object_space->Free(self, obj);
       }
     }
@@ -1390,6 +1405,9 @@ void MarkSweep::ProcessMarkStackParallel(size_t thread_count) {
 // Scan anything that's on the mark stack.
 void MarkSweep::ProcessMarkStack(bool paused) {
   TimingLogger::ScopedTiming t(paused ? "(Paused)ProcessMarkStack" : __FUNCTION__, GetTimings());
+  //zhangxianlong
+  // leakleak::dump_str(__FUNCTION__);
+  //end
   size_t thread_count = GetThreadCount(paused);
   if (kParallelProcessMarkStack && thread_count > 1 &&
       mark_stack_->Size() >= kMinimumParallelMarkStackSize) {

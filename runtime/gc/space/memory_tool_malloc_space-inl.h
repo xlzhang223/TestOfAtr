@@ -20,7 +20,9 @@
 #include "base/memory_tool.h"
 #include "memory_tool_malloc_space.h"
 #include "memory_tool_settings.h"
-
+//zhangxainlong
+#include "leakleak/leakleak.h"
+//end
 namespace art {
 namespace gc {
 namespace space {
@@ -194,6 +196,11 @@ size_t MemoryToolMallocSpace<S,
                            kAdjustForRedzoneInAllocSize,
                            kUseObjSizeForUsable>::Free(
     Thread* self, mirror::Object* ptr) {
+
+
+  //zhangxianlong
+    // leakleak::dump_obj(ptr,__FUNCTION__);
+  //end
   void* obj_after_rdz = reinterpret_cast<void*>(ptr);
   uint8_t* obj_with_rdz = reinterpret_cast<uint8_t*>(obj_after_rdz) - kMemoryToolRedZoneBytes;
 
@@ -223,6 +230,11 @@ size_t MemoryToolMallocSpace<S,
                            kUseObjSizeForUsable>::FreeList(
     Thread* self, size_t num_ptrs, mirror::Object** ptrs) {
   size_t freed = 0;
+  //zhangxianlong
+  // for (size_t i = 0; i < num_ptrs; i++)
+  //   leakleak::dump_obj(ptrs[i],__FUNCTION__);
+  //end
+
   for (size_t i = 0; i < num_ptrs; i++) {
     freed += Free(self, ptrs[i]);
     ptrs[i] = nullptr;

@@ -22,6 +22,10 @@
 #include "thread-inl.h"
 #include "utils.h"
 
+//zhangxianlong
+#include "leakleak/leakleak.h"
+//end
+
 namespace art {
 namespace gc {
 namespace space {
@@ -115,6 +119,11 @@ void ZygoteSpace::SweepCallback(size_t num_ptrs, mirror::Object** ptrs, void* ar
       bitmap->Clear(ptrs[i]);
     }
   }
+  //zhangxianlong
+  // for (size_t i = 0; i < num_ptrs; ++i)
+  // leakleak::dump_obj(ptrs[i],__FUNCTION__);
+  //end
+
   // We don't free any actual memory to avoid dirtying the shared zygote pages.
   for (size_t i = 0; i < num_ptrs; ++i) {
     // Need to mark the card since this will update the mod-union table next GC cycle.

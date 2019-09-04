@@ -35,7 +35,9 @@
 #include "thread-inl.h"
 #include "utils.h"
 #include "verify_object.h"
-
+//zhangxianlong
+ #include "leakleak/leakleak.h"
+//end
 namespace art {
 namespace gc {
 
@@ -205,8 +207,16 @@ inline mirror::Object* Heap::AllocObjectWithAllocator(Thread* self,
   if (AllocatorMayHaveConcurrentGC(allocator) && IsGcConcurrent()) {
     CheckConcurrentGC(self, new_num_bytes_allocated, &obj);
   }
+
   VerifyObject(obj);
   self->VerifyStack();
+  
+  
+  //zhangxianlong
+  //leakleak::dump_obj(obj.Ptr(),"alloc obj");
+  //end
+  
+
   return obj.Ptr();
 }
 

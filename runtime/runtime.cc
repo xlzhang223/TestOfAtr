@@ -1086,6 +1086,9 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   //   agents_.push_back(lib);
   // }
 
+  //zhangxianlong
+  leakleak::dump_init();
+  //end
   XGcOption xgc_option = runtime_options.GetOrDefault(Opt::GcOption);
   heap_ = new gc::Heap(runtime_options.GetOrDefault(Opt::MemoryInitialSize),
                        runtime_options.GetOrDefault(Opt::HeapGrowthLimit),

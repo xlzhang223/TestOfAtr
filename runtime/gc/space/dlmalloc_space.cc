@@ -29,7 +29,9 @@
 #include "thread.h"
 #include "thread_list.h"
 #include "utils.h"
-
+//zhangxianlong
+#include "leakleak/leakleak.h"
+//end
 namespace art {
 namespace gc {
 namespace space {
@@ -147,6 +149,9 @@ mirror::Object* DlMallocSpace::AllocWithGrowth(Thread* self, size_t num_bytes,
     // Check that the result is contained in the space.
     CHECK(!kDebugSpaces || Contains(result));
   }
+  //zhangxianlong
+  // leakleak::dump_obj(result,__FUNCTION__); zhangac
+  //end
   return result;
 }
 
@@ -165,6 +170,9 @@ MallocSpace* DlMallocSpace::CreateInstance(MemMap* mem_map, const std::string& n
 }
 
 size_t DlMallocSpace::Free(Thread* self, mirror::Object* ptr) {
+  //zhangxianlong
+    // leakleak::dump_obj(ptr,__FUNCTION__);
+  //end
   MutexLock mu(self, lock_);
   if (kDebugSpaces) {
     CHECK(ptr != nullptr);
@@ -183,6 +191,10 @@ size_t DlMallocSpace::FreeList(Thread* self, size_t num_ptrs, mirror::Object** p
 
   // Don't need the lock to calculate the size of the freed pointers.
   size_t bytes_freed = 0;
+  //zhangxianlong
+  // for (size_t i = 0; i < num_ptrs; i++)
+  //   leakleak::dump_obj(ptrs[i],__FUNCTION__);
+  //end
   for (size_t i = 0; i < num_ptrs; i++) {
     mirror::Object* ptr = ptrs[i];
     const size_t look_ahead = 8;

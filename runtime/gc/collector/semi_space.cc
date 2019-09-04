@@ -114,6 +114,9 @@ SemiSpace::SemiSpace(Heap* heap, bool generational, const std::string& name_pref
 }
 
 void SemiSpace::RunPhases() {
+  //zhangxianlong
+  // leakleak::dump_str("SemiSpace GC");
+  //end
   Thread* self = Thread::Current();
   InitializePhase();
   // Semi-space collector is special since it is sometimes called with the mutators suspended

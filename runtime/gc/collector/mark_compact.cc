@@ -62,6 +62,9 @@ MarkCompact::MarkCompact(Heap* heap, const std::string& name_prefix)
       updating_references_(false) {}
 
 void MarkCompact::RunPhases() {
+  //zhangxianlong
+  // leakleak::dump_str("MarkCompact");
+  //end
   Thread* self = Thread::Current();
   InitializePhase();
   CHECK(!Locks::mutator_lock_->IsExclusiveHeld(self));

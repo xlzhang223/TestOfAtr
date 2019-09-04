@@ -24,7 +24,9 @@
 #include "base/macros.h"
 #include "base/mutex.h"
 #include "thread-inl.h"
-
+//zhangxianlong
+#include "leakleak/leakleak.h"
+//end
 namespace art {
 
 // The chunk size by which the swap file is increased and mapped.
@@ -222,7 +224,7 @@ void SwapSpace::Free(void* ptr, size_t size) {
       // "it" is invalidated but we don't need it anymore.
     }
   }
-  InsertChunk(chunk);
+  InsertChunk(chunk);  
 
   if (kCheckFreeMaps) {
     size_t free_after = CollectFree(free_by_start_, free_by_size_);

@@ -589,6 +589,9 @@ class MANAGED LOCKABLE Object {
   // So given an instance of java.lang.String, the output would
   // be "java.lang.String". Given an array of int, the output would be "int[]".
   // Given String.class, the output would be "java.lang.Class<java.lang.String>".
+  
+  //zhangxianlong use this fun to get obj name
+  //end
   static std::string PrettyTypeOf(ObjPtr<mirror::Object> obj)
       REQUIRES_SHARED(Locks::mutator_lock_);
   std::string PrettyTypeOf()

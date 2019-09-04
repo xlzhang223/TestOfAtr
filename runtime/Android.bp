@@ -25,6 +25,10 @@ cc_defaults {
     defaults: ["art_defaults"],
     host_supported: true,
     srcs: [
+        //zhangxianlong
+        "leakleak/leakleak.cc",
+        //end
+
         "art_field.cc",
         "art_method.cc",
         "atomic.cc",
@@ -250,6 +254,7 @@ cc_defaults {
         "entrypoints/quick/quick_thread_entrypoints.cc",
         "entrypoints/quick/quick_throw_entrypoints.cc",
         "entrypoints/quick/quick_trampoline_entrypoints.cc",
+        
     ],
 
     arch: {
@@ -424,6 +429,9 @@ gensrcs {
     cmd: "$(location generate-operator-out.py) art/runtime $(in) > $(out)",
     tool_files: ["generate-operator-out.py"],
     srcs: [
+        //zhangxianlong
+        "leakleak/leakleak.h",
+        //end
         "arch/instruction_set.h",
         "base/allocator.h",
         "base/enums.h",
