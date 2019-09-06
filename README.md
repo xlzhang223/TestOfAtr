@@ -22,14 +22,14 @@
 lunch aosp_sailfish-userdebug
 make -j8
 ```
-####3. 刷机
+#### 3. 刷机
 官方教程：<https://source.android.com/setup/build/running.html#flashing-a-device>
 要刷写设备，请执行以下操作：
 在启动时按住相应的组合键或使用以下命令使设备进入 fastboot 模式：
 `adb reboot bootloader`
 在设备处于 fastboot 模式后，运行以下命令：
 `fastboot flashall -w`
-####4. 将修改的代码写入设备
+#### 4. 将修改的代码写入设备
 用该项目替换掉`/art`文件夹，并重新编译,在源代码的根目录下执行执行：
 ```
 . build/envsetup.sh
@@ -50,4 +50,4 @@ adb remount
 cd out/target/product/sailfish/system/
 adb push lib /system
 ```
-###2.2 LeakCanary 插桩
+### 2.2 LeakCanary 插桩
