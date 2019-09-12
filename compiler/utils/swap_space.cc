@@ -24,9 +24,7 @@
 #include "base/macros.h"
 #include "base/mutex.h"
 #include "thread-inl.h"
-//zhangxianlong
-#include "leakleak/leakleak.h"
-//end
+
 namespace art {
 
 // The chunk size by which the swap file is increased and mapped.

@@ -87,7 +87,7 @@ void GarbageCollector::ResetCumulativeStatistics() {
 
 void GarbageCollector::Run(GcCause gc_cause, bool clear_soft_references) {
   //zhangxianlong
-  leakleak::gc_begin();
+  // leakleak::gc_begin();
   // leakleak::check_file();
   //end
   ScopedTrace trace(android::base::StringPrintf("%s %s GC", PrettyCause(gc_cause), GetName()));
@@ -104,7 +104,6 @@ void GarbageCollector::Run(GcCause gc_cause, bool clear_soft_references) {
   RunPhases();  // Run all the GC phases.
   //zhangxianlong
   // leakleak::dump_str("GC end");
-
   //end
   // Add the current timings to the cumulative timings.
   cumulative_timings_.AddLogger(*GetTimings());

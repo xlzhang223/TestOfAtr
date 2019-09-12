@@ -169,8 +169,8 @@ void ConcurrentCopying::RunPhases() {
   }
   //zhangxianlong
   
-
-  leakleak::dump_str("ConcurrentCopying");
+  leakleak::gc_begin();
+  leakleak::dump_str("ConcurrentCopying RunPhass");
   
   //end
   FlipThreadRoots();
@@ -196,13 +196,13 @@ void ConcurrentCopying::RunPhases() {
     ReaderMutexLock mu(self, *Locks::mutator_lock_);
     ReclaimPhase();
   }
-  leakleak::gc_end();
+  
   FinishPhase();
   CHECK(is_active_);
   is_active_ = false;
   thread_running_gc_ = nullptr;
   //zhangxianlong
-  
+  leakleak::gc_end();
   //end
 }
 
@@ -686,7 +686,6 @@ class ConcurrentCopying::ImmuneSpaceScanObjVisitor {
 };
 
 // Concurrently mark roots that are guarded by read barriers and process the mark stack.
-//zhangxianlong  need
 void ConcurrentCopying::MarkingPhase() {
   TimingLogger::ScopedTiming split("MarkingPhase", GetTimings());
   if (kVerboseMode) {
@@ -2006,7 +2005,7 @@ inline void ConcurrentCopying::Process(mirror::Object* obj, MemberOffset offset)
       offset,
       expected_ref,
       new_ref));
-  //zhangxianlong
+  //zhangxianlong new_ref or expected_ref
     if(new_ref!=nullptr&&obj!=nullptr)
       leakleak::addedge(obj,new_ref);
     //end
@@ -2020,9 +2019,6 @@ inline void ConcurrentCopying::VisitRoots(
   for (size_t i = 0; i < count; ++i) {
     mirror::Object** root = roots[i];
     mirror::Object* ref = *root;
-    //zhangxianlong
-    // leakleak::dump_obj(ref,__FUNCTION__);
-    //end
     mirror::Object* to_ref = Mark(ref);
     if (to_ref == ref) {
       continue;
@@ -2043,9 +2039,6 @@ template<bool kGrayImmuneObject>
 inline void ConcurrentCopying::MarkRoot(mirror::CompressedReference<mirror::Object>* root) {
   DCHECK(!root->IsNull());
   mirror::Object* const ref = root->AsMirrorPtr();
-  //zhangxianlong
-  // leakleak::dump_obj(ref,__FUNCTION__);
-  //end
   mirror::Object* to_ref = Mark<kGrayImmuneObject>(ref);
   if (to_ref != ref) {
     auto* addr = reinterpret_cast<Atomic<mirror::CompressedReference<mirror::Object>>*>(root);
@@ -2068,13 +2061,6 @@ inline void ConcurrentCopying::VisitRoots(
     mirror::CompressedReference<mirror::Object>* const root = roots[i];
     
     if (!root->IsNull()) {
-      //zhangxianlong
-      // mirror::Object* const ref = root->AsMirrorPtr();
-      // leakleak::dump_obj(ref,__FUNCTION__);
-      // leakleak::dump_str(__FUNCTION__);
-      // leakleak::pushback(ref);
-      //end
-      
       // kGrayImmuneObject is true because this is used for the thread flip.
       MarkRoot</*kGrayImmuneObject*/true>(root);
     }

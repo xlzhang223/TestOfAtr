@@ -35,39 +35,6 @@ namespace art{
 
     namespace leakleak{
 
-        // class msg{
-        //     struct msg_st{
-        //         long int msg_type;
-        //         char text[128];
-        //     };
-        //     struct msg_st data;
-        //     int running = 1;
-        //     int msgid = -1;
-        //     long int msgtype = 0; //注意1
-
-        //     public: std::vector<int> getint(){
-        //         std::vector<int> ret;
-        //         msgid = msgget((key_t)1234, 0666 | IPC_CREAT);
-        //         if(msgid == -1){
-        //             return ret;
-        //         }
-        //         //从队列中获取消息，直到遇到end消息为止
-        //         while(running){
-        //             int f = msgrcv(msgid, (void*)&data, 128, msgtype, IPC_NOWAIT);
-        //             if( f == -1 || f == ENOMSG ){
-        //                 break;
-        //             }
-        //             // std::cout<<"rev:"<<data.text<<"\n"; 
-        //             std::stringstream ss;
-        //             ss<<data.text;
-        //             int x=0;
-        //             ss>>x;
-        //             ret.push_back(x);
-        //         }
-        //         return ret;
-        //     }
-        // };
-
         const int LEN = 128 ;
         int read_time = 0 ;
         int map_time = 0 ;
@@ -144,32 +111,53 @@ namespace art{
             }
             return ret;
         }
+        void put_ans(std::string ans){
+            ans+="\n";
+            FILE *fp = fopen("/storage/self/primary/Download/result.txt","a");
+            if(fp){
+                fwrite(ans.c_str(),sizeof(char),ans.size(),fp);
+                fclose(fp);
+            }
+            return;
+        }
 
     }io;
     
     class Finder{
         private:
+        const int max_deep=16;
         std::unordered_map<mirror::Object*,std::vector<mirror::Object*>> father;
         // std::unordered_map<int,mirror::Object*> map_;
         std::unordered_set<int> _set;
-        std::unordered_multiset<std::string> _set2;
+        std::unordered_set<std::string> _set2;
 
         std::stack<mirror::Object*> tmp;
         std::unordered_set<mirror::Object*> vis;
+        std::string pack;
         int flag=0;
+        std::unordered_map<int,mirror::Object*> to_do;
 
-        void dfs(mirror::Object* now,int dp,int deep){
+        void dfs(mirror::Object* now,int dp,int deep,int p_num){
             if(dp>deep||flag==1) return;
             tmp.push(now);
             vis.insert(now);
-            if(father[now].size()==0||dp >= 10){
-                flag=1;
+            ReaderMutexLock mu(Thread::Current(), *Locks::mutator_lock_);
+            std::string s = now->PrettyTypeOf();
+            int add=0;
+            if(s.find(pack)!= std::string::npos)add++;
+            if(father[now].size()==0&&dp == deep){
                 vis.erase(now);
+                if(p_num<2) return;
+                flag=1;
                 return;
             }
+            int nxt = 0;
             for(auto next:father[now]){
                 if(vis.count(next)==0)
-                    dfs(next,dp+1,deep);
+                    dfs(next,dp+1,deep,p_num+add),++nxt;
+            }
+            if(nxt==0&&dp == deep&&p_num>1){
+                flag=1;
             }
             vis.erase(now);
             if(flag==1) return;
@@ -181,6 +169,7 @@ namespace art{
         void addedge(mirror::Object* u,mirror::Object* v){
             // if(_set.size()==0)return;
             father[u].push_back(v);
+
             ReaderMutexLock mu(Thread::Current(), *Locks::mutator_lock_);
             int t = clock();
             std::string s = u->PrettyTypeOf();
@@ -190,10 +179,11 @@ namespace art{
                 int code = u->IdentityHashCode();
                 t = clock() - t;
                 code_time += t; 
-                if(work(code,u)){
-                    // _set2.erase(_set2.find(s));
-                }
-                
+
+                to_do[code]=u;
+                // if(work(code,u)){
+                //     // _set2.erase(_set2.find(s));
+                // }
             }
         
             // ALOGD("ZHANG,addedge %s to %s",u->PrettyTypeOf().c_str(),v->PrettyTypeOf().c_str());
@@ -202,13 +192,14 @@ namespace art{
         void clear(){
             _set2.clear();
             _set.clear();
+            to_do.clear();
             father.clear();
         }
         
         
 
         void dump_stk(){
-            std::string ret="";
+            std::string ret=pack+":\n";
             ReaderMutexLock mu(Thread::Current(), *Locks::mutator_lock_);
             while (!tmp.empty()){
                 auto it = tmp.top();
@@ -219,43 +210,59 @@ namespace art{
                 st<<it->IdentityHashCode();
                 std::string num="";
                 st>>num;
-                ret+=it->PrettyTypeOf()+"("+num+") <--- ";
+                ret+=it->PrettyTypeOf()+"("+num+") <---\n";
                 t = clock() - t;
                 name_time += t; 
 
             }
-            ALOGD("ZHANG, chian of ref is :  %s",ret.c_str());
+            io.put_ans(ret);
+            // ALOGD("ZHANG, chian of ref is :  %s",ret.c_str());
             return;
         }
 
         int work(int hashcode,mirror::Object* start){
             if(_set.count(hashcode)==0)return 0;
-            // _set.erase(hashcode);
             int deep=1;
             flag=0;
-            while (1){
+            while (deep<max_deep){
                 while (!tmp.empty()) tmp.pop();
                 vis.clear();
-                dfs(start,0,deep);
-                if(flag==1)break;
+                dfs(start,0,deep,0);
+                // dfs(start);
+                if(flag==1){
+                    flag=0;
+                    dump_stk();
+                    break;
+                }
                 deep+=1;
             }
-            dump_stk();
+            
             return 1;
         }
 
+        void work(){
+            for(auto it:to_do){
+                work(it.first,it.second);
+            }
+        }
+
         void addcode(int x){
-            ALOGD("ZHANG,ADD code: %d",x);
+            // ALOGD("ZHANG,ADD code: %d",x);
+            
             _set.insert(x);
         }
 
         void addname(std::string x){
-            ALOGD("ZHANG,ADD name: %s",x.c_str());
+            // ALOGD("ZHANG,ADD name: %s",x.c_str());
             _set2.insert(x);
         }
 
         int getsize(){
             return father.size();
+        }
+
+        void setpack(std::string str){
+            pack=str;
         }
 
     }finder;
@@ -265,7 +272,7 @@ namespace art{
             // F.open("/data/local/tmp/track");
             // F<<cnt++<<" hello_world\n";
             // F.close();
-            ALOGD("ZHANG,THIS IS LOG");
+            // ALOGD("ZHANG,THIS IS LOG");
         }
 
         
@@ -329,7 +336,7 @@ namespace art{
             // char name[LEN] = "noname";
             // GetProcNameByPid(name, LEN, getpid());
             // if(strstr(name,"myapp")!=NULL)
-            ALOGD("ZHANG, %s ",S.c_str());
+            // ALOGD("ZHANG, %s ",S.c_str());
 
         }
 
@@ -337,7 +344,7 @@ namespace art{
             if(!istrace) return;
             char name[LEN] = "noname";
             GetProcNameByPid(name, LEN, getpid());
-            ALOGD("ZHANG, %s is init! init !~~~!~~~!",name);
+            // ALOGD("ZHANG, %s is init! init !~~~!~~~!",name);
         }
          
         // void dump_obj(mirror::Object *obj, std::string s){
@@ -357,29 +364,35 @@ namespace art{
             
             
             std::string str = io.get_app();
+            
             if(strstr(name,str.c_str())!=NULL){
-                ALOGD("ZHANG, GC_BEGIN ,and app name is trace:%s",name);
+                // ALOGD("ZHANG, GC_BEGIN ,and app name is trace:%s",name);
                 istrace = true; 
             }
             else
             {
-                ALOGD("ZHANG, GC_BEGIN ,but this app is not to trace:%s",name);
+                // ALOGD("ZHANG, GC_BEGIN ,but this app is not to trace:%s",name);
                 /* code */
             }
             
                 
             if(!istrace) return;
-
+            finder.setpack(str);
             read_time = 0;
             gc_time = clock();
             name_time = code_time = map_time = 0;
             finder.clear();
             objcnt=0;
             check_file();
+            // std::string sname(name);
+            // sname+=" : ";
+            // io.put_ans(sname);
             // ReaderMutexLock mu(Thread::Current(), *Locks::mutator_lock_);
             // Thread* self = Thread::Current();
             // auto at = Runtime::Current()->GetClassLinker()->FindClass(self, "android/app/activity",
-            //                                           ScopedNullHandle<mirror::ClassLoader>());
+            //                                      f(work(code,u)){
+                //     // _set2.erase(_set2.find(s));
+                // }     ScopedNullHandle<mirror::ClassLoader>());
             // at = nullptr;
             // ALOGD("ZHANG, GC_BEGIN ");
         }
@@ -390,7 +403,8 @@ namespace art{
             if(!istrace) return;
             // gc_time = clock() - gc_time;
             istrace = false; 
-            ALOGD("ZHANG, GC_END,read_time: %d, GC_time: %d, map_time: %d ,name: %d ,code: %d!,objcnt: %d",read_time,gc_time,map_time,name_time,code_time,finder.getsize());
+            // ALOGD("ZHANG, GC_END,read_time: %d, GC_time: %d, map_time: %d ,name: %d ,code: %d!,objcnt: %d",read_time,gc_time,map_time,name_time,code_time,finder.getsize());
+            finder.work();
             finder.clear();
         }
     }

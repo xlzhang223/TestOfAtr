@@ -1239,11 +1239,6 @@ void MarkSweep::SweepArray(accounting::ObjectStack* allocations, bool swap_bitma
             freed.bytes += alloc_space->FreeList(self, chunk_free_pos, chunk_free_buffer);
             chunk_free_pos = 0;
           }
-
-          //zhangxianlong
-          // leakleak::dump_obj(obj,__FUNCTION__);
-          //end
-
           chunk_free_buffer[chunk_free_pos++] = obj;
         }
       } else {
