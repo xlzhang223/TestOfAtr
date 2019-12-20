@@ -727,6 +727,16 @@ bool Thread::Init(ThreadList* thread_list, JavaVMExt* java_vm, JNIEnvExt* jni_en
     }
   }
 
+  //zhang
+  //In orderto get the size of tls32
+  // LOG(WARNING) << "zhang The offset Of Alloc_site: " << AllocSiteOffset<PointerSize::k64>().Int32Value();
+  // LOG(WARNING) << "zhang The offset Of Alloc_site: " << Temp1Offset<PointerSize::k64>().Int32Value();
+  // LOG(WARNING) << "zhang The offset Of Alloc_site: " << Temp2Offset<PointerSize::k64>().Int32Value();
+  // LOG(WARNING) << "zhang The offset Of Alloc_site: " << PtrOffset<PointerSize::k64>().Int32Value();
+  // LOG(WARNING) << "zhang The offset Of Alloc_site: " << HeapOffset<PointerSize::k64>().Int32Value();
+  
+  //<<
+
   thread_list->Register(this);
   return true;
 }
@@ -1986,6 +1996,17 @@ Thread::Thread(bool daemon)
   tlsPtr_.flip_function = nullptr;
   tlsPtr_.thread_local_mark_stack = nullptr;
   tls32_.is_transitioning_to_runnable = false;
+
+  // >> zhang init
+  tlsPtr_.alloc_site = 0xFFFFFFFF;
+  tlsPtr_.temp1 = 0;
+  tlsPtr_.temp2 = 0;
+  // LOG(WARNING)<<"zhang THIRD";
+  tlsPtr_.bitmap_addr = leakleak::Leaktrace::getInstance().get_heap_end();//wrong access
+  tlsPtr_.main_begin = leakleak::Leaktrace::getInstance().get_main_begin();
+  tlsPtr_.main_end = leakleak::Leaktrace::getInstance().get_main_end();
+  // <<
+
 }
 
 bool Thread::IsStillStarting() const {

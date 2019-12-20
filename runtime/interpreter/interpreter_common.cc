@@ -33,7 +33,9 @@
 #include "reflection-inl.h"
 #include "stack.h"
 #include "well_known_classes.h"
-
+//zhang
+#include "leakleak/leakleak.h"
+//end
 namespace art {
 namespace interpreter {
 
@@ -63,6 +65,12 @@ bool DoFieldGet(Thread* self, ShadowFrame& shadow_frame, const Instruction* inst
       return false;
     }
   }
+
+    //zhang
+  if(obj!=nullptr){
+    leakleak::Leaktrace::getInstance().dump_str_ui32(obj.Ptr());
+  }
+  //end
 
   JValue result;
   DoFieldGetCommon<field_type>(self, shadow_frame, obj, f, &result);
@@ -259,6 +267,12 @@ bool DoFieldPut(Thread* self, const ShadowFrame& shadow_frame, const Instruction
       return false;
     }
   }
+
+  //zhang
+  if(obj!=nullptr){
+    leakleak::Leaktrace::getInstance().dump_str_ui32(obj.Ptr());
+  }
+  //end
 
   uint32_t vregA = is_static ? inst->VRegA_21c(inst_data) : inst->VRegA_22c(inst_data);
   JValue value = GetFieldValue<field_type>(shadow_frame, vregA);

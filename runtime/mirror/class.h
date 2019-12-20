@@ -61,6 +61,9 @@ template <typename T> struct PACKED(8) DexCachePair;
 using StringDexCachePair = DexCachePair<String>;
 using StringDexCacheType = std::atomic<StringDexCachePair>;
 
+//zhang class.h
+//end
+
 // C++ mirror of java.lang.Class
 class MANAGED Class FINAL : public Object {
  public:
@@ -568,6 +571,8 @@ class MANAGED Class FINAL : public Object {
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   uint32_t GetClassSize() REQUIRES_SHARED(Locks::mutator_lock_) {
+    //zhang  getsize()
+    //end
     return GetField32<kVerifyFlags>(OFFSET_OF_OBJECT_MEMBER(Class, class_size_));
   }
 
@@ -595,7 +600,8 @@ class MANAGED Class FINAL : public Object {
   static uint32_t PrimitiveClassSize(PointerSize pointer_size) {
     return ComputeClassSize(false, 0, 0, 0, 0, 0, 0, pointer_size);
   }
-
+  //zhang get obj size from class
+  //end
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
            ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
   uint32_t GetObjectSize() REQUIRES_SHARED(Locks::mutator_lock_);

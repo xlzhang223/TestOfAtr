@@ -24,6 +24,12 @@
 #define FRAME_SIZE_SAVE_REFS_AND_ARGS 112
 #define FRAME_SIZE_SAVE_EVERYTHING 192
 
+
+// zhang
+// Offset of field Thread::tlsPtr_.alloc_site
+#define THREAD_ALLOC_SITE_OFFSET 1280
+// end
+
 // Flag for enabling R4 optimization in arm runtime
 // #define ARM_R4_SUSPEND_FLAG
 

@@ -148,6 +148,9 @@ static constexpr size_t kNumRosAllocThreadLocalSizeBracketsInThread = 16;
 
 class Thread {
  public:
+  //zhang
+  ALWAYS_INLINE uint64_t GetAllocSite() { return tlsPtr_.alloc_site; }
+  //end
   static const size_t kStackOverflowImplicitCheckSize;
 
   // Creates a new native thread corresponding to the given managed peer.
@@ -671,6 +674,29 @@ class Thread {
   static ThreadOffset<pointer_size> ExceptionOffset() {
     return ThreadOffsetFromTlsPtr<pointer_size>(OFFSETOF_MEMBER(tls_ptr_sized_values, exception));
   }
+
+  // zhang
+  template<PointerSize pointer_size>
+    static ThreadOffset<pointer_size> AllocSiteOffset() {
+    return ThreadOffsetFromTlsPtr<pointer_size>(OFFSETOF_MEMBER(tls_ptr_sized_values, alloc_site));
+  }
+  template<PointerSize pointer_size>
+    static ThreadOffset<pointer_size> Temp1Offset() {
+    return ThreadOffsetFromTlsPtr<pointer_size>(OFFSETOF_MEMBER(tls_ptr_sized_values, temp1));
+  }
+  template<PointerSize pointer_size>
+    static ThreadOffset<pointer_size> Temp2Offset() {
+    return ThreadOffsetFromTlsPtr<pointer_size>(OFFSETOF_MEMBER(tls_ptr_sized_values, temp2));
+  }
+  template<PointerSize pointer_size>
+    static ThreadOffset<pointer_size> PtrOffset() {
+    return ThreadOffsetFromTlsPtr<pointer_size>(OFFSETOF_MEMBER(tls_ptr_sized_values, bitmap_addr));
+  }
+  template<PointerSize pointer_size>
+    static ThreadOffset<pointer_size> HeapOffset() {
+    return ThreadOffsetFromTlsPtr<pointer_size>(OFFSETOF_MEMBER(tls_ptr_sized_values, main_begin));
+  }
+  // end
 
   template<PointerSize pointer_size>
   static ThreadOffset<pointer_size> PeerOffset() {
@@ -1626,6 +1652,14 @@ class Thread {
 
     // Thread-local mark stack for the concurrent copying collector.
     gc::accounting::AtomicStack<mirror::Object>* thread_local_mark_stack;
+    //zhang
+    uint64_t alloc_site;
+    uint64_t temp1;
+    uint64_t temp2;
+    uint64_t bitmap_addr;
+    uint64_t main_begin;
+    uint64_t main_end;
+    //end
   } tlsPtr_;
 
   // Guards the 'interrupted_' and 'wait_monitor_' members.

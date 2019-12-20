@@ -82,6 +82,29 @@ SpaceBitmap<kAlignment>* SpaceBitmap<kAlignment>::Create(
   return CreateFromMemMap(name, mem_map.release(), heap_begin, heap_capacity);
 }
 
+//zhang 
+//init my_main_bitset  // expected mean real ?
+template<size_t kAlignment>
+SpaceBitmap<kAlignment>* SpaceBitmap<kAlignment>::CreateFromRequestAddress(
+									   const std::string& name,  uint8_t* expected_ptr, uint8_t* heap_begin, size_t heap_capacity) {
+  // Round up since heap_capacity is not necessarily a multiple of kAlignment * kBitsPerWord.
+  const size_t bitmap_size = ComputeBitmapSize(heap_capacity);
+  //LOG(ERROR) << "zhang allocate bitmap_size " << bitmap_size;
+  //LOG(ERROR) << "zhang allocate bitmap_begin " << (uintptr_t)heap_begin;
+  std::string error_msg;
+  std::unique_ptr<MemMap> mem_map(MemMap::MapAnonymous(name.c_str(), expected_ptr, bitmap_size,
+                                                       PROT_READ | PROT_WRITE, false, false,
+                                                       &error_msg));
+  if (UNLIKELY(mem_map.get() == nullptr)) {
+    LOG(ERROR) << "zhang Failed to allocate bitmap " << name << ": " << error_msg;
+    return nullptr;
+  }
+  return CreateFromMemMap(name, mem_map.release(), heap_begin, heap_capacity);
+}
+
+//end
+
+
 template<size_t kAlignment>
 void SpaceBitmap<kAlignment>::SetHeapLimit(uintptr_t new_end) {
   DCHECK_ALIGNED(new_end, kBitsPerIntPtrT * kAlignment);

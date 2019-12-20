@@ -155,8 +155,6 @@ ConcurrentCopying::~ConcurrentCopying() {
 }
 
 void ConcurrentCopying::RunPhases() {
-
-  
   CHECK(kUseBakerReadBarrier || kUseTableLookupReadBarrier);
   CHECK(!is_active_);
   is_active_ = true;
@@ -168,10 +166,8 @@ void ConcurrentCopying::RunPhases() {
     InitializePhase();
   }
   //zhangxianlong
-  
-  leakleak::gc_begin();
-  leakleak::dump_str("ConcurrentCopying RunPhass");
-  
+  leakleak::Leaktrace::getInstance().gc_begin();
+  //leakleak::dump_str("ConcurrentCopying RunPhass");
   //end
   FlipThreadRoots();
   {
@@ -202,7 +198,10 @@ void ConcurrentCopying::RunPhases() {
   is_active_ = false;
   thread_running_gc_ = nullptr;
   //zhangxianlong
-  leakleak::gc_end();
+  {
+    ReaderMutexLock mu(Thread::Current(), *Locks::mutator_lock_);
+    leakleak::Leaktrace::getInstance().gc_end();
+  }
   //end
 }
 
@@ -1456,6 +1455,10 @@ inline void ConcurrentCopying::ProcessMarkStackRef(mirror::Object* to_ref) {
         << " is_marked=" << IsMarked(to_ref);
   }
   bool add_to_live_bytes = false;
+  //zhang
+  // if(to_ref!=nullptr)
+  //     leakleak::Leaktrace::getInstance().addedge(to_ref);
+  //end
   if (region_space_->IsInUnevacFromSpace(to_ref)) {
     // Mark the bitmap only in the GC thread here so that we don't need a CAS.
     if (!kUseBakerReadBarrier || !region_space_bitmap_->Set(to_ref)) {
@@ -1967,6 +1970,10 @@ inline void ConcurrentCopying::Scan(mirror::Object* to_ref) {
   // Disable the read barrier for a performance reason.
   to_ref->VisitReferences</*kVisitNativeRoots*/true, kDefaultVerifyFlags, kWithoutReadBarrier>(
       visitor, visitor);
+  //zhang
+  // if(to_ref!=nullptr)
+  //     leakleak::Leaktrace::getInstance().addedge(to_ref);
+  //end
   if (kDisallowReadBarrierDuringScan && !Runtime::Current()->IsActiveTransaction()) {
     Thread::Current()->ModifyDebugDisallowReadBarrier(-1);
   }
@@ -1987,7 +1994,7 @@ inline void ConcurrentCopying::Process(mirror::Object* obj, MemberOffset offset)
   if (to_ref == ref) {
     //zhangxianlong
     if(ref!=nullptr&&obj!=nullptr)
-      leakleak::addedge(obj,ref);
+      leakleak::Leaktrace::getInstance().addedge(ref);
     //end
     return;
   }
@@ -2007,8 +2014,8 @@ inline void ConcurrentCopying::Process(mirror::Object* obj, MemberOffset offset)
       new_ref));
   //zhangxianlong new_ref or expected_ref
     if(new_ref!=nullptr&&obj!=nullptr)
-      leakleak::addedge(obj,new_ref);
-    //end
+      leakleak::Leaktrace::getInstance().addedge(new_ref);
+    // //end
 }
 
 

@@ -27,6 +27,10 @@ void Thread::InitCpu() {
   CHECK_EQ(THREAD_CARD_TABLE_OFFSET, CardTableOffset<PointerSize::k64>().Int32Value());
   CHECK_EQ(THREAD_EXCEPTION_OFFSET, ExceptionOffset<PointerSize::k64>().Int32Value());
   CHECK_EQ(THREAD_ID_OFFSET, ThinLockIdOffset<PointerSize::k64>().Int32Value());
+
+  // zhang  comp define and calculate
+  CHECK_EQ(THREAD_ALLOC_SITE_OFFSET, AllocSiteOffset<PointerSize::k64>().Int32Value());
+  // end
 }
 
 void Thread::CleanupCpu() {

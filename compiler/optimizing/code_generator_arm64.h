@@ -398,6 +398,9 @@ class CodeGeneratorARM64 : public CodeGenerator {
 
   void GenerateFrameEntry() OVERRIDE;
   void GenerateFrameExit() OVERRIDE;
+  //zhang
+  void genaccessbit(vixl::aarch64::Register obj,int obj_size);
+  //end
 
   vixl::aarch64::CPURegList GetFramePreservedCoreRegisters() const;
   vixl::aarch64::CPURegList GetFramePreservedFPRegisters() const;

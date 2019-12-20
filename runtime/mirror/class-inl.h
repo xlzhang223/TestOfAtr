@@ -732,7 +732,8 @@ inline void Class::CheckObjectAlloc() {
   // DCHECK(!Runtime::Current()->IsStarted() || IsInitializing()) << PrettyClass();
   DCHECK_GE(this->object_size_, sizeof(Object));
 }
-
+//zhang alloc obj from class
+//end
 template<bool kIsInstrumented, bool kCheckAddFinalizer>
 inline ObjPtr<Object> Class::Alloc(Thread* self, gc::AllocatorType allocator_type) {
   CheckObjectAlloc();

@@ -119,10 +119,6 @@ void ZygoteSpace::SweepCallback(size_t num_ptrs, mirror::Object** ptrs, void* ar
       bitmap->Clear(ptrs[i]);
     }
   }
-  //zhangxianlong
-  // for (size_t i = 0; i < num_ptrs; ++i)
-  // leakleak::dump_obj(ptrs[i],__FUNCTION__);
-  //end
 
   // We don't free any actual memory to avoid dirtying the shared zygote pages.
   for (size_t i = 0; i < num_ptrs; ++i) {

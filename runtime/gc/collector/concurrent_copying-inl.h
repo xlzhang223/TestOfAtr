@@ -24,7 +24,9 @@
 #include "gc/space/region_space.h"
 #include "mirror/object-readbarrier-inl.h"
 #include "lock_word.h"
-
+//zhang
+#include "leakleak/leakleak.h"
+//end
 namespace art {
 namespace gc {
 namespace collector {
@@ -134,6 +136,9 @@ inline mirror::Object* ConcurrentCopying::Mark(mirror::Object* from_ref,
       }
       DCHECK(region_space_->IsInToSpace(to_ref) || heap_->non_moving_space_->HasAddress(to_ref))
           << "from_ref=" << from_ref << " to_ref=" << to_ref;
+        //zhang
+        leakleak::Leaktrace::getInstance().dump_str_i_i(from_ref,to_ref);
+        //end
       return to_ref;
     }
     case space::RegionSpace::RegionType::kRegionTypeUnevacFromSpace: {

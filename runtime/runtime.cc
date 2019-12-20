@@ -160,6 +160,11 @@
 #include <android/set_abort_message.h>
 #endif
 
+//zhang
+#include "android-base/stringprintf.h"
+#include <utils/Log.h>
+//end
+
 namespace art {
 
 // If a signal isn't handled properly, enable a handler that attempts to dump the Java stack.
@@ -1087,7 +1092,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   // }
 
   //zhangxianlong
-  // leakleak::dump_init();
+  leakleak::Leaktrace::getInstance().heap_init();
   //end
   XGcOption xgc_option = runtime_options.GetOrDefault(Opt::GcOption);
   heap_ = new gc::Heap(runtime_options.GetOrDefault(Opt::MemoryInitialSize),
@@ -1123,6 +1128,32 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
                        xgc_option.measure_,
                        runtime_options.GetOrDefault(Opt::EnableHSpaceCompactForOOM),
                        runtime_options.GetOrDefault(Opt::HSpaceCompactForOOMMinIntervalsMs));
+
+  //zhang
+  // if(leakleak::get_istrace())LOG(WARNING)<<"zhang FIRST";
+  const uint64_t ca = (leakleak::Leaktrace::getInstance().get_main_end()-leakleak::Leaktrace::getInstance().get_main_begin());
+  // if(leakleak::get_istrace())LOG(WARNING)<<"zhang FIRST"<<ca;
+  if(leakleak::Leaktrace::getInstance().get_main_begin()!=0&&ca>0)
+  heap_->main_access_bitmap_.reset(gc::accounting::ContinuousSpaceBitmap::Create("my bit map"
+  //CreateFromRequestAddress
+  //, reinterpret_cast<uint8_t*>(0x77bdb000), reinterpret_cast<uint8_t*>(0x12c00000)
+  //, reinterpret_cast<uint8_t*>(leakleak::get_heap_end()), reinterpret_cast<uint8_t*>(leakleak::get_main_begin())
+  ,  reinterpret_cast<uint8_t*>(leakleak::Leaktrace::getInstance().get_main_begin())
+  //,reinterpret_cast<uint8_t*>(0x12c00000)
+  // main_space_->Begin()
+  // , 0x40000000 
+  , ca
+  //, heap_->GetMainSpace()->Capacity()
+  ));
+  if(heap_->main_access_bitmap_.get()!=nullptr){
+    leakleak::Leaktrace::getInstance().set_heap_end(reinterpret_cast<uint64_t>(heap_->main_access_bitmap_->Begin()));
+    if(leakleak::Leaktrace::getInstance().get_istrace()){
+      LOG(WARNING)<<"zhang BitMap Name: "<<  heap_->main_access_bitmap_->GetName();
+      LOG(WARNING)<<"zhang bitmap start: "<< reinterpret_cast<uint64_t>(heap_->main_access_bitmap_->Begin());
+    }
+    //ALOGD("zhang bitmap Size: %zu",  heap_->main_access_bitmap_->Size());
+  }
+  //end
 
   if (!heap_->HasBootImageSpace() && !allow_dex_file_fallback_) {
     LOG(ERROR) << "Dex file fallback disabled, cannot continue without image.";

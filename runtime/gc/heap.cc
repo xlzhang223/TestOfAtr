@@ -509,6 +509,29 @@ Heap::Heap(size_t initial_size,
   uint8_t* heap_begin = continuous_spaces_.front()->Begin();
   uint8_t* heap_end = continuous_spaces_.back()->Limit();
   size_t heap_capacity = heap_end - heap_begin;
+  
+  //zhang log to find heap info
+  if(leakleak::Leaktrace::getInstance().get_istrace()){
+    leakleak::Leaktrace::getInstance().set_main_begin(0);
+    leakleak::Leaktrace::getInstance().set_main_end(0);
+    LOG(WARNING)<<"zhang SECOND";
+      for (auto& lt_csp: continuous_spaces_) {
+        if(strstr(lt_csp->GetName(),"main")!=NULL){
+          leakleak::Leaktrace::getInstance().set_main_begin(reinterpret_cast<uint64_t>(lt_csp->Begin()));
+          leakleak::Leaktrace::getInstance().set_main_end(reinterpret_cast<uint64_t>(lt_csp->End()));
+        }
+        LOG(WARNING)<<"zhang Space Name:" << (lt_csp->GetName());
+        LOG(WARNING)<<"zhang Space_start: " << reinterpret_cast<uint64_t>(lt_csp->Begin());
+        LOG(WARNING)<<"zhang Space_end: " <<  reinterpret_cast<uint64_t>(lt_csp->End());
+        //LOG(WARNING)<<"zhang Space_lim: " <<  reinterpret_cast<uint64_t>(lt_csp->Limit());
+      }
+    //leakleak::set_heap_end(reinterpret_cast<uint64_t>(heap_end));
+    LOG(WARNING)<<"zhang heap_begin: " <<  reinterpret_cast<uint64_t>(heap_begin);
+    LOG(WARNING)<<"zhang heap_end: " <<  reinterpret_cast<uint64_t>(heap_end);
+    LOG(WARNING)<<"zhang heap_capacity: " <<  (heap_capacity);
+  }
+  //end
+
   // Remove the main backup space since it slows down the GC to have unused extra spaces.
   // TODO: Avoid needing to do this.
   if (main_space_backup_.get() != nullptr) {

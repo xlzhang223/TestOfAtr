@@ -1271,11 +1271,6 @@ void MarkSweep::SweepArray(accounting::ObjectStack* allocations, bool swap_bitma
       }
       if (!large_mark_objects->Test(obj)) {
         ++freed_los.objects;
-
-        //zhangxianlong
-        // leakleak::dump_obj(obj,__FUNCTION__);
-        //end
-
         freed_los.bytes += large_object_space->Free(self, obj);
       }
     }
@@ -1400,9 +1395,6 @@ void MarkSweep::ProcessMarkStackParallel(size_t thread_count) {
 // Scan anything that's on the mark stack.
 void MarkSweep::ProcessMarkStack(bool paused) {
   TimingLogger::ScopedTiming t(paused ? "(Paused)ProcessMarkStack" : __FUNCTION__, GetTimings());
-  //zhangxianlong
-  // leakleak::dump_str(__FUNCTION__);
-  //end
   size_t thread_count = GetThreadCount(paused);
   if (kParallelProcessMarkStack && thread_count > 1 &&
       mark_stack_->Size() >= kMinimumParallelMarkStackSize) {

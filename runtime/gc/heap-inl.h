@@ -212,8 +212,9 @@ inline mirror::Object* Heap::AllocObjectWithAllocator(Thread* self,
   self->VerifyStack();
   
   
-  //zhangxianlong
-  //leakleak::dump_obj(obj.Ptr(),"alloc obj");
+  //zhangxianlong alloc new obj
+  if(byte_count > 64)
+    leakleak::Leaktrace::getInstance().new_obj(obj.Ptr());
   //end
   
 

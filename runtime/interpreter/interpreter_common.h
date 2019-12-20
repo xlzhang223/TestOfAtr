@@ -54,6 +54,9 @@
 #include "thread.h"
 #include "unstarted_runtime.h"
 #include "well_known_classes.h"
+//zhang
+#include "leakleak/leakleak.h"
+//end
 
 namespace art {
 namespace interpreter {
@@ -168,6 +171,11 @@ static inline bool DoInvoke(Thread* self,
   const uint32_t method_idx = (is_range) ? inst->VRegB_3rc() : inst->VRegB_35c();
   const uint32_t vregC = (is_range) ? inst->VRegC_3rc() : inst->VRegC_35c();
   ObjPtr<mirror::Object> receiver = (type == kStatic) ? nullptr : shadow_frame.GetVRegReference(vregC);
+  //zhang
+  if(receiver!=nullptr){
+    leakleak::Leaktrace::getInstance().dump_str_ui32(receiver.Ptr());
+  }
+  //end
   ArtMethod* sf_method = shadow_frame.GetMethod();
   ArtMethod* const called_method = FindMethodFromCode<type, do_access_check>(
       method_idx, &receiver, sf_method, self);

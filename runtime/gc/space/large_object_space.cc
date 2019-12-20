@@ -182,10 +182,6 @@ void LargeObjectMapSpace::SetAllLargeObjectsAsZygoteObjects(Thread* self) {
 size_t LargeObjectMapSpace::Free(Thread* self, mirror::Object* ptr) {
   MutexLock mu(self, lock_);
 
-  //zhangxianlong
-  // leakleak::dump_obj(ptr,__FUNCTION__);
-  //end
-
   auto it = large_objects_.find(ptr);
   if (UNLIKELY(it == large_objects_.end())) {
     ScopedObjectAccess soa(self);
@@ -216,12 +212,6 @@ size_t LargeObjectMapSpace::AllocationSize(mirror::Object* obj, size_t* usable_s
 
 size_t LargeObjectSpace::FreeList(Thread* self, size_t num_ptrs, mirror::Object** ptrs) {
   size_t total = 0;
-
-  //zhangxianlong
-  // for (size_t i = 0; i < num_ptrs; i++)
-  //   leakleak::dump_obj(ptrs[i],__FUNCTION__);
-  //end
-
   for (size_t i = 0; i < num_ptrs; ++i) {
     if (kDebugSpaces) {
       CHECK(Contains(ptrs[i]));
@@ -410,11 +400,6 @@ void FreeListSpace::RemoveFreePrev(AllocationInfo* info) {
 }
 
 size_t FreeListSpace::Free(Thread* self, mirror::Object* obj) {
-
-  //zhangxianlong
-  // leakleak::dump_obj(obj,__FUNCTION__);
-  //end
-
   MutexLock mu(self, lock_);
   DCHECK(Contains(obj)) << reinterpret_cast<void*>(Begin()) << " " << obj << " "
                         << reinterpret_cast<void*>(End());
@@ -599,11 +584,6 @@ void LargeObjectSpace::SweepCallback(size_t num_ptrs, mirror::Object** ptrs, voi
       bitmap->Clear(ptrs[i]);
     }
   }
-  //zhangxianlong
-  // for (size_t i = 0; i < num_ptrs; ++i)
-  // leakleak::dump_obj(ptrs[i],__FUNCTION__);
-  //end
-
   context->freed.objects += num_ptrs;
   context->freed.bytes += space->FreeList(self, num_ptrs, ptrs);
 }

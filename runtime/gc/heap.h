@@ -194,7 +194,11 @@ class Heap {
        uint64_t min_interval_homogeneous_space_compaction_by_oom);
 
   ~Heap();
-
+  //zhang
+  space::MallocSpace* GetMainSpace(){
+    return main_space_;
+  }
+  //end
   // Allocates and initializes storage for an object instance.
   template <bool kInstrumented, typename PreFenceVisitor>
   mirror::Object* AllocObject(Thread* self,
@@ -823,7 +827,11 @@ class Heap {
   void RemoveGcPauseListener();
 
   const Verification* GetVerification() const;
+  //zhangxianlong
+  // bitmap of this heap
+  std::unique_ptr<gc::accounting::ContinuousSpaceBitmap> main_access_bitmap_;
 
+  //end
  private:
   class ConcurrentGCTask;
   class CollectorTransitionTask;

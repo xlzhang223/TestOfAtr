@@ -44,6 +44,10 @@ using vixl::EmissionCheckScope;
 #error "ARM64 Codegen VIXL macro-assembler macro already defined."
 #endif
 
+//zhang
+#include "leakleak/leakleak.h"
+//end
+
 namespace art {
 
 template<class MirrorType>
@@ -99,6 +103,10 @@ constexpr bool kBakerReadBarrierLinkTimeThunksEnableForGcRoots = true;
 // loads with large offsets need a fixed register to limit the number of link-time
 // thunks we generate. For these and similar cases, we want to reserve a specific
 // register that's neither callee-save nor an argument register. We choose x15.
+
+
+
+
 inline Location FixedTempLocation() {
   return Location::RegisterLocation(x15.GetCode());
 }
@@ -1525,7 +1533,100 @@ void ParallelMoveResolverARM64::EmitMove(size_t index) {
   MoveOperands* move = moves_[index];
   codegen_->MoveLocation(move->GetDestination(), move->GetSource(), Primitive::kPrimVoid);
 }
+//zhang all of invoke 
 
+void CodeGeneratorARM64::genaccessbit(Register obj,int obj_size = 0){
+  auto leak = leakleak::Leaktrace::getInstance();
+  if(leak.get_istrace()&&leak.get_main_end()>0&&
+      leak.get_main_begin()>0&&leak.get_heap_end()>0){
+  //locations->AddRegisterTemps(3);
+  //int n = locations->GetTempCount();
+  //leakleak::log_app_name();
+  if(obj_size !=0 && obj_size < 512) return;
+  // {
+  // uint32_t obj_size =0; 
+  //   ReaderMutexLock mu(Thread::Current(), *Locks::mutator_lock_);
+  //   ObjPtr<mirror::Class> class_ptr = field_info.GetField()->GetDeclaringClass();
+  //   obj_size = class_ptr -> GetObjectSize();
+  // }
+  vixl::aarch64::Label lable_zhang;
+  uint64_t temp1=2440;//,temp2=2448,temp3=2456;//,temp4=2464;//,temp5=2472;
+  //UseScratchRegisterScope temps(GetVIXLAssembler());
+  //Register obj = vixl::aarch64::w1;
+  Register Tr = vixl::aarch64::x19;
+  Register r1 = vixl::aarch64::x15;//XRegisterFrom(Location::RequiresRegister());//temps.AcquireX();//vixl::aarch64::x20;
+  Register r2 = vixl::aarch64::x17;
+  Register r3 = vixl::aarch64::x16;//XRegisterFrom(Location::RequiresRegister());//temps.AcquireX();//vixl::aarch64::x22;   // 64 temp reg
+  // Register r4 = vixl::aarch64::x22; //XRegisterFrom(Location::RequiresRegister());//temps.AcquireX();//vixl::aarch64::x23;   // 64 temp reg
+  //__ Push(r3);
+    
+    // __ Str(r3, MemOperand(Tr, temp3));
+    // __ Sub(sp,sp,16);
+    // __ Str(r3, MemOperand(sp));
+
+
+//   __ B(&lable_zhang); //ingnore access bit  debug!! 
+    __ Mov(r3,leak.get_main_begin());
+    __ Cmp(r3,obj);//"compare with int"
+    __ B(le, &lable_zhang);
+    __ Mov(r2,leak.get_main_end());
+    __ Cmp(obj,r2);//"compare with int"
+    __ B(ge, &lable_zhang);
+  
+
+    __ Ldr(r2,MemOperand(Tr,temp1));
+    __ Cmp(r2,obj);
+    __ B(eq, &lable_zhang);
+    //store reg to get temp
+    //__ Str(r1,MemOperand(Tr,temp1));
+    //__ Str(r2,MemOperand(Tr,temp2));
+    
+    __ Sub(sp,sp,16);
+    __ Str(r1, MemOperand(sp));
+    // __ Sub(sp,sp,16);
+    // __ Str(r2, MemOperand(sp));
+
+  // __ Mov(r3,leakleak::get_main_begin());
+  __ Sub(r3,obj.X(),r3);//r3 -> obj offset
+  __ Lsr(r3,r3,3);//offest>>3  byte
+  __ And(r1,r3,7);//off>>3 % 8
+  __ Lsr(r3,r3,3);//offest>>6 {id of int-64}->heap_begin
+  __ Mov(r2,leak.get_heap_end());
+  // __ Ldr(r4,MemOperand(Tr,bit_begin));//bitmap_addr
+  __ Add(r2,r2,r3);//r4 is wirte_place
+  //__ Str(bitmap_begin,MemOperand(Tr,temp2));//temp2 is wirte_place
+
+  __ Mov(r3,1);
+  __ Lsl(r3,r3,r1);
+  // hold write place
+  //__ Ldr(heap_begin,MemOperand(Tr,temp2));
+  __ Ldrsb(r1.W(),MemOperand(r2));
+  __ Orr(r1.W(),r1.W(),r3.W());
+  //__ Ldr(heap_begin,MemOperand(Tr,temp2));
+  __ Strb(r1.W(),MemOperand(r2));
+
+
+  //__ Ldr(r1,MemOperand(Tr,temp1));
+  //__ Ldr(r2,MemOperand(Tr,temp2));
+  // __ Ldr(r2, MemOperand(sp));
+  // __ Add(sp,sp,16);
+  __ Ldr(r1, MemOperand(sp));
+  __ Add(sp,sp,16);
+
+
+  __ Str(obj.X(),MemOperand(Tr,temp1));
+  __ Bind(&lable_zhang);
+  // __ Mov(r3,obj.X());
+  //__ Ldr(r3,MemOperand(Tr, temp3));
+  // __ Ldr(r3, MemOperand(sp));
+  // __ Add(sp,sp,16);
+
+  
+  }
+
+}
+
+//end
 void CodeGeneratorARM64::GenerateFrameEntry() {
   MacroAssembler* masm = GetVIXLAssembler();
   __ Bind(&frame_entry_label_);
@@ -1575,6 +1676,14 @@ void CodeGeneratorARM64::GenerateFrameEntry() {
       __ Str(wzr, MemOperand(sp, GetStackOffsetOfShouldDeoptimizeFlag()));
     }
   }
+
+  //zhang bit access
+  //leakleak::log_app_name();
+  genaccessbit(vixl::aarch64::w1);
+
+
+  //end
+
 }
 
 void CodeGeneratorARM64::GenerateFrameExit() {
@@ -1622,7 +1731,8 @@ void CodeGeneratorARM64::AddLocationAsTemp(Location location, LocationSummary* l
     UNIMPLEMENTED(FATAL) << "AddLocationAsTemp not implemented for location " << location;
   }
 }
-
+//zhang maybe how to get temp reg
+//end
 void CodeGeneratorARM64::MarkGCCard(Register object, Register value, bool value_can_be_null) {
   UseScratchRegisterScope temps(GetVIXLAssembler());
   Register card = temps.AcquireX();
@@ -1893,7 +2003,8 @@ void CodeGeneratorARM64::MoveLocation(Location destination,
     }
   }
 }
-
+//zhang how to load byte   
+//end
 void CodeGeneratorARM64::Load(Primitive::Type type,
                               CPURegister dst,
                               const MemOperand& src) {
@@ -2313,7 +2424,8 @@ void InstructionCodeGeneratorARM64::HandleFieldGet(HInstruction* instruction,
   uint32_t offset = field_info.GetFieldOffset().Uint32Value();
   Primitive::Type field_type = field_info.GetFieldType();
   MemOperand field = HeapOperand(InputRegisterAt(instruction, 0), field_info.GetFieldOffset());
-
+  
+  
   if (field_type == Primitive::kPrimNot && kEmitCompilerReadBarrier && kUseBakerReadBarrier) {
     // Object FieldGet with Baker's read barrier case.
     // /* HeapReference<Object> */ out = *(base + offset)
@@ -2332,6 +2444,16 @@ void InstructionCodeGeneratorARM64::HandleFieldGet(HInstruction* instruction,
         field_info.IsVolatile());
   } else {
     // General case.
+    //zhang    get
+    uint32_t obj_size =0; 
+    // {
+    //   ReaderMutexLock mu(Thread::Current(), *Locks::mutator_lock_);
+    //   ObjPtr<mirror::Class> class_ptr = field_info.GetField()->GetDeclaringClass();
+    //   obj_size = class_ptr -> GetObjectSize();
+    // }
+    codegen_->genaccessbit(InputRegisterAt(instruction, 0),obj_size);//,locations);
+    //codegen_->genaccessbit(InputRegisterAt(instruction, 0));
+    //end
     if (field_info.IsVolatile()) {
       // Note that a potential implicit null check is handled in this
       // CodeGeneratorARM64::LoadAcquire call.
@@ -2372,6 +2494,7 @@ void InstructionCodeGeneratorARM64::HandleFieldSet(HInstruction* instruction,
   DCHECK(instruction->IsInstanceFieldSet() || instruction->IsStaticFieldSet());
 
   Register obj = InputRegisterAt(instruction, 0);
+  
   CPURegister value = InputCPURegisterOrZeroRegAt(instruction, 1);
   CPURegister source = value;
   Offset offset = field_info.GetFieldOffset();
@@ -2404,6 +2527,17 @@ void InstructionCodeGeneratorARM64::HandleFieldSet(HInstruction* instruction,
   if (CodeGenerator::StoreNeedsWriteBarrier(field_type, instruction->InputAt(1))) {
     codegen_->MarkGCCard(obj, Register(value), value_can_be_null);
   }
+  //else{
+    //zhang
+   uint32_t obj_size =0; 
+    // {
+    //   ReaderMutexLock mu(Thread::Current(), *Locks::mutator_lock_);
+    //   ObjPtr<mirror::Class> class_ptr = field_info.GetField()->GetDeclaringClass();
+    //   obj_size = class_ptr -> GetObjectSize();
+    // }
+    codegen_->genaccessbit(InputRegisterAt(instruction, 0),obj_size);
+    //end
+  //}
 }
 
 void InstructionCodeGeneratorARM64::HandleBinaryOp(HBinaryOperation* instr) {
@@ -2745,6 +2879,7 @@ void LocationsBuilderARM64::VisitArrayGet(HArrayGet* instruction) {
 void InstructionCodeGeneratorARM64::VisitArrayGet(HArrayGet* instruction) {
   Primitive::Type type = instruction->GetType();
   Register obj = InputRegisterAt(instruction, 0);
+  
   LocationSummary* locations = instruction->GetLocations();
   Location index = locations->InAt(1);
   Location out = locations->Out();
@@ -2783,6 +2918,11 @@ void InstructionCodeGeneratorARM64::VisitArrayGet(HArrayGet* instruction) {
     }
   } else {
     // General case.
+
+    //zhang
+   // if(type == Primitive::kPrimNot)  
+    codegen_->genaccessbit(obj);
+     //end
     MemOperand source = HeapOperand(obj);
     Register length;
     if (maybe_compressed_char_at) {
@@ -2869,6 +3009,7 @@ void InstructionCodeGeneratorARM64::VisitArrayGet(HArrayGet* instruction) {
         codegen_->MaybeGenerateReadBarrierSlow(instruction, out, out, obj_loc, offset, index);
       }
     }
+    
   }
 }
 
@@ -2929,6 +3070,7 @@ void InstructionCodeGeneratorARM64::VisitArraySet(HArraySet* instruction) {
   MacroAssembler* masm = GetVIXLAssembler();
 
   if (!needs_write_barrier) {
+    
     DCHECK(!may_need_runtime_call_for_type_check);
     if (index.IsConstant()) {
       offset += Int64ConstantFrom(index) << Primitive::ComponentSizeShift(value_type);
@@ -2958,6 +3100,11 @@ void InstructionCodeGeneratorARM64::VisitArraySet(HArraySet* instruction) {
       EmissionCheckScope guard(GetVIXLAssembler(), kMaxMacroInstructionSizeInBytes);
       codegen_->Store(value_type, value, destination);
       codegen_->MaybeRecordImplicitNullCheck(instruction);
+
+      //zhang
+      //if(value_type == Primitive::kPrimNot) 
+     codegen_->genaccessbit(array);
+      //end
     }
   } else {
     DCHECK(!instruction->GetArray()->IsIntermediateAddress());
@@ -3816,6 +3963,7 @@ void LocationsBuilderARM64::VisitInstanceFieldGet(HInstanceFieldGet* instruction
 
 void InstructionCodeGeneratorARM64::VisitInstanceFieldGet(HInstanceFieldGet* instruction) {
   HandleFieldGet(instruction, instruction->GetFieldInfo());
+  
 }
 
 void LocationsBuilderARM64::VisitInstanceFieldSet(HInstanceFieldSet* instruction) {
@@ -3824,6 +3972,7 @@ void LocationsBuilderARM64::VisitInstanceFieldSet(HInstanceFieldSet* instruction
 
 void InstructionCodeGeneratorARM64::VisitInstanceFieldSet(HInstanceFieldSet* instruction) {
   HandleFieldSet(instruction, instruction->GetFieldInfo(), instruction->GetValueCanBeNull());
+  
 }
 
 // Temp is used for read barrier.
@@ -4538,6 +4687,10 @@ void CodeGeneratorARM64::GenerateVirtualCall(HInvokeVirtual* invoke, Location te
   // intrinsics may have put the receiver in a different register. In the intrinsics
   // slow path, the arguments have been moved to the right place, so here we are
   // guaranteed that the receiver is the first register of the calling convention.
+
+  //zhang  virtualcall
+  //end
+
   InvokeDexCallingConvention calling_convention;
   Register receiver = calling_convention.GetRegisterAt(0);
   Register temp = XRegisterFrom(temp_in);

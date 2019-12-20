@@ -1469,6 +1469,9 @@ END art_quick_aput_obj
 ENTRY \name
     SETUP_SAVE_REFS_ONLY_FRAME        // save callee saves in case of GC
     mov    x1, xSELF                  // pass Thread::Current
+     // zhang
+    str    lr, [xSELF, #THREAD_ALLOC_SITE_OFFSET] 
+    // end
     bl     \entrypoint                // (uint32_t type_idx, Method* method, Thread*)
     RESTORE_SAVE_REFS_ONLY_FRAME
     \return
@@ -1481,6 +1484,9 @@ END \name
 ENTRY \name
     SETUP_SAVE_REFS_ONLY_FRAME        // save callee saves in case of GC
     mov    x2, xSELF                  // pass Thread::Current
+     // zhang
+    str    lr, [xSELF, #THREAD_ALLOC_SITE_OFFSET]
+    // end
     bl     \entrypoint                // (uint32_t type_idx, Method* method, Thread*)
     RESTORE_SAVE_REFS_ONLY_FRAME
     \return
@@ -1493,6 +1499,9 @@ END \name
 ENTRY \name
     SETUP_SAVE_REFS_ONLY_FRAME        // save callee saves in case of GC
     mov    x3, xSELF                  // pass Thread::Current
+     // zhang
+    str    lr, [xSELF, #THREAD_ALLOC_SITE_OFFSET] 
+    // end
     bl     \entrypoint
     RESTORE_SAVE_REFS_ONLY_FRAME
     \return
@@ -1505,6 +1514,9 @@ END \name
 ENTRY \name
     SETUP_SAVE_REFS_ONLY_FRAME        // save callee saves in case of GC
     mov    x4, xSELF                  // pass Thread::Current
+     // zhang
+    str    lr, [xSELF, #THREAD_ALLOC_SITE_OFFSET] 
+    // end
     bl     \entrypoint                //
     RESTORE_SAVE_REFS_ONLY_FRAME
     \return

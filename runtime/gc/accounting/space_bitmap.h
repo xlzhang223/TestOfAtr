@@ -54,6 +54,10 @@ class SpaceBitmap {
   static SpaceBitmap* CreateFromMemMap(const std::string& name, MemMap* mem_map,
                                        uint8_t* heap_begin, size_t heap_capacity);
 
+  //zhang 
+  static SpaceBitmap* CreateFromRequestAddress(const std::string& name, uint8_t* expected_ptr, uint8_t* heap_begin, size_t heap_capacity);
+  //end
+  
   ~SpaceBitmap();
 
   // <offset> is the difference from .base to a pointer address.

@@ -919,6 +919,11 @@ END art_quick_aput_obj
 ENTRY \name
     SETUP_SAVE_REFS_ONLY_FRAME r1     @ save callee saves in case of GC
     mov    r1, r9                     @ pass Thread::Current
+
+    // zhang
+    str    lr, [r9, #THREAD_ALLOC_SITE_OFFSET] @ store allocation site
+    // end
+
     bl     \entrypoint     @ (uint32_t type_idx, Method* method, Thread*)
     RESTORE_SAVE_REFS_ONLY_FRAME
     \return
@@ -931,6 +936,9 @@ END \name
 ENTRY \name
     SETUP_SAVE_REFS_ONLY_FRAME r2     @ save callee saves in case of GC
     mov    r2, r9                     @ pass Thread::Current
+    // zhang
+    str    lr, [r9, #THREAD_ALLOC_SITE_OFFSET] @ store allocation site
+    // end
     bl     \entrypoint     @ (uint32_t type_idx, Method* method, Thread*)
     RESTORE_SAVE_REFS_ONLY_FRAME
     \return
@@ -943,6 +951,9 @@ END \name
 ENTRY \name
     SETUP_SAVE_REFS_ONLY_FRAME r3     @ save callee saves in case of GC
     mov    r3, r9                     @ pass Thread::Current
+    // zhang
+    str    lr, [r9, #THREAD_ALLOC_SITE_OFFSET] @ store allocation site
+    // end
     @ (uint32_t type_idx, Method* method, int32_t component_count, Thread*)
     bl     \entrypoint
     RESTORE_SAVE_REFS_ONLY_FRAME
@@ -955,6 +966,11 @@ END \name
     .extern \entrypoint
 ENTRY \name
     SETUP_SAVE_REFS_ONLY_FRAME r12    @ save callee saves in case of GC
+
+    // zhang
+    str    lr, [r9, #THREAD_ALLOC_SITE_OFFSET] @ store allocation site
+    // end
+
     str    r9, [sp, #-16]!            @ expand the frame and pass Thread::Current
     .cfi_adjust_cfa_offset 16
     bl     \entrypoint

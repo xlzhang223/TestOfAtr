@@ -34,6 +34,11 @@
 #include "utils/jni_macro_assembler.h"
 #include "offsets.h"
 
+
+//zhang
+// arm Instructions we can use
+//end
+
 namespace art {
 namespace arm {
 
