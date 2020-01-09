@@ -600,7 +600,7 @@ class MANAGED Class FINAL : public Object {
   static uint32_t PrimitiveClassSize(PointerSize pointer_size) {
     return ComputeClassSize(false, 0, 0, 0, 0, 0, 0, pointer_size);
   }
-  //zhang get obj size from class
+  // get obj size from class
   //end
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
            ReadBarrierOption kReadBarrierOption = kWithReadBarrier>

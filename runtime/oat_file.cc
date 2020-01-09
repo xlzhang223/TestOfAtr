@@ -1480,6 +1480,7 @@ const OatFile::OatMethod OatFile::OatClass::GetOatMethod(uint32_t method_index) 
 void OatFile::OatMethod::LinkMethod(ArtMethod* method) const {
   CHECK(method != nullptr);
   method->SetEntryPointFromQuickCompiledCode(GetQuickCode());
+  //zhang
 }
 
 bool OatFile::IsPic() const {

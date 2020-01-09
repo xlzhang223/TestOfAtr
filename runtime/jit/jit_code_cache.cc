@@ -633,6 +633,9 @@ uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
                      reinterpret_cast<char*>(roots_data + data_size));
     }
     method_code_map_.Put(code_ptr, method);
+    //zhang maybe map<method,ptr>?but how to get ptr ??? lr is ptr?
+    leakleak::Leaktrace::getInstance().put_jit(code_ptr,ArtMethod::PrettyMethod(method),osr);
+    //end 
     if (osr) {
       number_of_osr_compilations_++;
       osr_code_map_.Put(method, code_ptr);
@@ -646,14 +649,24 @@ uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
       GetLiveBitmap()->AtomicTestAndSet(FromCodeToAllocation(code_ptr));
     }
     last_update_time_ns_.StoreRelease(NanoTime());
-    VLOG(jit)
-        << "JIT added (osr=" << std::boolalpha << osr << std::noboolalpha << ") "
+     VLOG(jit)<< "JIT zhang added (osr=" << std::boolalpha << osr << std::noboolalpha << ") "
         << ArtMethod::PrettyMethod(method) << "@" << method
         << " ccache_size=" << PrettySize(CodeCacheSizeLocked()) << ": "
         << " dcache_size=" << PrettySize(DataCacheSizeLocked()) << ": "
         << reinterpret_cast<const void*>(method_header->GetEntryPoint()) << ","
         << reinterpret_cast<const void*>(method_header->GetEntryPoint() +
                                          method_header->GetCodeSize());
+    //zhang
+    // if(leakleak::Leaktrace::getInstance().need_jitinfo()){
+    //   leakleak::Leaktrace::getInstance().jit_info << "JIT added (osr=" << std::boolalpha << osr << std::noboolalpha << ") "
+    //     << ArtMethod::PrettyMethod(method) << "@" << method
+    //     << " ccache_size=" << PrettySize(CodeCacheSizeLocked()) << ": "
+    //     << " dcache_size=" << PrettySize(DataCacheSizeLocked()) << ": "
+    //     << reinterpret_cast<const void*>(method_header->GetEntryPoint()) << ","
+    //     << reinterpret_cast<const void*>(method_header->GetEntryPoint() +
+    //                                      method_header->GetCodeSize());
+    // }
+    //end
     histogram_code_memory_use_.AddValue(code_size);
     if (code_size > kCodeSizeLogThreshold) {
       LOG(INFO) << "JIT allocated "

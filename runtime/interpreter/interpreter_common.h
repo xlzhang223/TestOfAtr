@@ -130,6 +130,9 @@ static inline bool DoFastInvoke(Thread* self,
   ObjPtr<mirror::Object> receiver = (type == kStatic)
       ? nullptr
       : shadow_frame.GetVRegReference(vregC);
+  if(receiver!=nullptr){
+    leakleak::Leaktrace::getInstance().interpreter_touch_obj(receiver.Ptr());
+  }
   ArtMethod* sf_method = shadow_frame.GetMethod();
   ArtMethod* const called_method = FindMethodFromCode<type, false>(
       method_idx, &receiver, sf_method, self);
@@ -173,7 +176,7 @@ static inline bool DoInvoke(Thread* self,
   ObjPtr<mirror::Object> receiver = (type == kStatic) ? nullptr : shadow_frame.GetVRegReference(vregC);
   //zhang
   if(receiver!=nullptr){
-    leakleak::Leaktrace::getInstance().dump_str_ui32(receiver.Ptr());
+    leakleak::Leaktrace::getInstance().interpreter_touch_obj(receiver.Ptr());
   }
   //end
   ArtMethod* sf_method = shadow_frame.GetMethod();
@@ -239,6 +242,11 @@ static inline bool DoInvokeVirtualQuick(Thread* self, ShadowFrame& shadow_frame,
     ThrowNullPointerExceptionFromDexPC();
     return false;
   }
+  //zhang
+  if(receiver!=nullptr){
+    leakleak::Leaktrace::getInstance().interpreter_touch_obj(receiver.Ptr());
+  }
+  //end
   const uint32_t vtable_idx = (is_range) ? inst->VRegB_3rc() : inst->VRegB_35c();
   // Debug code for b/31357497. To be removed.
   if (kUseReadBarrier) {

@@ -165,8 +165,11 @@ void ConcurrentCopying::RunPhases() {
     ReaderMutexLock mu(self, *Locks::mutator_lock_);
     InitializePhase();
   }
+  {
+    // WriterMutexLock mu(self, *Locks::mutator_lock_);
+    leakleak::Leaktrace::getInstance().gc_begin();
+  }
   //zhangxianlong
-  leakleak::Leaktrace::getInstance().gc_begin();
   //leakleak::dump_str("ConcurrentCopying RunPhass");
   //end
   FlipThreadRoots();
@@ -199,7 +202,7 @@ void ConcurrentCopying::RunPhases() {
   thread_running_gc_ = nullptr;
   //zhangxianlong
   {
-    ReaderMutexLock mu(Thread::Current(), *Locks::mutator_lock_);
+    // WriterMutexLock mu(Thread::Current(), *Locks::mutator_lock_);
     leakleak::Leaktrace::getInstance().gc_end();
   }
   //end
@@ -1455,10 +1458,10 @@ inline void ConcurrentCopying::ProcessMarkStackRef(mirror::Object* to_ref) {
         << " is_marked=" << IsMarked(to_ref);
   }
   bool add_to_live_bytes = false;
-  //zhang
+  // zhang
   // if(to_ref!=nullptr)
   //     leakleak::Leaktrace::getInstance().addedge(to_ref);
-  //end
+  // end
   if (region_space_->IsInUnevacFromSpace(to_ref)) {
     // Mark the bitmap only in the GC thread here so that we don't need a CAS.
     if (!kUseBakerReadBarrier || !region_space_bitmap_->Set(to_ref)) {
@@ -1993,8 +1996,8 @@ inline void ConcurrentCopying::Process(mirror::Object* obj, MemberOffset offset)
 
   if (to_ref == ref) {
     //zhangxianlong
-    if(ref!=nullptr&&obj!=nullptr)
-      leakleak::Leaktrace::getInstance().addedge(ref);
+    // if(ref!=nullptr&&obj!=nullptr)
+    //   leakleak::Leaktrace::getInstance().addedge(ref);
     //end
     return;
   }
@@ -2013,8 +2016,8 @@ inline void ConcurrentCopying::Process(mirror::Object* obj, MemberOffset offset)
       expected_ref,
       new_ref));
   //zhangxianlong new_ref or expected_ref
-    if(new_ref!=nullptr&&obj!=nullptr)
-      leakleak::Leaktrace::getInstance().addedge(new_ref);
+    // if(new_ref!=nullptr&&obj!=nullptr)
+    //   leakleak::Leaktrace::getInstance().addedge(new_ref);
     // //end
 }
 

@@ -1,40 +1,48 @@
-import java.util.List;
-import java.util.LinkedList;
-import java.math.*;
 import java.util.*;
 public class ListLeak
 {
-	
-	String name;
 	int id;
 	int[] something;
-	
 	void set_id(int x){
 		id = x;
 	}
 	ListLeak(){
-		name = "zhang";
 		id = 1;
-		something = new int[100];
+		something = new int[1000];
 	}
-	static List<ListLeak> list ;
-	public static void main( String[] args ){
-		list = new ArrayList<ListLeak>();
-		int N = 300000;	
-		ListLeak o =  new ListLeak();
-		list.add(o);
-		for(int i = 1; i< N; i++){
-			ListLeak p =  new ListLeak();
-			list.add(p);
+	void touch(){
+		set_id(1);
+		something[0]=1;
+	}
+	int make_leak(int no){
+		int j=no;
+		for(int i = 0; i < 5000; i++){
+			j+=i;		
 		}
-		for(int i = 0; i < 10; i++){
-			for(int k = 1; k < N; k++){
-				list.get(k).set_id(k);
-			}
-			for(int k =0; k < N/5; k++){
-				ListLeak q =  new ListLeak();
-			}			
-			System.out.println("add List: "+i);
+		end.next = new ListLeak();
+		end = end.next;
+		return j;
+	}
+	int wait_for(int k,ListLeak t){
+		int j=k;
+		id = k;
+		for(int i = 0; i < 5000; i++){
+			touch();
+			t.touch();
+		}	
+		return j+k;	
+	}
+	ListLeak next;
+	ListLeak end;
+	public static void main( String[] args ){
+		int N = 1000000;	
+		ListLeak o =  new ListLeak();
+		o.end = o;
+		for(int i = 0; i < 50; i++)o.make_leak(i*i);
+		for(int i = 0; i < N; i++){
+			ListLeak q =  new ListLeak();
+			int f = o.wait_for(i,q);		
+			if(i%10000==0)System.out.println("add List: "+i+" deop:"+f);
 		}
 	}
 }

@@ -32,7 +32,9 @@
 #include "obj_ptr.h"
 #include "read_barrier_option.h"
 #include "utils.h"
-
+//zhang
+#include "leakleak/leakleak.h"
+//end 
 namespace art {
 
 template<class T> class Handle;
@@ -399,6 +401,9 @@ class ArtMethod FINAL {
   void SetEntryPointFromQuickCompiledCode(const void* entry_point_from_quick_compiled_code) {
     SetEntryPointFromQuickCompiledCodePtrSize(entry_point_from_quick_compiled_code,
                                               kRuntimePointerSize);
+    //zhang
+    // leakleak::Leaktrace::getInstance().new_method(this);
+    //end
   }
   ALWAYS_INLINE void SetEntryPointFromQuickCompiledCodePtrSize(
       const void* entry_point_from_quick_compiled_code, PointerSize pointer_size) {
@@ -499,6 +504,9 @@ class ArtMethod FINAL {
 
   ALWAYS_INLINE void SetEntryPointFromJniPtrSize(const void* entrypoint, PointerSize pointer_size) {
     SetDataPtrSize(entrypoint, pointer_size);
+    //zhang
+    // leakleak::Leaktrace::getInstance().new_method(this);
+    //end
   }
 
   ALWAYS_INLINE void* GetDataPtrSize(PointerSize pointer_size) {

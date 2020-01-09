@@ -175,6 +175,13 @@ inline Array* Array::Alloc(Thread* self,
     return nullptr;
   }
 #endif
+
+//zhang
+// *waanan*
+  // tell leaktracer we are allocating an array object
+  // self->SetArrayAllocSize(size);
+  // <<
+//end
   gc::Heap* heap = Runtime::Current()->GetHeap();
   Array* result;
   if (!kFillUsable) {

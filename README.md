@@ -50,11 +50,17 @@ adb remount
 cd out/target/product/sailfish/system/
 adb push lib /system
 ```
-#### 5. 配置文件
-将需要监控的app写入配置文件app.txt并push到手机上即可。
-```
-adb root
-adb remount
-adb push dump.sh data/local/tmp
-adb push app.txt /storage/self/primary/Download
+### 2.2 LeakCanary 使用
+
+将 LeakCanary 导入现有的 Android Studio 项目中即可。  
+使用时只需要在重写`Application`类的`OnCreate`即可监测APP，具体如下：
+```java
+public class myapplication extends Application{
+    ...
+    public void onCreate() {
+        super.onCreate();
+        LeakCanary.install(this);
+    }
+    ...
+}
 ```

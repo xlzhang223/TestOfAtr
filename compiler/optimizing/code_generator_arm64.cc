@@ -1538,13 +1538,14 @@ void ParallelMoveResolverARM64::EmitMove(size_t index) {
 void CodeGeneratorARM64::genaccessbit(Register obj,int obj_size = 0){
   auto leak = leakleak::Leaktrace::getInstance();
   if(leak.get_istrace()&&leak.get_main_end()>0&&
-      leak.get_main_begin()>0&&leak.get_heap_end()>0){
+      leak.get_main_begin()>0&&leak.get_bitmap_ptr()>0){
+  obj_size = 0; 
   //locations->AddRegisterTemps(3);
   //int n = locations->GetTempCount();
   //leakleak::log_app_name();
-  if(obj_size !=0 && obj_size < 512) return;
+  //if(obj_size !=0 && obj_size < 512) return;
   // {
-  // uint32_t obj_size =0; 
+  //   uint32_t obj_size =0; 
   //   ReaderMutexLock mu(Thread::Current(), *Locks::mutator_lock_);
   //   ObjPtr<mirror::Class> class_ptr = field_info.GetField()->GetDeclaringClass();
   //   obj_size = class_ptr -> GetObjectSize();
@@ -1566,16 +1567,16 @@ void CodeGeneratorARM64::genaccessbit(Register obj,int obj_size = 0){
 
 
 //   __ B(&lable_zhang); //ingnore access bit  debug!! 
-    __ Mov(r3,leak.get_main_begin());
-    __ Cmp(r3,obj);//"compare with int"
-    __ B(le, &lable_zhang);
     __ Mov(r2,leak.get_main_end());
-    __ Cmp(obj,r2);//"compare with int"
+    __ Cmp(obj.X(),r2);//"compare with int"
     __ B(ge, &lable_zhang);
+    __ Mov(r3,leak.get_main_begin());
+    __ Cmp(obj.X(),r3);//"compare with int"
+    __ B(le, &lable_zhang);
   
 
     __ Ldr(r2,MemOperand(Tr,temp1));
-    __ Cmp(r2,obj);
+    __ Cmp(r2,obj.X());
     __ B(eq, &lable_zhang);
     //store reg to get temp
     //__ Str(r1,MemOperand(Tr,temp1));
@@ -1591,7 +1592,7 @@ void CodeGeneratorARM64::genaccessbit(Register obj,int obj_size = 0){
   __ Lsr(r3,r3,3);//offest>>3  byte
   __ And(r1,r3,7);//off>>3 % 8
   __ Lsr(r3,r3,3);//offest>>6 {id of int-64}->heap_begin
-  __ Mov(r2,leak.get_heap_end());
+  __ Mov(r2,leak.get_bitmap_ptr());
   // __ Ldr(r4,MemOperand(Tr,bit_begin));//bitmap_addr
   __ Add(r2,r2,r3);//r4 is wirte_place
   //__ Str(bitmap_begin,MemOperand(Tr,temp2));//temp2 is wirte_place

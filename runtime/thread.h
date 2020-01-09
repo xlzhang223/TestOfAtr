@@ -149,7 +149,11 @@ static constexpr size_t kNumRosAllocThreadLocalSizeBracketsInThread = 16;
 class Thread {
  public:
   //zhang
-  ALWAYS_INLINE uint64_t GetAllocSite() { return tlsPtr_.alloc_site; }
+  ALWAYS_INLINE uintptr_t GetAllocSite() { return tlsPtr_.alloc_site; }
+  ALWAYS_INLINE uint64_t GetGCnum() { return tlsPtr_.gc_num; }
+  ALWAYS_INLINE void SetGCnum(uint64_t gc) { tlsPtr_.gc_num = gc; }
+  ALWAYS_INLINE int Getistrace() { return tlsPtr_.istrace; }
+  ALWAYS_INLINE void Setistrace(int is) { tlsPtr_.istrace = is; }
   //end
   static const size_t kStackOverflowImplicitCheckSize;
 
@@ -685,8 +689,8 @@ class Thread {
     return ThreadOffsetFromTlsPtr<pointer_size>(OFFSETOF_MEMBER(tls_ptr_sized_values, temp1));
   }
   template<PointerSize pointer_size>
-    static ThreadOffset<pointer_size> Temp2Offset() {
-    return ThreadOffsetFromTlsPtr<pointer_size>(OFFSETOF_MEMBER(tls_ptr_sized_values, temp2));
+    static ThreadOffset<pointer_size> gc_numOffset() {
+    return ThreadOffsetFromTlsPtr<pointer_size>(OFFSETOF_MEMBER(tls_ptr_sized_values, gc_num));
   }
   template<PointerSize pointer_size>
     static ThreadOffset<pointer_size> PtrOffset() {
@@ -1655,10 +1659,11 @@ class Thread {
     //zhang
     uint64_t alloc_site;
     uint64_t temp1;
-    uint64_t temp2;
+    uint64_t gc_num;
     uint64_t bitmap_addr;
     uint64_t main_begin;
     uint64_t main_end;
+    int istrace;
     //end
   } tlsPtr_;
 

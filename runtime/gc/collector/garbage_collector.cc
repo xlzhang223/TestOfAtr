@@ -114,6 +114,7 @@ void GarbageCollector::Run(GcCause gc_cause, bool clear_soft_references) {
       current_iteration->GetFreedLargeObjectBytes();
   uint64_t end_time = NanoTime();
   current_iteration->SetDurationNs(end_time - start_time);
+  leakleak::Leaktrace::getInstance().dump_info(end_time - start_time);
   if (Locks::mutator_lock_->IsExclusiveHeld(self)) {
     // The entire GC was paused, clear the fake pauses which might be in the pause times and add
     // the whole GC duration.

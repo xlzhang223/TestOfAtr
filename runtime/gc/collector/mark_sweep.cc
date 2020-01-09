@@ -144,9 +144,9 @@ void MarkSweep::InitializePhase() {
 }
 
 void MarkSweep::RunPhases() {
-  //zhangxianlong
-  // leakleak::dump_str("MarkSweep");
-  //end
+  // zhangxianlong
+  leakleak::Leaktrace::getInstance().dump_str("MarkSweep");
+  // end
   Thread* self = Thread::Current();
   InitializePhase();
   Locks::mutator_lock_->AssertNotHeld(self);

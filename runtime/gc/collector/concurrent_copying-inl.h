@@ -104,6 +104,10 @@ inline mirror::Object* ConcurrentCopying::Mark(mirror::Object* from_ref,
   if (from_ref == nullptr) {
     return nullptr;
   }
+  // zhang
+  if(from_ref!=nullptr)
+      leakleak::Leaktrace::getInstance().addedge(from_ref);
+  // // end
   DCHECK(heap_->collector_type_ == kCollectorTypeCC);
   if (kFromGCThread) {
     DCHECK(is_active_);
@@ -120,6 +124,10 @@ inline mirror::Object* ConcurrentCopying::Mark(mirror::Object* from_ref,
     // are consulted. If they look like gray but aren't really, the
     // read barriers slow path can trigger when it shouldn't. To guard
     // against this, return here if the CC collector isn't running.
+    // zhang
+        // if(from_ref!=nullptr)
+        //     leakleak::Leaktrace::getInstance().addedge(from_ref);
+        // // end
     return from_ref;
   }
   DCHECK(region_space_ != nullptr) << "Read barrier slow path taken when CC isn't running?";
@@ -137,17 +145,42 @@ inline mirror::Object* ConcurrentCopying::Mark(mirror::Object* from_ref,
       DCHECK(region_space_->IsInToSpace(to_ref) || heap_->non_moving_space_->HasAddress(to_ref))
           << "from_ref=" << from_ref << " to_ref=" << to_ref;
         //zhang
-        leakleak::Leaktrace::getInstance().dump_str_i_i(from_ref,to_ref);
+        {
+          // WriterMutexLock mu(Thread::Current(), *Locks::mutator_lock_); 
+          leakleak::Leaktrace::getInstance().CC_move_from_to(from_ref,to_ref);
+        }
         //end
+        // zhang
+        // if(to_ref!=nullptr)
+        //     leakleak::Leaktrace::getInstance().addedge(to_ref);
+        // end
       return to_ref;
     }
     case space::RegionSpace::RegionType::kRegionTypeUnevacFromSpace: {
-      return MarkUnevacFromSpaceRegion(from_ref, region_space_bitmap_);
+      // zhang
+        // auto ret = MarkUnevacFromSpaceRegion(from_ref, region_space_bitmap_);
+        // if(ret!=nullptr)
+        //     leakleak::Leaktrace::getInstance().addedge(ret);
+        // return ret;
+        // end
+        return MarkUnevacFromSpaceRegion(from_ref, region_space_bitmap_);
     }
     case space::RegionSpace::RegionType::kRegionTypeNone:
       if (immune_spaces_.ContainsObject(from_ref)) {
+        // zhang
+        // auto ret = MarkImmuneSpace<kGrayImmuneObject>(from_ref);
+        // if(ret!=nullptr)
+        //     leakleak::Leaktrace::getInstance().addedge(ret);
+        // return ret;
+        // end
         return MarkImmuneSpace<kGrayImmuneObject>(from_ref);
       } else {
+        // zhang
+        // auto ret = MarkNonMoving(from_ref, holder, offset);
+        // if(ret!=nullptr)
+        //     leakleak::Leaktrace::getInstance().addedge(ret);
+        // return ret;
+        // end
         return MarkNonMoving(from_ref, holder, offset);
       }
     default:

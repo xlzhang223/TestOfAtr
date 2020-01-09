@@ -66,6 +66,10 @@ inline mirror::Object* Heap::AllocObjectWithAllocator(Thread* self,
     obj = AllocLargeObject<kInstrumented, PreFenceVisitor>(self, &klass, byte_count,
                                                            pre_fence_visitor);
     if (obj != nullptr) {
+      //zhangxianlong alloc new obj
+      // if(byte_count >= (unsigned long)leakleak::Leaktrace::getInstance().getTsize())
+        leakleak::Leaktrace::getInstance().new_obj(obj.Ptr(),byte_count);
+      //end
       return obj.Ptr();
     } else {
       // There should be an OOM exception, since we are retrying, clear it.
@@ -127,10 +131,19 @@ inline mirror::Object* Heap::AllocObjectWithAllocator(Thread* self,
         if (!self->IsExceptionPending()) {
           // AllocObject will pick up the new allocator type, and instrumented as true is the safe
           // default.
-          return AllocObject</*kInstrumented*/true>(self,
+          //zhang
+          auto ret = AllocObject</*kInstrumented*/true>(self,
                                                     klass,
                                                     byte_count,
                                                     pre_fence_visitor);
+          leakleak::Leaktrace::getInstance().new_obj(ret,byte_count);
+          return ret;
+          //end
+          //  return AllocObject</*kInstrumented*/true>(self,
+          //                                           klass,
+          //                                           byte_count,
+          //                                           pre_fence_visitor);
+          
         }
         return nullptr;
       }
@@ -213,8 +226,8 @@ inline mirror::Object* Heap::AllocObjectWithAllocator(Thread* self,
   
   
   //zhangxianlong alloc new obj
-  if(byte_count > 64)
-    leakleak::Leaktrace::getInstance().new_obj(obj.Ptr());
+  // if(byte_count >= (unsigned long)leakleak::Leaktrace::getInstance().getTsize())
+    leakleak::Leaktrace::getInstance().new_obj(obj.Ptr(),byte_count);
   //end
   
 

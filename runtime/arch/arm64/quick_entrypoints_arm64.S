@@ -1470,7 +1470,7 @@ ENTRY \name
     SETUP_SAVE_REFS_ONLY_FRAME        // save callee saves in case of GC
     mov    x1, xSELF                  // pass Thread::Current
      // zhang
-    str    lr, [xSELF, #THREAD_ALLOC_SITE_OFFSET] 
+    str    xLR, [xSELF, #THREAD_ALLOC_SITE_OFFSET] 
     // end
     bl     \entrypoint                // (uint32_t type_idx, Method* method, Thread*)
     RESTORE_SAVE_REFS_ONLY_FRAME
@@ -1485,7 +1485,7 @@ ENTRY \name
     SETUP_SAVE_REFS_ONLY_FRAME        // save callee saves in case of GC
     mov    x2, xSELF                  // pass Thread::Current
      // zhang
-    str    lr, [xSELF, #THREAD_ALLOC_SITE_OFFSET]
+    str    xLR, [xSELF, #THREAD_ALLOC_SITE_OFFSET]
     // end
     bl     \entrypoint                // (uint32_t type_idx, Method* method, Thread*)
     RESTORE_SAVE_REFS_ONLY_FRAME
@@ -1500,7 +1500,7 @@ ENTRY \name
     SETUP_SAVE_REFS_ONLY_FRAME        // save callee saves in case of GC
     mov    x3, xSELF                  // pass Thread::Current
      // zhang
-    str    lr, [xSELF, #THREAD_ALLOC_SITE_OFFSET] 
+    str    xLR, [xSELF, #THREAD_ALLOC_SITE_OFFSET] 
     // end
     bl     \entrypoint
     RESTORE_SAVE_REFS_ONLY_FRAME
@@ -1515,7 +1515,7 @@ ENTRY \name
     SETUP_SAVE_REFS_ONLY_FRAME        // save callee saves in case of GC
     mov    x4, xSELF                  // pass Thread::Current
      // zhang
-    str    lr, [xSELF, #THREAD_ALLOC_SITE_OFFSET] 
+    str    xLR, [xSELF, #THREAD_ALLOC_SITE_OFFSET] 
     // end
     bl     \entrypoint                //
     RESTORE_SAVE_REFS_ONLY_FRAME
@@ -1727,6 +1727,11 @@ ENTRY \c_name
     str    w1, [x4, #(ROSALLOC_RUN_FREE_LIST_OFFSET + ROSALLOC_RUN_FREE_LIST_SIZE_OFFSET)]
 
     mov    x0, x3                                             // Set the return value and return.
+
+    // zhang
+     str    xLR, [xSELF, #THREAD_ALLOC_SITE_OFFSET] 
+    // end
+
     ret
 .Lslow_path\c_name:
     SETUP_SAVE_REFS_ONLY_FRAME                      // save callee saves in case of GC
@@ -1764,6 +1769,10 @@ ART_QUICK_ALLOC_OBJECT_ROSALLOC art_quick_alloc_object_initialized_rosalloc, art
                                                               // object size load.)
     mov    x0, x4
     dmb    ish
+
+    // zhang
+     str    xLR, [xSELF, #THREAD_ALLOC_SITE_OFFSET] 
+    // end
     ret
 .endm
 
@@ -1777,6 +1786,9 @@ ENTRY \name
 .Lslow_path\name:
     SETUP_SAVE_REFS_ONLY_FRAME                 // Save callee saves in case of GC.
     mov    x1, xSELF                           // Pass Thread::Current.
+    // zhang
+     str    xLR, [xSELF, #THREAD_ALLOC_SITE_OFFSET] 
+    // end
     bl     \entrypoint                         // (mirror::Class*, Thread*)
     RESTORE_SAVE_REFS_ONLY_FRAME
     RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
@@ -1823,6 +1835,11 @@ GENERATE_ALLOC_OBJECT_RESOLVED_TLAB art_quick_alloc_object_initialized_tlab, art
     str    \wCount, [x0, #MIRROR_ARRAY_LENGTH_OFFSET]         // Store the array length.
                                                               // Fence.
     dmb    ishst
+
+    // zhang
+     str    xLR, [xSELF, #THREAD_ALLOC_SITE_OFFSET] 
+    // end
+
     ret
 .endm
 
@@ -1841,6 +1858,9 @@ ENTRY \name
     // x2: Thread* self
     SETUP_SAVE_REFS_ONLY_FRAME        // save callee saves in case of GC
     mov    x2, xSELF                  // pass Thread::Current
+    // zhang
+     str    xLR, [xSELF, #THREAD_ALLOC_SITE_OFFSET] 
+    // end
     bl     \entrypoint
     RESTORE_SAVE_REFS_ONLY_FRAME
     RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER

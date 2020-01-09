@@ -232,9 +232,10 @@ enum InterpreterImplKind {
   kSwitchImplKind,        // Switch-based interpreter implementation.
   kMterpImplKind          // Assembly interpreter
 };
-
-static constexpr InterpreterImplKind kInterpreterImplKind = kMterpImplKind;
-
+//zhang
+// static constexpr InterpreterImplKind kInterpreterImplKind = kMterpImplKind;
+static constexpr InterpreterImplKind kInterpreterImplKind = kSwitchImplKind;
+//end
 static inline JValue Execute(
     Thread* self,
     const DexFile::CodeItem* code_item,

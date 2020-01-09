@@ -1146,7 +1146,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   //, heap_->GetMainSpace()->Capacity()
   ));
   if(heap_->main_access_bitmap_.get()!=nullptr){
-    leakleak::Leaktrace::getInstance().set_heap_end(reinterpret_cast<uint64_t>(heap_->main_access_bitmap_->Begin()));
+    leakleak::Leaktrace::getInstance().set_bitmap_ptr(reinterpret_cast<uint64_t>(heap_->main_access_bitmap_->Begin()));
     if(leakleak::Leaktrace::getInstance().get_istrace()){
       LOG(WARNING)<<"zhang BitMap Name: "<<  heap_->main_access_bitmap_->GetName();
       LOG(WARNING)<<"zhang bitmap start: "<< reinterpret_cast<uint64_t>(heap_->main_access_bitmap_->Begin());

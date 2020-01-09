@@ -68,7 +68,7 @@ bool DoFieldGet(Thread* self, ShadowFrame& shadow_frame, const Instruction* inst
 
     //zhang
   if(obj!=nullptr){
-    leakleak::Leaktrace::getInstance().dump_str_ui32(obj.Ptr());
+    leakleak::Leaktrace::getInstance().interpreter_touch_obj(obj.Ptr());
   }
   //end
 
@@ -147,6 +147,11 @@ bool DoIGetQuick(ShadowFrame& shadow_frame, const Instruction* inst, uint16_t in
     ThrowNullPointerExceptionFromDexPC();
     return false;
   }
+  //zhang
+  if(obj!=nullptr){
+    leakleak::Leaktrace::getInstance().interpreter_touch_obj(obj.Ptr());
+  }
+  //end
   MemberOffset field_offset(inst->VRegC_22c());
   // Report this field access to instrumentation if needed. Since we only have the offset of
   // the field from the base of the object, we need to look for it first.
@@ -270,7 +275,7 @@ bool DoFieldPut(Thread* self, const ShadowFrame& shadow_frame, const Instruction
 
   //zhang
   if(obj!=nullptr){
-    leakleak::Leaktrace::getInstance().dump_str_ui32(obj.Ptr());
+    leakleak::Leaktrace::getInstance().interpreter_touch_obj(obj.Ptr());
   }
   //end
 
@@ -324,6 +329,11 @@ bool DoIPutQuick(const ShadowFrame& shadow_frame, const Instruction* inst, uint1
     ThrowNullPointerExceptionFromDexPC();
     return false;
   }
+  //zhang
+  if(obj!=nullptr){
+    leakleak::Leaktrace::getInstance().interpreter_touch_obj(obj.Ptr());
+  }
+  //end
   MemberOffset field_offset(inst->VRegC_22c());
   const uint32_t vregA = inst->VRegA_22c(inst_data);
   // Report this field modification to instrumentation if needed. Since we only have the offset of

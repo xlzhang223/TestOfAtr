@@ -20,68 +20,81 @@
 #include <fstream>
 #include <sys/msg.h>
 #include "safe_map.h"
+#include "jit/jit.h"
+#include "jit/jit_code_cache.h"
 namespace art {
+
+    class ArtMethod;
     namespace mirror {
         class Object;
+        class Class;
         //class ObjPtr;
+    }
+    namespace jit{
+        class Jit;
+        class JitCodeCache;
     }
 
     namespace leakleak{
-        const int len = 256;
+        const int len = 127;
         class myio{
             public:
-            std::vector<int> get_int();
+            std::vector<int> get_int(std::string path);
             std::vector<std::string> get_str();
-            std::string get_app();
+            std::vector<std::string> get_app();
             void put_ans(std::string ans);
         };
-        const int LEN = 128;
+        const int LEN = 127;
+        // static char tmp[LEN];
+        // static char name[LEN];
         class Leaktrace{
             private:
             myio io;
-            int read_time;
-            int map_time;
-            int gc_time;
-            int name_time;
-            int code_time;
+            // int gc_time;
             int objcnt;
+            int t_size;
             bool istrace;
-            //int fp_int;
-            //int fp_str;
+            bool jitinfo;
             int GC_K;
+            std::set<mirror::Class *> classes_;
             uint64_t main_begin;
             uint64_t main_end;
-            uint64_t heap_end;
-            std::unordered_map<uint64_t,uint64_t> addr_pc,addr_pc_t;
-            std::unordered_set<uint64_t> s_ans;
-            std::unordered_set<uint64_t> s_obj;
+            uint64_t bitmap_ptr;
+            std::unordered_map<uint32_t,std::pair<uintptr_t,uint16_t>> addr_pc;
+            std::unordered_map<uint32_t,int> vis;
+            std::unordered_map<uintptr_t,int> m_ans;
+            uint32_t low(mirror::Object * o){return (uint32_t)(reinterpret_cast<uint64_t>((void*)o)-main_begin);};
+            void NewClass(mirror::Class *klass);
+            void NewMethodLinked(const std::string& class_name, ArtMethod &method);
+            int try_thread_istrace();
             public:
+            // std::fstream jit_info;
             Leaktrace(){
-                read_time = 0 ;
-                map_time = 0 ;
-                gc_time = 0 ;
-                name_time = 0;
-                code_time = 0 ;
+                // gc_time = 0 ;
                 objcnt = 0;
                 istrace = false;
-                //fp_int=0;
-                //fp_str=0;
                 GC_K=0;
                 main_begin = 0;
                 main_end = 0;
-                heap_end = 0;
+                bitmap_ptr = 0;
+                t_size = 48;
+                jitinfo = false;
             };
+            bool need_jitinfo(){return jitinfo;};
+            void new_method(ArtMethod * method);
+            void put_jit(uint8_t* code,const std::string method_name,bool osr);
+            int getTsize(){return t_size;};
             static Leaktrace& getInstance(){
                 static Leaktrace instance;
                 return instance;
             };
             void set_main_begin(uint64_t _begin);
             void set_main_end(uint64_t _end);
-            void set_heap_end(uint64_t _end);
+            void set_bitmap_ptr(uint64_t _end);
             uint64_t get_main_begin();
             uint64_t get_main_end();
-            uint64_t get_heap_end();
-            void dump_info();
+            uint64_t get_bitmap_ptr();
+            void dump_info(uint64_t tim);
 
             
             //static bool GetProcNameByPid(char *buf, size_t size, int pid);
@@ -90,9 +103,9 @@ namespace art {
                 snprintf(buf, size, "/proc/%d/cmdline", pid);
                 FILE *fp = fopen(buf, "r");
                 if (fp) {
-                    char tmp[LEN];
+                    char tmp[len];
                     if (fread(tmp, sizeof(char), size, fp))
-                    strcpy(buf, tmp);
+                        strcpy(buf, tmp);
                     fclose(fp);
                     //t = clock() - t;
                     //read_time += t; 
@@ -107,7 +120,7 @@ namespace art {
             //do nothing 
             void dump_vct();
 
-            void addedge(mirror::Object *obj)REQUIRES_SHARED(Locks::mutator_lock_);
+            void addedge(mirror::Object *obj);
 
             void dump_str(std::string S);
 
@@ -123,7 +136,7 @@ namespace art {
                 
             //     // ALOGD(" ZHANG,GC-OBJ %s,HASHCODE: %d ,INFO: %s!",sname.c_str(),obj->IdentityHashCode(),s.c_str());
             // }
-            void heap_init()REQUIRES_SHARED(Locks::mutator_lock_);
+            void heap_init();
 
             bool get_istrace();
 
@@ -131,12 +144,12 @@ namespace art {
 
             void gc_begin();
 
-            void gc_end()REQUIRES_SHARED(Locks::mutator_lock_);
-            void dump_str_ui32(mirror::Object *I)REQUIRES_SHARED(Locks::mutator_lock_);
+            void gc_end();
+            void interpreter_touch_obj(mirror::Object *I);
 
-            void dump_str_i_i(mirror::Object *I,mirror::Object *J)REQUIRES_SHARED(Locks::mutator_lock_);
+            void CC_move_from_to(mirror::Object *I,mirror::Object *J);
 
-            void new_obj(mirror::Object *obj)REQUIRES_SHARED(Locks::mutator_lock_);
+            void new_obj(mirror::Object *obj,int _byte);
         };
 
     }
