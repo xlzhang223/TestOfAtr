@@ -30,7 +30,7 @@ make -j8
 在设备处于 fastboot 模式后，运行以下命令：  
 `fastboot flashall -w`
 #### 4. 将修改的代码写入设备
-用该项目替换掉`/art`文件夹，并重新编译,在源代码的根目录下执行执行：
+用该项目替换掉`/art`文件夹（或使用patch命令对原art进行patch），之后重新编译，在源代码的根目录下执行执行：
 ```sh
 . build/envsetup.sh
 lunch aosp_sailfish-userdebug
@@ -50,17 +50,18 @@ adb remount
 cd out/target/product/sailfish/system/
 adb push lib /system
 ```
-### 2.2 LeakCanary 使用
-
-将 LeakCanary 导入现有的 Android Studio 项目中即可。  
-使用时只需要在重写`Application`类的`OnCreate`即可监测APP，具体如下：
-```java
-public class myapplication extends Application{
-    ...
-    public void onCreate() {
-        super.onCreate();
-        LeakCanary.install(this);
-    }
-    ...
-}
+#### 5. 配置文件
+将需要监控的app写入配置文件app.txt并push到手机上即可。
 ```
+adb root
+adb remount
+adb push app.txt data/local/tmp
+adb push GC_K.txt /data/local/tmp/
+adb push Tsize.txt /data/local/tmp/
+app.txt 表示要监测的应用程序
+GC_K.txt 表示要监测机制触发间隔CG次数
+Tsize.txt 表示要监测的对象大小阈值
+```
+
+#### 6.输出结果
+所有输出结果在data/local/tmp/result.txt中
