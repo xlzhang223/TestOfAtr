@@ -22,9 +22,10 @@
 #include "base/arena_containers.h"
 #include "base/array_ref.h"
 #include "base/bit_utils.h"
+#include "base/globals.h"
 #include "base/macros.h"
 #include "constants_x86_64.h"
-#include "globals.h"
+#include "heap_poisoning.h"
 #include "managed_register_x86_64.h"
 #include "offsets.h"
 #include "utils/assembler.h"
@@ -77,6 +78,21 @@ class Operand : public ValueObject {
 
   Register base() const {
     return static_cast<Register>(encoding_at(1) & 7);
+  }
+
+  CpuRegister cpu_rm() const {
+    int ext = (rex_ & 1) != 0 ? x86_64::R8 : x86_64::RAX;
+    return static_cast<CpuRegister>(rm() + ext);
+  }
+
+  CpuRegister cpu_index() const {
+    int ext = (rex_ & 2) != 0 ? x86_64::R8 : x86_64::RAX;
+    return static_cast<CpuRegister>(index() + ext);
+  }
+
+  CpuRegister cpu_base() const {
+    int ext = (rex_ & 1) != 0 ? x86_64::R8 : x86_64::RAX;
+    return static_cast<CpuRegister>(base() + ext);
   }
 
   uint8_t rex() const {
@@ -267,13 +283,15 @@ class Address : public Operand {
   Address() {}
 };
 
+std::ostream& operator<<(std::ostream& os, const Address& addr);
 
 /**
  * Class to handle constant area values.
  */
 class ConstantArea {
  public:
-  explicit ConstantArea(ArenaAllocator* arena) : buffer_(arena->Adapter(kArenaAllocAssembler)) {}
+  explicit ConstantArea(ArenaAllocator* allocator)
+      : buffer_(allocator->Adapter(kArenaAllocAssembler)) {}
 
   // Add a double to the constant area, returning the offset into
   // the constant area where the literal resides.
@@ -333,9 +351,10 @@ class NearLabel : private Label {
 };
 
 
-class X86_64Assembler FINAL : public Assembler {
+class X86_64Assembler final : public Assembler {
  public:
-  explicit X86_64Assembler(ArenaAllocator* arena) : Assembler(arena), constant_area_(arena) {}
+  explicit X86_64Assembler(ArenaAllocator* allocator)
+      : Assembler(allocator), constant_area_(allocator) {}
   virtual ~X86_64Assembler() {}
 
   /*
@@ -466,6 +485,15 @@ class X86_64Assembler FINAL : public Assembler {
   void paddq(XmmRegister dst, XmmRegister src);
   void psubq(XmmRegister dst, XmmRegister src);
 
+  void paddusb(XmmRegister dst, XmmRegister src);
+  void paddsb(XmmRegister dst, XmmRegister src);
+  void paddusw(XmmRegister dst, XmmRegister src);
+  void paddsw(XmmRegister dst, XmmRegister src);
+  void psubusb(XmmRegister dst, XmmRegister src);
+  void psubsb(XmmRegister dst, XmmRegister src);
+  void psubusw(XmmRegister dst, XmmRegister src);
+  void psubsw(XmmRegister dst, XmmRegister src);
+
   void cvtsi2ss(XmmRegister dst, CpuRegister src);  // Note: this is the r/m32 version.
   void cvtsi2ss(XmmRegister dst, CpuRegister src, bool is64bit);
   void cvtsi2ss(XmmRegister dst, const Address& src, bool is64bit);
@@ -515,6 +543,7 @@ class X86_64Assembler FINAL : public Assembler {
   void andps(XmmRegister dst, XmmRegister src);  // no addr variant (for now)
   void pand(XmmRegister dst, XmmRegister src);
 
+  void andn(CpuRegister dst, CpuRegister src1, CpuRegister src2);
   void andnpd(XmmRegister dst, XmmRegister src);  // no addr variant (for now)
   void andnps(XmmRegister dst, XmmRegister src);
   void pandn(XmmRegister dst, XmmRegister src);
@@ -525,6 +554,35 @@ class X86_64Assembler FINAL : public Assembler {
 
   void pavgb(XmmRegister dst, XmmRegister src);  // no addr variant (for now)
   void pavgw(XmmRegister dst, XmmRegister src);
+  void psadbw(XmmRegister dst, XmmRegister src);
+  void pmaddwd(XmmRegister dst, XmmRegister src);
+  void phaddw(XmmRegister dst, XmmRegister src);
+  void phaddd(XmmRegister dst, XmmRegister src);
+  void haddps(XmmRegister dst, XmmRegister src);
+  void haddpd(XmmRegister dst, XmmRegister src);
+  void phsubw(XmmRegister dst, XmmRegister src);
+  void phsubd(XmmRegister dst, XmmRegister src);
+  void hsubps(XmmRegister dst, XmmRegister src);
+  void hsubpd(XmmRegister dst, XmmRegister src);
+
+  void pminsb(XmmRegister dst, XmmRegister src);  // no addr variant (for now)
+  void pmaxsb(XmmRegister dst, XmmRegister src);
+  void pminsw(XmmRegister dst, XmmRegister src);
+  void pmaxsw(XmmRegister dst, XmmRegister src);
+  void pminsd(XmmRegister dst, XmmRegister src);
+  void pmaxsd(XmmRegister dst, XmmRegister src);
+
+  void pminub(XmmRegister dst, XmmRegister src);  // no addr variant (for now)
+  void pmaxub(XmmRegister dst, XmmRegister src);
+  void pminuw(XmmRegister dst, XmmRegister src);
+  void pmaxuw(XmmRegister dst, XmmRegister src);
+  void pminud(XmmRegister dst, XmmRegister src);
+  void pmaxud(XmmRegister dst, XmmRegister src);
+
+  void minps(XmmRegister dst, XmmRegister src);  // no addr variant (for now)
+  void maxps(XmmRegister dst, XmmRegister src);
+  void minpd(XmmRegister dst, XmmRegister src);
+  void maxpd(XmmRegister dst, XmmRegister src);
 
   void pcmpeqb(XmmRegister dst, XmmRegister src);
   void pcmpeqw(XmmRegister dst, XmmRegister src);
@@ -545,6 +603,11 @@ class X86_64Assembler FINAL : public Assembler {
   void punpckldq(XmmRegister dst, XmmRegister src);
   void punpcklqdq(XmmRegister dst, XmmRegister src);
 
+  void punpckhbw(XmmRegister dst, XmmRegister src);
+  void punpckhwd(XmmRegister dst, XmmRegister src);
+  void punpckhdq(XmmRegister dst, XmmRegister src);
+  void punpckhqdq(XmmRegister dst, XmmRegister src);
+
   void psllw(XmmRegister reg, const Immediate& shift_count);
   void pslld(XmmRegister reg, const Immediate& shift_count);
   void psllq(XmmRegister reg, const Immediate& shift_count);
@@ -556,6 +619,7 @@ class X86_64Assembler FINAL : public Assembler {
   void psrlw(XmmRegister reg, const Immediate& shift_count);
   void psrld(XmmRegister reg, const Immediate& shift_count);
   void psrlq(XmmRegister reg, const Immediate& shift_count);
+  void psrldq(XmmRegister reg, const Immediate& shift_count);
 
   void flds(const Address& src);
   void fstps(const Address& dst);
@@ -639,6 +703,7 @@ class X86_64Assembler FINAL : public Assembler {
   void addl(CpuRegister reg, const Address& address);
   void addl(const Address& address, CpuRegister reg);
   void addl(const Address& address, const Immediate& imm);
+  void addw(const Address& address, const Immediate& imm);
 
   void addq(CpuRegister reg, const Immediate& imm);
   void addq(CpuRegister dst, CpuRegister src);
@@ -732,6 +797,10 @@ class X86_64Assembler FINAL : public Assembler {
   void bsfq(CpuRegister dst, CpuRegister src);
   void bsfq(CpuRegister dst, const Address& src);
 
+  void blsi(CpuRegister dst, CpuRegister src);  // no addr variant (for now)
+  void blsmsk(CpuRegister dst, CpuRegister src);  // no addr variant (for now)
+  void blsr(CpuRegister dst, CpuRegister src);  // no addr variant (for now)
+
   void bsrl(CpuRegister dst, CpuRegister src);
   void bsrl(CpuRegister dst, const Address& src);
   void bsrq(CpuRegister dst, CpuRegister src);
@@ -780,8 +849,8 @@ class X86_64Assembler FINAL : public Assembler {
   //
   int PreferredLoopAlignment() { return 16; }
   void Align(int alignment, int offset);
-  void Bind(Label* label) OVERRIDE;
-  void Jump(Label* label) OVERRIDE {
+  void Bind(Label* label) override;
+  void Jump(Label* label) override {
     jmp(label);
   }
   void Bind(NearLabel* label);
@@ -850,8 +919,9 @@ class X86_64Assembler FINAL : public Assembler {
   void EmitOperandSizeOverride();
 
   void EmitOperand(uint8_t rm, const Operand& operand);
-  void EmitImmediate(const Immediate& imm);
-  void EmitComplex(uint8_t rm, const Operand& operand, const Immediate& immediate);
+  void EmitImmediate(const Immediate& imm, bool is_16_op = false);
+  void EmitComplex(
+      uint8_t rm, const Operand& operand, const Immediate& immediate, bool is_16_op = false);
   void EmitLabel(Label* label, int instruction_size);
   void EmitLabelLink(Label* label);
   void EmitLabelLink(NearLabel* label);
@@ -885,6 +955,11 @@ class X86_64Assembler FINAL : public Assembler {
   // Emit a REX prefix to normalize byte registers plus necessary register bit encodings.
   void EmitOptionalByteRegNormalizingRex32(CpuRegister dst, CpuRegister src);
   void EmitOptionalByteRegNormalizingRex32(CpuRegister dst, const Operand& operand);
+
+  // Emit a 3 byte VEX Prefix
+  uint8_t EmitVexByteZero(bool is_two_byte);
+  uint8_t EmitVexByte1(bool r, bool x, bool b, int mmmmm);
+  uint8_t EmitVexByte2(bool w , int l , X86_64ManagedRegister operand, int pp);
 
   ConstantArea constant_area_;
 

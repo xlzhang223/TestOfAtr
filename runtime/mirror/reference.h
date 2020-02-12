@@ -18,14 +18,11 @@
 #define ART_RUNTIME_MIRROR_REFERENCE_H_
 
 #include "base/enums.h"
-#include "class.h"
-#include "gc_root.h"
+#include "base/locks.h"
+#include "base/macros.h"
 #include "obj_ptr.h"
 #include "object.h"
-#include "object_callbacks.h"
 #include "read_barrier_option.h"
-#include "runtime.h"
-#include "thread.h"
 
 namespace art {
 
@@ -99,15 +96,6 @@ class MANAGED Reference : public Object {
     return GetPendingNext<kWithoutReadBarrier>() == nullptr;
   }
 
-  template<ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
-  static Class* GetJavaLangRefReference() REQUIRES_SHARED(Locks::mutator_lock_) {
-    DCHECK(!java_lang_ref_Reference_.IsNull());
-    return java_lang_ref_Reference_.Read<kReadBarrierOption>();
-  }
-  static void SetClass(ObjPtr<Class> klass);
-  static void ResetClass();
-  static void VisitRoots(RootVisitor* visitor) REQUIRES_SHARED(Locks::mutator_lock_);
-
  private:
   // Note: This avoids a read barrier, it should only be used by the GC.
   HeapReference<Object>* GetReferentReferenceAddr() REQUIRES_SHARED(Locks::mutator_lock_) {
@@ -119,8 +107,6 @@ class MANAGED Reference : public Object {
   HeapReference<Object> queue_;
   HeapReference<Reference> queue_next_;
   HeapReference<Object> referent_;  // Note this is Java volatile:
-
-  static GcRoot<Class> java_lang_ref_Reference_;
 
   friend struct art::ReferenceOffsets;  // for verifying offset information
   friend class gc::ReferenceProcessor;

@@ -16,10 +16,10 @@
 
 #include "signal_catcher.h"
 
+#include <csignal>
+#include <cstdlib>
 #include <fcntl.h>
 #include <pthread.h>
-#include <signal.h>
-#include <stdlib.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
@@ -27,19 +27,22 @@
 
 #include <sstream>
 
+#include <android-base/stringprintf.h>
+
 #include "arch/instruction_set.h"
+#include "base/logging.h"  // For GetCmdLine.
+#include "base/os.h"
 #include "base/time_utils.h"
-#include "base/unix_file/fd_file.h"
+#include "base/utils.h"
 #include "class_linker.h"
 #include "gc/heap.h"
 #include "jit/profile_saver.h"
-#include "os.h"
+#include "palette/palette.h"
 #include "runtime.h"
 #include "scoped_thread_state_change-inl.h"
 #include "signal_set.h"
 #include "thread.h"
 #include "thread_list.h"
-#include "utils.h"
 
 namespace art {
 
@@ -65,9 +68,8 @@ static void DumpCmdLine(std::ostream& os) {
 #endif
 }
 
-SignalCatcher::SignalCatcher(const std::string& stack_trace_file)
-    : stack_trace_file_(stack_trace_file),
-      lock_("SignalCatcher lock"),
+SignalCatcher::SignalCatcher()
+    : lock_("SignalCatcher lock"),
       cond_("SignalCatcher::cond_", lock_),
       thread_(nullptr) {
   SetHaltFlag(false);
@@ -101,28 +103,13 @@ bool SignalCatcher::ShouldHalt() {
 }
 
 void SignalCatcher::Output(const std::string& s) {
-  if (stack_trace_file_.empty()) {
-    LOG(INFO) << s;
-    return;
-  }
-
   ScopedThreadStateChange tsc(Thread::Current(), kWaitingForSignalCatcherOutput);
-  int fd = open(stack_trace_file_.c_str(), O_APPEND | O_CREAT | O_WRONLY, 0666);
-  if (fd == -1) {
-    PLOG(ERROR) << "Unable to open stack trace file '" << stack_trace_file_ << "'";
-    return;
-  }
-  std::unique_ptr<File> file(new File(fd, stack_trace_file_, true));
-  bool success = file->WriteFully(s.data(), s.size());
-  if (success) {
-    success = file->FlushCloseOrErase() == 0;
+  PaletteStatus status = PaletteWriteCrashThreadStacks(s.data(), s.size());
+  if (status == PaletteStatus::kOkay) {
+    LOG(INFO) << "Wrote stack traces to tombstoned";
   } else {
-    file->Erase();
-  }
-  if (success) {
-    LOG(INFO) << "Wrote stack traces to '" << stack_trace_file_ << "'";
-  } else {
-    PLOG(ERROR) << "Failed to write stack traces to '" << stack_trace_file_ << "'";
+    CHECK(status == PaletteStatus::kFailedCheckLog);
+    LOG(ERROR) << "Failed to write stack traces to tombstoned";
   }
 }
 
@@ -156,7 +143,7 @@ void SignalCatcher::HandleSigQuit() {
 
 void SignalCatcher::HandleSigUsr1() {
   LOG(INFO) << "SIGUSR1 forcing GC (no HPROF) and profile save";
-  Runtime::Current()->GetHeap()->CollectGarbage(false);
+  Runtime::Current()->GetHeap()->CollectGarbage(/* clear_soft_references= */ false);
   ProfileSaver::ForceProcessProfiles();
 }
 

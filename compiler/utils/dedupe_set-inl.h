@@ -19,14 +19,15 @@
 
 #include "dedupe_set.h"
 
-#include <algorithm>
 #include <inttypes.h>
+
+#include <algorithm>
 #include <unordered_map>
 
 #include "android-base/stringprintf.h"
 
-#include "base/mutex.h"
 #include "base/hash_set.h"
+#include "base/mutex.h"
 #include "base/stl_util.h"
 #include "base/time_utils.h"
 
@@ -70,13 +71,13 @@ class DedupeSet<InKey, StoreKey, Alloc, HashType, HashFunc, kShard>::Shard {
   const StoreKey* Add(Thread* self, size_t hash, const InKey& in_key) REQUIRES(!lock_) {
     MutexLock lock(self, lock_);
     HashedKey<InKey> hashed_in_key(hash, &in_key);
-    auto it = keys_.Find(hashed_in_key);
+    auto it = keys_.find(hashed_in_key);
     if (it != keys_.end()) {
       DCHECK(it->Key() != nullptr);
       return it->Key();
     }
     const StoreKey* store_key = alloc_.Copy(in_key);
-    keys_.Insert(HashedKey<StoreKey> { hash, store_key });
+    keys_.insert(HashedKey<StoreKey> { hash, store_key });
     return store_key;
   }
 
@@ -89,7 +90,7 @@ class DedupeSet<InKey, StoreKey, Alloc, HashType, HashFunc, kShard>::Shard {
       // Note: The total_probe_distance will be updated with the current state.
       // It may have been higher before a re-hash.
       global_stats->total_probe_distance += keys_.TotalProbeDistance();
-      global_stats->total_size += keys_.Size();
+      global_stats->total_size += keys_.size();
       for (const HashedKey<StoreKey>& key : keys_) {
         auto it = stats.find(key.Hash());
         if (it == stats.end()) {

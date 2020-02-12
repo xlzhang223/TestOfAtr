@@ -18,7 +18,7 @@
 #define ART_RUNTIME_GC_COLLECTOR_GARBAGE_COLLECTOR_H_
 
 #include <stdint.h>
-#include <vector>
+#include <list>
 
 #include "base/histogram.h"
 #include "base/mutex.h"
@@ -27,6 +27,8 @@
 #include "gc/gc_cause.h"
 #include "gc_root.h"
 #include "gc_type.h"
+#include "iteration.h"
+#include "object_byte_pair.h"
 #include "object_callbacks.h"
 
 namespace art {
@@ -42,85 +44,6 @@ namespace gc {
 class Heap;
 
 namespace collector {
-
-struct ObjectBytePair {
-  explicit ObjectBytePair(uint64_t num_objects = 0, int64_t num_bytes = 0)
-      : objects(num_objects), bytes(num_bytes) {}
-  void Add(const ObjectBytePair& other) {
-    objects += other.objects;
-    bytes += other.bytes;
-  }
-  // Number of objects which were freed.
-  uint64_t objects;
-  // Freed bytes are signed since the GC can free negative bytes if it promotes objects to a space
-  // which has a larger allocation size.
-  int64_t bytes;
-};
-
-// A information related single garbage collector iteration. Since we only ever have one GC running
-// at any given time, we can have a single iteration info.
-class Iteration {
- public:
-  Iteration();
-  // Returns how long the mutators were paused in nanoseconds.
-  const std::vector<uint64_t>& GetPauseTimes() const {
-    return pause_times_;
-  }
-  TimingLogger* GetTimings() {
-    return &timings_;
-  }
-  // Returns how long the GC took to complete in nanoseconds.
-  uint64_t GetDurationNs() const {
-    return duration_ns_;
-  }
-  int64_t GetFreedBytes() const {
-    return freed_.bytes;
-  }
-  int64_t GetFreedLargeObjectBytes() const {
-    return freed_los_.bytes;
-  }
-  uint64_t GetFreedObjects() const {
-    return freed_.objects;
-  }
-  uint64_t GetFreedLargeObjects() const {
-    return freed_los_.objects;
-  }
-  uint64_t GetFreedRevokeBytes() const {
-    return freed_bytes_revoke_;
-  }
-  void SetFreedRevoke(uint64_t freed) {
-    freed_bytes_revoke_ = freed;
-  }
-  void Reset(GcCause gc_cause, bool clear_soft_references);
-  // Returns the estimated throughput of the iteration.
-  uint64_t GetEstimatedThroughput() const;
-  bool GetClearSoftReferences() const {
-    return clear_soft_references_;
-  }
-  void SetClearSoftReferences(bool clear_soft_references) {
-    clear_soft_references_ = clear_soft_references;
-  }
-  GcCause GetGcCause() const {
-    return gc_cause_;
-  }
-
- private:
-  void SetDurationNs(uint64_t duration) {
-    duration_ns_ = duration;
-  }
-
-  GcCause gc_cause_;
-  bool clear_soft_references_;
-  uint64_t duration_ns_;
-  TimingLogger timings_;
-  ObjectBytePair freed_;
-  ObjectBytePair freed_los_;
-  uint64_t freed_bytes_revoke_;  // see Heap::num_bytes_freed_revoke_.
-  std::vector<uint64_t> pause_times_;
-
-  friend class GarbageCollector;
-  DISALLOW_COPY_AND_ASSIGN(Iteration);
-};
 
 class GarbageCollector : public RootVisitor, public IsMarkedVisitor, public MarkObjectVisitor {
  public:
@@ -158,6 +81,9 @@ class GarbageCollector : public RootVisitor, public IsMarkedVisitor, public Mark
   void SwapBitmaps()
       REQUIRES(Locks::heap_bitmap_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
+  uint64_t GetTotalCpuTime() const {
+    return total_thread_cpu_time_ns_;
+  }
   uint64_t GetTotalPausedTimeNs() REQUIRES(!pause_histogram_lock_);
   int64_t GetTotalFreedBytes() const {
     return total_freed_bytes_;
@@ -185,12 +111,15 @@ class GarbageCollector : public RootVisitor, public IsMarkedVisitor, public Mark
   void RecordFreeLOS(const ObjectBytePair& freed);
   virtual void DumpPerformanceInfo(std::ostream& os) REQUIRES(!pause_histogram_lock_);
 
+  // Extract RSS for GC-specific memory ranges using mincore().
+  uint64_t ExtractRssFromMincore(std::list<std::pair<void*, void*>>* gc_ranges);
+
   // Helper functions for querying if objects are marked. These are used for processing references,
   // and will be used for reading system weaks while the GC is running.
   virtual mirror::Object* IsMarked(mirror::Object* obj)
       REQUIRES_SHARED(Locks::mutator_lock_) = 0;
   // Returns true if the given heap reference is null or is already marked. If it's already marked,
-  // update the reference (uses a CAS if do_atomic_update is true. Otherwise, returns false.
+  // update the reference (uses a CAS if do_atomic_update is true). Otherwise, returns false.
   virtual bool IsNullOrMarkedHeapReference(mirror::HeapReference<mirror::Object>* obj,
                                            bool do_atomic_update)
       REQUIRES_SHARED(Locks::mutator_lock_) = 0;
@@ -218,11 +147,16 @@ class GarbageCollector : public RootVisitor, public IsMarkedVisitor, public Mark
 
   static constexpr size_t kPauseBucketSize = 500;
   static constexpr size_t kPauseBucketCount = 32;
+  static constexpr size_t kMemBucketSize = 10;
+  static constexpr size_t kMemBucketCount = 16;
 
   Heap* const heap_;
   std::string name_;
   // Cumulative statistics.
   Histogram<uint64_t> pause_histogram_ GUARDED_BY(pause_histogram_lock_);
+  Histogram<uint64_t> rss_histogram_;
+  Histogram<size_t> freed_bytes_histogram_;
+  uint64_t total_thread_cpu_time_ns_;
   uint64_t total_time_ns_;
   uint64_t total_freed_objects_;
   int64_t total_freed_bytes_;

@@ -16,9 +16,10 @@
 
 #include "immune_spaces.h"
 
-#include <vector>
 #include <tuple>
+#include <vector>
 
+#include "base/logging.h"  // For VLOG.
 #include "gc/space/space-inl.h"
 #include "mirror/object.h"
 #include "oat_file.h"
@@ -56,7 +57,7 @@ void ImmuneSpaces::CreateLargestImmuneRegion() {
       if (image_oat_file != nullptr) {
         intervals.push_back(Interval(reinterpret_cast<uintptr_t>(image_oat_file->Begin()),
                                      reinterpret_cast<uintptr_t>(image_oat_file->End()),
-                                     /*image*/false));
+                                     /*image=*/false));
       }
     }
     intervals.push_back(Interval(space_begin, space_end, /*is_heap*/true));

@@ -17,18 +17,10 @@
 #ifndef ART_RUNTIME_VERIFIER_METHOD_VERIFIER_INL_H_
 #define ART_RUNTIME_VERIFIER_METHOD_VERIFIER_INL_H_
 
-#include "base/logging.h"
 #include "method_verifier.h"
-#include "mirror/class_loader.h"
-#include "mirror/dex_cache.h"
-#include "handle_scope-inl.h"
 
 namespace art {
 namespace verifier {
-
-inline const DexFile::CodeItem* MethodVerifier::CodeItem() const {
-  return code_item_;
-}
 
 inline RegisterLine* MethodVerifier::GetRegLine(uint32_t dex_pc) {
   return reg_table_.GetLine(dex_pc);
@@ -38,47 +30,16 @@ inline const InstructionFlags& MethodVerifier::GetInstructionFlags(size_t index)
   return insn_flags_[index];
 }
 
-inline InstructionFlags& MethodVerifier::GetInstructionFlags(size_t index) {
-  return insn_flags_[index];
-}
-
-inline mirror::ClassLoader* MethodVerifier::GetClassLoader() {
-  return class_loader_.Get();
-}
-
-inline mirror::DexCache* MethodVerifier::GetDexCache() {
-  return dex_cache_.Get();
-}
-
-inline ArtMethod* MethodVerifier::GetMethod() const {
-  return mirror_method_;
-}
-
 inline MethodReference MethodVerifier::GetMethodReference() const {
   return MethodReference(dex_file_, dex_method_idx_);
-}
-
-inline uint32_t MethodVerifier::GetAccessFlags() const {
-  return method_access_flags_;
 }
 
 inline bool MethodVerifier::HasCheckCasts() const {
   return has_check_casts_;
 }
 
-inline bool MethodVerifier::HasVirtualOrInterfaceInvokes() const {
-  return has_virtual_or_interface_invokes_;
-}
-
 inline bool MethodVerifier::HasFailures() const {
   return !failure_messages_.empty();
-}
-
-inline const RegType& MethodVerifier::ResolveCheckedClass(dex::TypeIndex class_idx) {
-  DCHECK(!HasFailures());
-  const RegType& result = ResolveClassAndCheckAccess(class_idx);
-  DCHECK(!HasFailures());
-  return result;
 }
 
 }  // namespace verifier

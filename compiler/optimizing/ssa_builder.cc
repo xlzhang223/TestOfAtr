@@ -16,7 +16,11 @@
 
 #include "ssa_builder.h"
 
-#include "bytecode_utils.h"
+#include "base/arena_bit_vector.h"
+#include "base/bit_vector-inl.h"
+#include "base/logging.h"
+#include "data_type-inl.h"
+#include "dex/bytecode_utils.h"
 #include "mirror/class-inl.h"
 #include "nodes.h"
 #include "reference_type_propagation.h"
@@ -37,10 +41,11 @@ void SsaBuilder::FixNullConstantType() {
       HInstruction* right = equality_instr->InputAt(1);
       HInstruction* int_operand = nullptr;
 
-      if ((left->GetType() == Primitive::kPrimNot) && (right->GetType() == Primitive::kPrimInt)) {
+      if ((left->GetType() == DataType::Type::kReference) &&
+          (right->GetType() == DataType::Type::kInt32)) {
         int_operand = right;
-      } else if ((right->GetType() == Primitive::kPrimNot)
-                 && (left->GetType() == Primitive::kPrimInt)) {
+      } else if ((right->GetType() == DataType::Type::kReference) &&
+                 (left->GetType() == DataType::Type::kInt32)) {
         int_operand = left;
       } else {
         continue;
@@ -103,7 +108,7 @@ void SsaBuilder::FixEnvironmentPhis() {
 }
 
 static void AddDependentInstructionsToWorklist(HInstruction* instruction,
-                                               ArenaVector<HPhi*>* worklist) {
+                                               ScopedArenaVector<HPhi*>* worklist) {
   // If `instruction` is a dead phi, type conflict was just identified. All its
   // live phi users, and transitively users of those users, therefore need to be
   // marked dead/conflicting too, so we add them to the worklist. Otherwise we
@@ -122,7 +127,7 @@ static void AddDependentInstructionsToWorklist(HInstruction* instruction,
 // Find a candidate primitive type for `phi` by merging the type of its inputs.
 // Return false if conflict is identified.
 static bool TypePhiFromInputs(HPhi* phi) {
-  Primitive::Type common_type = phi->GetType();
+  DataType::Type common_type = phi->GetType();
 
   for (HInstruction* input : phi->GetInputs()) {
     if (input->IsPhi() && input->AsPhi()->IsDead()) {
@@ -131,26 +136,29 @@ static bool TypePhiFromInputs(HPhi* phi) {
       return false;
     }
 
-    Primitive::Type input_type = HPhi::ToPhiType(input->GetType());
+    DataType::Type input_type = HPhi::ToPhiType(input->GetType());
     if (common_type == input_type) {
       // No change in type.
-    } else if (Primitive::Is64BitType(common_type) != Primitive::Is64BitType(input_type)) {
+    } else if (DataType::Is64BitType(common_type) != DataType::Is64BitType(input_type)) {
       // Types are of different sizes, e.g. int vs. long. Must be a conflict.
       return false;
-    } else if (Primitive::IsIntegralType(common_type)) {
+    } else if (DataType::IsIntegralType(common_type)) {
       // Previous inputs were integral, this one is not but is of the same size.
       // This does not imply conflict since some bytecode instruction types are
       // ambiguous. TypeInputsOfPhi will either type them or detect a conflict.
-      DCHECK(Primitive::IsFloatingPointType(input_type) || input_type == Primitive::kPrimNot);
+      DCHECK(DataType::IsFloatingPointType(input_type) ||
+             input_type == DataType::Type::kReference);
       common_type = input_type;
-    } else if (Primitive::IsIntegralType(input_type)) {
+    } else if (DataType::IsIntegralType(input_type)) {
       // Input is integral, common type is not. Same as in the previous case, if
       // there is a conflict, it will be detected during TypeInputsOfPhi.
-      DCHECK(Primitive::IsFloatingPointType(common_type) || common_type == Primitive::kPrimNot);
+      DCHECK(DataType::IsFloatingPointType(common_type) ||
+             common_type == DataType::Type::kReference);
     } else {
       // Combining float and reference types. Clearly a conflict.
-      DCHECK((common_type == Primitive::kPrimFloat && input_type == Primitive::kPrimNot) ||
-             (common_type == Primitive::kPrimNot && input_type == Primitive::kPrimFloat));
+      DCHECK(
+          (common_type == DataType::Type::kFloat32 && input_type == DataType::Type::kReference) ||
+          (common_type == DataType::Type::kReference && input_type == DataType::Type::kFloat32));
       return false;
     }
   }
@@ -162,9 +170,9 @@ static bool TypePhiFromInputs(HPhi* phi) {
 }
 
 // Replace inputs of `phi` to match its type. Return false if conflict is identified.
-bool SsaBuilder::TypeInputsOfPhi(HPhi* phi, ArenaVector<HPhi*>* worklist) {
-  Primitive::Type common_type = phi->GetType();
-  if (Primitive::IsIntegralType(common_type)) {
+bool SsaBuilder::TypeInputsOfPhi(HPhi* phi, ScopedArenaVector<HPhi*>* worklist) {
+  DataType::Type common_type = phi->GetType();
+  if (DataType::IsIntegralType(common_type)) {
     // We do not need to retype ambiguous inputs because they are always constructed
     // with the integral type candidate.
     if (kIsDebugBuild) {
@@ -175,14 +183,15 @@ bool SsaBuilder::TypeInputsOfPhi(HPhi* phi, ArenaVector<HPhi*>* worklist) {
     // Inputs did not need to be replaced, hence no conflict. Report success.
     return true;
   } else {
-    DCHECK(common_type == Primitive::kPrimNot || Primitive::IsFloatingPointType(common_type));
+    DCHECK(common_type == DataType::Type::kReference ||
+           DataType::IsFloatingPointType(common_type));
     HInputsRef inputs = phi->GetInputs();
     for (size_t i = 0; i < inputs.size(); ++i) {
       HInstruction* input = inputs[i];
       if (input->GetType() != common_type) {
         // Input type does not match phi's type. Try to retype the input or
         // generate a suitably typed equivalent.
-        HInstruction* equivalent = (common_type == Primitive::kPrimNot)
+        HInstruction* equivalent = (common_type == DataType::Type::kReference)
             ? GetReferenceTypeEquivalent(input)
             : GetFloatOrDoubleEquivalent(input, common_type);
         if (equivalent == nullptr) {
@@ -207,9 +216,9 @@ bool SsaBuilder::TypeInputsOfPhi(HPhi* phi, ArenaVector<HPhi*>* worklist) {
 
 // Attempt to set the primitive type of `phi` to match its inputs. Return whether
 // it was changed by the algorithm or not.
-bool SsaBuilder::UpdatePrimitiveType(HPhi* phi, ArenaVector<HPhi*>* worklist) {
+bool SsaBuilder::UpdatePrimitiveType(HPhi* phi, ScopedArenaVector<HPhi*>* worklist) {
   DCHECK(phi->IsLive());
-  Primitive::Type original_type = phi->GetType();
+  DataType::Type original_type = phi->GetType();
 
   // Try to type the phi in two stages:
   // (1) find a candidate type for the phi by merging types of all its inputs,
@@ -227,7 +236,7 @@ bool SsaBuilder::UpdatePrimitiveType(HPhi* phi, ArenaVector<HPhi*>* worklist) {
 }
 
 void SsaBuilder::RunPrimitiveTypePropagation() {
-  ArenaVector<HPhi*> worklist(graph_->GetArena()->Adapter(kArenaAllocGraphBuilder));
+  ScopedArenaVector<HPhi*> worklist(local_allocator_->Adapter(kArenaAllocGraphBuilder));
 
   for (HBasicBlock* block : graph_->GetReversePostOrder()) {
     if (block->IsLoopHeader()) {
@@ -256,7 +265,7 @@ void SsaBuilder::RunPrimitiveTypePropagation() {
   EquivalentPhisCleanup();
 }
 
-void SsaBuilder::ProcessPrimitiveTypePropagationWorklist(ArenaVector<HPhi*>* worklist) {
+void SsaBuilder::ProcessPrimitiveTypePropagationWorklist(ScopedArenaVector<HPhi*>* worklist) {
   // Process worklist
   while (!worklist->empty()) {
     HPhi* phi = worklist->back();
@@ -270,8 +279,8 @@ void SsaBuilder::ProcessPrimitiveTypePropagationWorklist(ArenaVector<HPhi*>* wor
 }
 
 static HArrayGet* FindFloatOrDoubleEquivalentOfArrayGet(HArrayGet* aget) {
-  Primitive::Type type = aget->GetType();
-  DCHECK(Primitive::IsIntOrLongType(type));
+  DataType::Type type = aget->GetType();
+  DCHECK(DataType::IsIntOrLongType(type));
   HInstruction* next = aget->GetNext();
   if (next != nullptr && next->IsArrayGet()) {
     HArrayGet* next_aget = next->AsArrayGet();
@@ -283,24 +292,25 @@ static HArrayGet* FindFloatOrDoubleEquivalentOfArrayGet(HArrayGet* aget) {
 }
 
 static HArrayGet* CreateFloatOrDoubleEquivalentOfArrayGet(HArrayGet* aget) {
-  Primitive::Type type = aget->GetType();
-  DCHECK(Primitive::IsIntOrLongType(type));
+  DataType::Type type = aget->GetType();
+  DCHECK(DataType::IsIntOrLongType(type));
   DCHECK(FindFloatOrDoubleEquivalentOfArrayGet(aget) == nullptr);
 
-  HArrayGet* equivalent = new (aget->GetBlock()->GetGraph()->GetArena()) HArrayGet(
+  HArrayGet* equivalent = new (aget->GetBlock()->GetGraph()->GetAllocator()) HArrayGet(
       aget->GetArray(),
       aget->GetIndex(),
-      type == Primitive::kPrimInt ? Primitive::kPrimFloat : Primitive::kPrimDouble,
+      type == DataType::Type::kInt32 ? DataType::Type::kFloat32 : DataType::Type::kFloat64,
       aget->GetDexPc());
   aget->GetBlock()->InsertInstructionAfter(equivalent, aget);
   return equivalent;
 }
 
-static Primitive::Type GetPrimitiveArrayComponentType(HInstruction* array)
+static DataType::Type GetPrimitiveArrayComponentType(HInstruction* array)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   ReferenceTypeInfo array_type = array->GetReferenceTypeInfo();
   DCHECK(array_type.IsPrimitiveArrayClass());
-  return array_type.GetTypeHandle()->GetComponentType()->GetPrimitiveType();
+  return DataTypeFromPrimitive(
+      array_type.GetTypeHandle()->GetComponentType()->GetPrimitiveType());
 }
 
 bool SsaBuilder::FixAmbiguousArrayOps() {
@@ -312,7 +322,7 @@ bool SsaBuilder::FixAmbiguousArrayOps() {
   // uses (because they are untyped) and environment uses (if --debuggable).
   // After resolving all ambiguous ArrayGets, we will re-run primitive type
   // propagation on the Phis which need to be updated.
-  ArenaVector<HPhi*> worklist(graph_->GetArena()->Adapter(kArenaAllocGraphBuilder));
+  ScopedArenaVector<HPhi*> worklist(local_allocator_->Adapter(kArenaAllocGraphBuilder));
 
   {
     ScopedObjectAccess soa(Thread::Current());
@@ -321,14 +331,16 @@ bool SsaBuilder::FixAmbiguousArrayOps() {
       HInstruction* array = aget_int->GetArray();
       if (!array->GetReferenceTypeInfo().IsPrimitiveArrayClass()) {
         // RTP did not type the input array. Bail.
+        VLOG(compiler) << "Not compiled: Could not infer an array type for array operation at "
+                       << aget_int->GetDexPc();
         return false;
       }
 
       HArrayGet* aget_float = FindFloatOrDoubleEquivalentOfArrayGet(aget_int);
-      Primitive::Type array_type = GetPrimitiveArrayComponentType(array);
-      DCHECK_EQ(Primitive::Is64BitType(aget_int->GetType()), Primitive::Is64BitType(array_type));
+      DataType::Type array_type = GetPrimitiveArrayComponentType(array);
+      DCHECK_EQ(DataType::Is64BitType(aget_int->GetType()), DataType::Is64BitType(array_type));
 
-      if (Primitive::IsIntOrLongType(array_type)) {
+      if (DataType::IsIntOrLongType(array_type)) {
         if (aget_float != nullptr) {
           // There is a float/double equivalent. We must replace it and re-run
           // primitive type propagation on all dependent instructions.
@@ -337,7 +349,7 @@ bool SsaBuilder::FixAmbiguousArrayOps() {
           AddDependentInstructionsToWorklist(aget_int, &worklist);
         }
       } else {
-        DCHECK(Primitive::IsFloatingPointType(array_type));
+        DCHECK(DataType::IsFloatingPointType(array_type));
         if (aget_float == nullptr) {
           // This is a float/double ArrayGet but there were no typed uses which
           // would create the typed equivalent. Create it now.
@@ -361,23 +373,25 @@ bool SsaBuilder::FixAmbiguousArrayOps() {
       HInstruction* array = aset->GetArray();
       if (!array->GetReferenceTypeInfo().IsPrimitiveArrayClass()) {
         // RTP did not type the input array. Bail.
+        VLOG(compiler) << "Not compiled: Could not infer an array type for array operation at "
+                       << aset->GetDexPc();
         return false;
       }
 
       HInstruction* value = aset->GetValue();
-      Primitive::Type value_type = value->GetType();
-      Primitive::Type array_type = GetPrimitiveArrayComponentType(array);
-      DCHECK_EQ(Primitive::Is64BitType(value_type), Primitive::Is64BitType(array_type));
+      DataType::Type value_type = value->GetType();
+      DataType::Type array_type = GetPrimitiveArrayComponentType(array);
+      DCHECK_EQ(DataType::Is64BitType(value_type), DataType::Is64BitType(array_type));
 
-      if (Primitive::IsFloatingPointType(array_type)) {
-        if (!Primitive::IsFloatingPointType(value_type)) {
-          DCHECK(Primitive::IsIntegralType(value_type));
+      if (DataType::IsFloatingPointType(array_type)) {
+        if (!DataType::IsFloatingPointType(value_type)) {
+          DCHECK(DataType::IsIntegralType(value_type));
           // Array elements are floating-point but the value has not been replaced
           // with its floating-point equivalent. The replacement must always
           // succeed in code validated by the verifier.
           HInstruction* equivalent = GetFloatOrDoubleEquivalent(value, array_type);
           DCHECK(equivalent != nullptr);
-          aset->ReplaceInput(equivalent, /* input_index */ 2);
+          aset->ReplaceInput(equivalent, /* index= */ 2);
           if (equivalent->IsPhi()) {
             // Returned equivalent is a phi which may not have had its inputs
             // replaced yet. We need to run primitive type propagation on it.
@@ -386,12 +400,12 @@ bool SsaBuilder::FixAmbiguousArrayOps() {
         }
         // Refine the side effects of this floating point aset. Note that we do this even if
         // no replacement occurs, since the right-hand-side may have been corrected already.
-        aset->ComputeSideEffects();
+        aset->SetSideEffects(HArraySet::ComputeSideEffects(aset->GetComponentType()));
       } else {
         // Array elements are integral and the value assigned to it initially
         // was integral too. Nothing to do.
-        DCHECK(Primitive::IsIntegralType(array_type));
-        DCHECK(Primitive::IsIntegralType(value_type));
+        DCHECK(DataType::IsIntegralType(array_type));
+        DCHECK(DataType::IsIntegralType(value_type));
       }
     }
   }
@@ -404,29 +418,36 @@ bool SsaBuilder::FixAmbiguousArrayOps() {
   return true;
 }
 
-static bool HasAliasInEnvironments(HInstruction* instruction) {
-  HEnvironment* last_user = nullptr;
+bool SsaBuilder::HasAliasInEnvironments(HInstruction* instruction) {
+  ScopedArenaHashSet<size_t> seen_users(
+      local_allocator_->Adapter(kArenaAllocGraphBuilder));
   for (const HUseListNode<HEnvironment*>& use : instruction->GetEnvUses()) {
     DCHECK(use.GetUser() != nullptr);
-    // Note: The first comparison (== null) always fails.
-    if (use.GetUser() == last_user) {
+    size_t id = use.GetUser()->GetHolder()->GetId();
+    if (seen_users.find(id) != seen_users.end()) {
       return true;
     }
-    last_user = use.GetUser();
-  }
-
-  if (kIsDebugBuild) {
-    // Do a quadratic search to ensure same environment uses are next
-    // to each other.
-    const HUseList<HEnvironment*>& env_uses = instruction->GetEnvUses();
-    for (auto current = env_uses.begin(), end = env_uses.end(); current != end; ++current) {
-      auto next = current;
-      for (++next; next != end; ++next) {
-        DCHECK(next->GetUser() != current->GetUser());
-      }
-    }
+    seen_users.insert(id);
   }
   return false;
+}
+
+bool SsaBuilder::ReplaceUninitializedStringPhis() {
+  for (HInvoke* invoke : uninitialized_string_phis_) {
+    HInstruction* str = invoke->InputAt(invoke->InputCount() - 1);
+    if (str->IsPhi()) {
+      // If after redundant phi and dead phi elimination, it's still a phi that feeds
+      // the invoke, then we must be compiling a method with irreducible loops. Just bail.
+      DCHECK(graph_->HasIrreducibleLoops());
+      return false;
+    }
+    DCHECK(str->IsNewInstance());
+    AddUninitializedString(str->AsNewInstance());
+    str->ReplaceUsesDominatedBy(invoke, invoke);
+    str->ReplaceEnvUsesDominatedBy(invoke, invoke);
+    invoke->RemoveInputAt(invoke->InputCount() - 1);
+  }
+  return true;
 }
 
 void SsaBuilder::RemoveRedundantUninitializedStrings() {
@@ -441,8 +462,9 @@ void SsaBuilder::RemoveRedundantUninitializedStrings() {
     DCHECK(new_instance->IsStringAlloc());
 
     // Replace NewInstance of String with NullConstant if not used prior to
-    // calling StringFactory. In case of deoptimization, the interpreter is
-    // expected to skip null check on the `this` argument of the StringFactory call.
+    // calling StringFactory. We check for alias environments in case of deoptimization.
+    // The interpreter is expected to skip null check on the `this` argument of the
+    // StringFactory call.
     if (!new_instance->HasNonEnvironmentUses() && !HasAliasInEnvironments(new_instance)) {
       new_instance->ReplaceWith(graph_->GetNullConstant());
       new_instance->GetBlock()->RemoveInstruction(new_instance);
@@ -477,35 +499,35 @@ void SsaBuilder::RemoveRedundantUninitializedStrings() {
 GraphAnalysisResult SsaBuilder::BuildSsa() {
   DCHECK(!graph_->IsInSsaForm());
 
-  // 1) Propagate types of phis. At this point, phis are typed void in the general
+  // Propagate types of phis. At this point, phis are typed void in the general
   // case, or float/double/reference if we created an equivalent phi. So we need
   // to propagate the types across phis to give them a correct type. If a type
   // conflict is detected in this stage, the phi is marked dead.
   RunPrimitiveTypePropagation();
 
-  // 2) Now that the correct primitive types have been assigned, we can get rid
+  // Now that the correct primitive types have been assigned, we can get rid
   // of redundant phis. Note that we cannot do this phase before type propagation,
   // otherwise we could get rid of phi equivalents, whose presence is a requirement
   // for the type propagation phase. Note that this is to satisfy statement (a)
   // of the SsaBuilder (see ssa_builder.h).
   SsaRedundantPhiElimination(graph_).Run();
 
-  // 3) Fix the type for null constants which are part of an equality comparison.
+  // Fix the type for null constants which are part of an equality comparison.
   // We need to do this after redundant phi elimination, to ensure the only cases
   // that we can see are reference comparison against 0. The redundant phi
   // elimination ensures we do not see a phi taking two 0 constants in a HEqual
   // or HNotEqual.
   FixNullConstantType();
 
-  // 4) Compute type of reference type instructions. The pass assumes that
+  // Compute type of reference type instructions. The pass assumes that
   // NullConstant has been fixed up.
   ReferenceTypePropagation(graph_,
                            class_loader_,
                            dex_cache_,
                            handles_,
-                           /* is_first_run */ true).Run();
+                           /* is_first_run= */ true).Run();
 
-  // 5) HInstructionBuilder duplicated ArrayGet instructions with ambiguous type
+  // HInstructionBuilder duplicated ArrayGet instructions with ambiguous type
   // (int/float or long/double) and marked ArraySets with ambiguous input type.
   // Now that RTP computed the type of the array input, the ambiguity can be
   // resolved and the correct equivalents kept.
@@ -513,13 +535,13 @@ GraphAnalysisResult SsaBuilder::BuildSsa() {
     return kAnalysisFailAmbiguousArrayOp;
   }
 
-  // 6) Mark dead phis. This will mark phis which are not used by instructions
+  // Mark dead phis. This will mark phis which are not used by instructions
   // or other live phis. If compiling as debuggable code, phis will also be kept
   // live if they have an environment use.
   SsaDeadPhiElimination dead_phi_elimimation(graph_);
   dead_phi_elimimation.MarkDeadPhis();
 
-  // 7) Make sure environments use the right phi equivalent: a phi marked dead
+  // Make sure environments use the right phi equivalent: a phi marked dead
   // can have a phi equivalent that is not dead. In that case we have to replace
   // it with the live equivalent because deoptimization and try/catch rely on
   // environments containing values of all live vregs at that point. Note that
@@ -528,14 +550,22 @@ GraphAnalysisResult SsaBuilder::BuildSsa() {
   // environments to just reference one.
   FixEnvironmentPhis();
 
-  // 8) Now that the right phis are used for the environments, we can eliminate
+  // Now that the right phis are used for the environments, we can eliminate
   // phis we do not need. Regardless of the debuggable status, this phase is
   /// necessary for statement (b) of the SsaBuilder (see ssa_builder.h), as well
   // as for the code generation, which does not deal with phis of conflicting
   // input types.
   dead_phi_elimimation.EliminateDeadPhis();
 
-  // 9) HInstructionBuidler replaced uses of NewInstances of String with the
+  // Replace Phis that feed in a String.<init> during instruction building. We
+  // run this after redundant and dead phi elimination to make sure the phi will have
+  // been replaced by the actual allocation. Only with an irreducible loop
+  // a phi can still be the input, in which case we bail.
+  if (!ReplaceUninitializedStringPhis()) {
+    return kAnalysisFailIrreducibleLoopAndStringInit;
+  }
+
+  // HInstructionBuidler replaced uses of NewInstances of String with the
   // results of their corresponding StringFactory calls. Unless the String
   // objects are used before they are initialized, they can be replaced with
   // NullConstant. Note that this optimization is valid only if unsimplified
@@ -559,7 +589,7 @@ HFloatConstant* SsaBuilder::GetFloatEquivalent(HIntConstant* constant) {
   HFloatConstant* result = constant->GetNext()->AsFloatConstant();
   if (result == nullptr) {
     float value = bit_cast<float, int32_t>(constant->GetValue());
-    result = new (graph_->GetArena()) HFloatConstant(value);
+    result = new (graph_->GetAllocator()) HFloatConstant(value);
     constant->GetBlock()->InsertInstructionBefore(result, constant->GetNext());
     graph_->CacheFloatConstant(result);
   } else {
@@ -581,7 +611,7 @@ HDoubleConstant* SsaBuilder::GetDoubleEquivalent(HLongConstant* constant) {
   HDoubleConstant* result = constant->GetNext()->AsDoubleConstant();
   if (result == nullptr) {
     double value = bit_cast<double, int64_t>(constant->GetValue());
-    result = new (graph_->GetArena()) HDoubleConstant(value);
+    result = new (graph_->GetAllocator()) HDoubleConstant(value);
     constant->GetBlock()->InsertInstructionBefore(result, constant->GetNext());
     graph_->CacheDoubleConstant(result);
   } else {
@@ -599,7 +629,7 @@ HDoubleConstant* SsaBuilder::GetDoubleEquivalent(HLongConstant* constant) {
  * floating point registers and core registers), we need to create a copy of the
  * phi with a floating point / reference type.
  */
-HPhi* SsaBuilder::GetFloatDoubleOrReferenceEquivalentOfPhi(HPhi* phi, Primitive::Type type) {
+HPhi* SsaBuilder::GetFloatDoubleOrReferenceEquivalentOfPhi(HPhi* phi, DataType::Type type) {
   DCHECK(phi->IsLive()) << "Cannot get equivalent of a dead phi since it would create a live one.";
 
   // We place the floating point /reference phi next to this phi.
@@ -614,10 +644,9 @@ HPhi* SsaBuilder::GetFloatDoubleOrReferenceEquivalentOfPhi(HPhi* phi, Primitive:
   if (next == nullptr
       || (next->AsPhi()->GetRegNumber() != phi->GetRegNumber())
       || (next->GetType() != type)) {
-    ArenaAllocator* allocator = graph_->GetArena();
+    ArenaAllocator* allocator = graph_->GetAllocator();
     HInputsRef inputs = phi->GetInputs();
-    HPhi* new_phi =
-        new (allocator) HPhi(allocator, phi->GetRegNumber(), inputs.size(), type);
+    HPhi* new_phi = new (allocator) HPhi(allocator, phi->GetRegNumber(), inputs.size(), type);
     // Copy the inputs. Note that the graph may not be correctly typed
     // by doing this copy, but the type propagation phase will fix it.
     ArrayRef<HUserRecord<HInstruction*>> new_input_records = new_phi->GetInputRecords();
@@ -637,9 +666,9 @@ HPhi* SsaBuilder::GetFloatDoubleOrReferenceEquivalentOfPhi(HPhi* phi, Primitive:
 }
 
 HArrayGet* SsaBuilder::GetFloatOrDoubleEquivalentOfArrayGet(HArrayGet* aget) {
-  DCHECK(Primitive::IsIntegralType(aget->GetType()));
+  DCHECK(DataType::IsIntegralType(aget->GetType()));
 
-  if (!Primitive::IsIntOrLongType(aget->GetType())) {
+  if (!DataType::IsIntOrLongType(aget->GetType())) {
     // Cannot type boolean, char, byte, short to float/double.
     return nullptr;
   }
@@ -650,7 +679,7 @@ HArrayGet* SsaBuilder::GetFloatOrDoubleEquivalentOfArrayGet(HArrayGet* aget) {
     // int/long. Requesting a float/double equivalent should lead to a conflict.
     if (kIsDebugBuild) {
       ScopedObjectAccess soa(Thread::Current());
-      DCHECK(Primitive::IsIntOrLongType(GetPrimitiveArrayComponentType(aget->GetArray())));
+      DCHECK(DataType::IsIntOrLongType(GetPrimitiveArrayComponentType(aget->GetArray())));
     }
     return nullptr;
   } else {
@@ -661,7 +690,7 @@ HArrayGet* SsaBuilder::GetFloatOrDoubleEquivalentOfArrayGet(HArrayGet* aget) {
   }
 }
 
-HInstruction* SsaBuilder::GetFloatOrDoubleEquivalent(HInstruction* value, Primitive::Type type) {
+HInstruction* SsaBuilder::GetFloatOrDoubleEquivalent(HInstruction* value, DataType::Type type) {
   if (value->IsArrayGet()) {
     return GetFloatOrDoubleEquivalentOfArrayGet(value->AsArrayGet());
   } else if (value->IsLongConstant()) {
@@ -679,7 +708,7 @@ HInstruction* SsaBuilder::GetReferenceTypeEquivalent(HInstruction* value) {
   if (value->IsIntConstant() && value->AsIntConstant()->GetValue() == 0) {
     return graph_->GetNullConstant();
   } else if (value->IsPhi()) {
-    return GetFloatDoubleOrReferenceEquivalentOfPhi(value->AsPhi(), Primitive::kPrimNot);
+    return GetFloatDoubleOrReferenceEquivalentOfPhi(value->AsPhi(), DataType::Type::kReference);
   } else {
     return nullptr;
   }

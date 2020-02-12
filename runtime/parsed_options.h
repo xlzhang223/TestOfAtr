@@ -22,11 +22,12 @@
 
 #include <jni.h>
 
-#include "globals.h"
-#include "gc/collector_type.h"
-#include "gc/space/large_object_space.h"
 #include "arch/instruction_set.h"
-#include "jit/profile_saver_options.h"
+#include "gc/collector_type.h"
+#include "gc/space/image_space_loading_order.h"
+#include "gc/space/large_object_space.h"
+// #include "jit/profile_saver_options.h"
+#include "runtime_globals.h"
 #include "runtime_options.h"
 
 namespace art {

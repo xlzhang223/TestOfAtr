@@ -25,8 +25,8 @@
 namespace art {
 
 namespace mirror {
-  class Class;
-  class Object;
+class Class;
+class Object;
 }  // namespace mirror
 
 // How we want to sanity check the heap's correctness.
@@ -48,7 +48,6 @@ enum VerifyObjectFlags {
   kVerifyAll = kVerifyThis | kVerifyReads | kVerifyWrites,
 };
 
-static constexpr bool kVerifyStack = kIsDebugBuild;
 static constexpr VerifyObjectFlags kDefaultVerifyFlags = kVerifyNone;
 static constexpr VerifyObjectMode kVerifyObjectSupport =
     kDefaultVerifyFlags != 0 ? kVerifyObjectModeFast : kVerifyObjectModeDisabled;
@@ -62,6 +61,10 @@ static inline void VerifyObject(ObjPtr<mirror::Object> obj) NO_THREAD_SAFETY_ANA
   if (kVerifyObjectSupport > kVerifyObjectModeDisabled && obj != nullptr) {
     VerifyObjectImpl(obj);
   }
+}
+
+inline constexpr VerifyObjectFlags RemoveThisFlags(VerifyObjectFlags flags) {
+  return static_cast<VerifyObjectFlags>(flags & ~kVerifyThis);
 }
 
 // Check that c.getClass() == c.getClass().getClass().

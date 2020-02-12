@@ -14,15 +14,16 @@
  * limitations under the License.
  */
 
+import java.lang.reflect.Method;
+
 public class Main {
 
   public static boolean doThrow = false;
 
-  /// CHECK-START: void Main.$opt$noinline$testReplaceInputWithItself(int) intrinsics_recognition (after)
+  /// CHECK-START: void Main.$opt$noinline$testReplaceInputWithItself(int) builder (after)
   /// CHECK-DAG:     <<ArgX:i\d+>>   ParameterValue
-  /// CHECK-DAG:     <<Method:[ij]\d+>> CurrentMethod
   /// CHECK-DAG:     <<Zero:i\d+>>   IntConstant 0
-  /// CHECK-DAG:     <<Cmp:i\d+>>    InvokeStaticOrDirect [<<ArgX>>,<<Zero>>,<<Method>>] intrinsic:IntegerCompare
+  /// CHECK-DAG:     <<Cmp:i\d+>>    InvokeStaticOrDirect [<<ArgX>>,<<Zero>>{{(,[ij]\d+)?}}] intrinsic:IntegerCompare
   /// CHECK-DAG:                     GreaterThanOrEqual [<<Cmp>>,<<Zero>>]
 
   /// CHECK-START: void Main.$opt$noinline$testReplaceInputWithItself(int) instruction_simplifier (after)
@@ -42,36 +43,6 @@ public class Main {
     }
   }
 
-  /// CHECK-START: int Main.compareBooleans(boolean, boolean) intrinsics_recognition (after)
-  /// CHECK-DAG:     <<Method:[ij]\d+>> CurrentMethod
-  /// CHECK-DAG:     <<Zero:i\d+>>   IntConstant 0
-  /// CHECK-DAG:     <<One:i\d+>>    IntConstant 1
-  /// CHECK-DAG:     <<PhiX:i\d+>>   Phi [<<One>>,<<Zero>>]
-  /// CHECK-DAG:     <<PhiY:i\d+>>   Phi [<<One>>,<<Zero>>]
-  /// CHECK-DAG:     <<Result:i\d+>> InvokeStaticOrDirect [<<PhiX>>,<<PhiY>>,<<Method>>] intrinsic:IntegerCompare
-  /// CHECK-DAG:                     Return [<<Result>>]
-
-  /// CHECK-START: int Main.compareBooleans(boolean, boolean) instruction_simplifier (after)
-  /// CHECK-DAG:     <<Zero:i\d+>>   IntConstant 0
-  /// CHECK-DAG:     <<One:i\d+>>    IntConstant 1
-  /// CHECK-DAG:     <<PhiX:i\d+>>   Phi [<<One>>,<<Zero>>]
-  /// CHECK-DAG:     <<PhiY:i\d+>>   Phi [<<One>>,<<Zero>>]
-  /// CHECK-DAG:     <<Result:i\d+>> Compare [<<PhiX>>,<<PhiY>>]
-  /// CHECK-DAG:                     Return [<<Result>>]
-
-  /// CHECK-START: int Main.compareBooleans(boolean, boolean) instruction_simplifier (after)
-  /// CHECK-NOT:                     InvokeStaticOrDirect
-
-  /// CHECK-START: int Main.compareBooleans(boolean, boolean) select_generator (after)
-  /// CHECK:         <<ArgX:z\d+>>   ParameterValue
-  /// CHECK:         <<ArgY:z\d+>>   ParameterValue
-  /// CHECK-DAG:     <<Zero:i\d+>>   IntConstant 0
-  /// CHECK-DAG:     <<One:i\d+>>    IntConstant 1
-  /// CHECK-DAG:     <<SelX:i\d+>>   Select [<<Zero>>,<<One>>,<<ArgX>>]
-  /// CHECK-DAG:     <<SelY:i\d+>>   Select [<<Zero>>,<<One>>,<<ArgY>>]
-  /// CHECK-DAG:     <<Result:i\d+>> Compare [<<SelX>>,<<SelY>>]
-  /// CHECK-DAG:                     Return [<<Result>>]
-
   /// CHECK-START: int Main.compareBooleans(boolean, boolean) select_generator (after)
   /// CHECK-NOT:                     Phi
 
@@ -88,7 +59,13 @@ public class Main {
     return Integer.compare((x ? 1 : 0), (y ? 1 : 0));
   }
 
-  /// CHECK-START: int Main.compareBytes(byte, byte) intrinsics_recognition (after)
+  private static int compareBooleansSmali(boolean x, boolean y) throws Exception {
+    Class<?> c = Class.forName("Smali");
+    Method m = c.getMethod("compareBooleans", boolean.class, boolean.class);
+    return (Integer) m.invoke(null, x, y);
+  }
+
+  /// CHECK-START: int Main.compareBytes(byte, byte) builder (after)
   /// CHECK-DAG:     <<Result:i\d+>> InvokeStaticOrDirect intrinsic:IntegerCompare
   /// CHECK-DAG:                     Return [<<Result>>]
 
@@ -103,7 +80,7 @@ public class Main {
     return Integer.compare(x, y);
   }
 
-  /// CHECK-START: int Main.compareShorts(short, short) intrinsics_recognition (after)
+  /// CHECK-START: int Main.compareShorts(short, short) builder (after)
   /// CHECK-DAG:     <<Result:i\d+>> InvokeStaticOrDirect intrinsic:IntegerCompare
   /// CHECK-DAG:                     Return [<<Result>>]
 
@@ -118,7 +95,7 @@ public class Main {
     return Integer.compare(x, y);
   }
 
-  /// CHECK-START: int Main.compareChars(char, char) intrinsics_recognition (after)
+  /// CHECK-START: int Main.compareChars(char, char) builder (after)
   /// CHECK-DAG:     <<Result:i\d+>> InvokeStaticOrDirect intrinsic:IntegerCompare
   /// CHECK-DAG:                     Return [<<Result>>]
 
@@ -133,7 +110,7 @@ public class Main {
     return Integer.compare(x, y);
   }
 
-  /// CHECK-START: int Main.compareInts(int, int) intrinsics_recognition (after)
+  /// CHECK-START: int Main.compareInts(int, int) builder (after)
   /// CHECK-DAG:     <<Result:i\d+>> InvokeStaticOrDirect intrinsic:IntegerCompare
   /// CHECK-DAG:                     Return [<<Result>>]
 
@@ -148,7 +125,7 @@ public class Main {
     return Integer.compare(x, y);
   }
 
-  /// CHECK-START: int Main.compareLongs(long, long) intrinsics_recognition (after)
+  /// CHECK-START: int Main.compareLongs(long, long) builder (after)
   /// CHECK-DAG:     <<Result:i\d+>> InvokeStaticOrDirect intrinsic:LongCompare
   /// CHECK-DAG:                     Return [<<Result>>]
 
@@ -164,7 +141,7 @@ public class Main {
   }
 
 
-  /// CHECK-START: int Main.compareByteShort(byte, short) intrinsics_recognition (after)
+  /// CHECK-START: int Main.compareByteShort(byte, short) builder (after)
   /// CHECK-DAG:     <<Result:i\d+>> InvokeStaticOrDirect intrinsic:IntegerCompare
   /// CHECK-DAG:                     Return [<<Result>>]
 
@@ -179,7 +156,7 @@ public class Main {
     return Integer.compare(x, y);
   }
 
-  /// CHECK-START: int Main.compareByteChar(byte, char) intrinsics_recognition (after)
+  /// CHECK-START: int Main.compareByteChar(byte, char) builder (after)
   /// CHECK-DAG:     <<Result:i\d+>> InvokeStaticOrDirect intrinsic:IntegerCompare
   /// CHECK-DAG:                     Return [<<Result>>]
 
@@ -194,7 +171,7 @@ public class Main {
     return Integer.compare(x, y);
   }
 
-  /// CHECK-START: int Main.compareByteInt(byte, int) intrinsics_recognition (after)
+  /// CHECK-START: int Main.compareByteInt(byte, int) builder (after)
   /// CHECK-DAG:     <<Result:i\d+>> InvokeStaticOrDirect intrinsic:IntegerCompare
   /// CHECK-DAG:                     Return [<<Result>>]
 
@@ -210,7 +187,7 @@ public class Main {
   }
 
 
-  /// CHECK-START: int Main.compareShortByte(short, byte) intrinsics_recognition (after)
+  /// CHECK-START: int Main.compareShortByte(short, byte) builder (after)
   /// CHECK-DAG:     <<Result:i\d+>> InvokeStaticOrDirect intrinsic:IntegerCompare
   /// CHECK-DAG:                     Return [<<Result>>]
 
@@ -225,7 +202,7 @@ public class Main {
     return Integer.compare(x, y);
   }
 
-  /// CHECK-START: int Main.compareShortChar(short, char) intrinsics_recognition (after)
+  /// CHECK-START: int Main.compareShortChar(short, char) builder (after)
   /// CHECK-DAG:     <<Result:i\d+>> InvokeStaticOrDirect intrinsic:IntegerCompare
   /// CHECK-DAG:                     Return [<<Result>>]
 
@@ -240,7 +217,7 @@ public class Main {
     return Integer.compare(x, y);
   }
 
-  /// CHECK-START: int Main.compareShortInt(short, int) intrinsics_recognition (after)
+  /// CHECK-START: int Main.compareShortInt(short, int) builder (after)
   /// CHECK-DAG:     <<Result:i\d+>> InvokeStaticOrDirect intrinsic:IntegerCompare
   /// CHECK-DAG:                     Return [<<Result>>]
 
@@ -256,7 +233,7 @@ public class Main {
   }
 
 
-  /// CHECK-START: int Main.compareCharByte(char, byte) intrinsics_recognition (after)
+  /// CHECK-START: int Main.compareCharByte(char, byte) builder (after)
   /// CHECK-DAG:     <<Result:i\d+>> InvokeStaticOrDirect intrinsic:IntegerCompare
   /// CHECK-DAG:                     Return [<<Result>>]
 
@@ -271,7 +248,7 @@ public class Main {
     return Integer.compare(x, y);
   }
 
-  /// CHECK-START: int Main.compareCharShort(char, short) intrinsics_recognition (after)
+  /// CHECK-START: int Main.compareCharShort(char, short) builder (after)
   /// CHECK-DAG:     <<Result:i\d+>> InvokeStaticOrDirect intrinsic:IntegerCompare
   /// CHECK-DAG:                     Return [<<Result>>]
 
@@ -286,7 +263,7 @@ public class Main {
     return Integer.compare(x, y);
   }
 
-  /// CHECK-START: int Main.compareCharInt(char, int) intrinsics_recognition (after)
+  /// CHECK-START: int Main.compareCharInt(char, int) builder (after)
   /// CHECK-DAG:     <<Result:i\d+>> InvokeStaticOrDirect intrinsic:IntegerCompare
   /// CHECK-DAG:                     Return [<<Result>>]
 
@@ -302,7 +279,7 @@ public class Main {
   }
 
 
-  /// CHECK-START: int Main.compareIntByte(int, byte) intrinsics_recognition (after)
+  /// CHECK-START: int Main.compareIntByte(int, byte) builder (after)
   /// CHECK-DAG:     <<Result:i\d+>> InvokeStaticOrDirect intrinsic:IntegerCompare
   /// CHECK-DAG:                     Return [<<Result>>]
 
@@ -317,7 +294,7 @@ public class Main {
     return Integer.compare(x, y);
   }
 
-  /// CHECK-START: int Main.compareIntShort(int, short) intrinsics_recognition (after)
+  /// CHECK-START: int Main.compareIntShort(int, short) builder (after)
   /// CHECK-DAG:     <<Result:i\d+>> InvokeStaticOrDirect intrinsic:IntegerCompare
   /// CHECK-DAG:                     Return [<<Result>>]
 
@@ -332,7 +309,7 @@ public class Main {
     return Integer.compare(x, y);
   }
 
-  /// CHECK-START: int Main.compareIntChar(int, char) intrinsics_recognition (after)
+  /// CHECK-START: int Main.compareIntChar(int, char) builder (after)
   /// CHECK-DAG:     <<Result:i\d+>> InvokeStaticOrDirect intrinsic:IntegerCompare
   /// CHECK-DAG:                     Return [<<Result>>]
 
@@ -348,13 +325,17 @@ public class Main {
   }
 
 
-  public static void testCompareBooleans() {
+  public static void testCompareBooleans() throws Exception {
     expectEquals(-1, compareBooleans(false, true));
+    expectEquals(-1, compareBooleansSmali(false, true));
 
     expectEquals(0, compareBooleans(false, false));
     expectEquals(0, compareBooleans(true, true));
+    expectEquals(0, compareBooleansSmali(false, false));
+    expectEquals(0, compareBooleansSmali(true, true));
 
     expectEquals(1, compareBooleans(true, false));
+    expectEquals(1, compareBooleansSmali(true, false));
   }
 
   public static void testCompareBytes() {
@@ -915,7 +896,7 @@ public class Main {
   }
 
 
-  public static void main(String args[]) {
+  public static void main(String args[]) throws Exception {
     $opt$noinline$testReplaceInputWithItself(42);
 
     testCompareBooleans();

@@ -23,10 +23,10 @@
 #include "base/dchecked_vector.h"
 #include "base/macros.h"
 #include "base/mutex.h"
-#include "class_reference.h"
-#include "method_reference.h"
-#include "safe_map.h"
-#include "utils/atomic_method_ref_map.h"
+#include "base/safe_map.h"
+#include "dex/class_reference.h"
+#include "dex/method_reference.h"
+#include "utils/atomic_dex_ref_map.h"
 
 namespace art {
 
@@ -51,23 +51,21 @@ class VerificationResults {
   void CreateVerifiedMethodFor(MethodReference ref)
       REQUIRES(!verified_methods_lock_);
 
-  const VerifiedMethod* GetVerifiedMethod(MethodReference ref)
+  const VerifiedMethod* GetVerifiedMethod(MethodReference ref) const
       REQUIRES(!verified_methods_lock_);
 
   void AddRejectedClass(ClassReference ref) REQUIRES(!rejected_classes_lock_);
-  bool IsClassRejected(ClassReference ref) REQUIRES(!rejected_classes_lock_);
+  bool IsClassRejected(ClassReference ref) const REQUIRES(!rejected_classes_lock_);
 
-  bool IsCandidateForCompilation(MethodReference& method_ref, const uint32_t access_flags);
+  bool IsCandidateForCompilation(MethodReference& method_ref, const uint32_t access_flags) const;
 
   // Add a dex file to enable using the atomic map.
   void AddDexFile(const DexFile* dex_file) REQUIRES(!verified_methods_lock_);
 
  private:
   // Verified methods. The method array is fixed to avoid needing a lock to extend it.
-  using AtomicMap = AtomicMethodRefMap<const VerifiedMethod*>;
-  using VerifiedMethodMap = SafeMap<MethodReference,
-                                    const VerifiedMethod*,
-                                    MethodReferenceComparator>;
+  using AtomicMap = AtomicDexRefMap<MethodReference, const VerifiedMethod*>;
+  using VerifiedMethodMap = SafeMap<MethodReference, const VerifiedMethod*>;
 
   VerifiedMethodMap verified_methods_ GUARDED_BY(verified_methods_lock_);
   const CompilerOptions* const compiler_options_;
@@ -76,10 +74,12 @@ class VerificationResults {
   // GetVerifiedMethod.
   AtomicMap atomic_verified_methods_;
 
-  ReaderWriterMutex verified_methods_lock_ DEFAULT_MUTEX_ACQUIRED_AFTER;
+  // TODO: External locking during CompilerDriver::PreCompile(), no locking during compilation.
+  mutable ReaderWriterMutex verified_methods_lock_ DEFAULT_MUTEX_ACQUIRED_AFTER;
 
   // Rejected classes.
-  ReaderWriterMutex rejected_classes_lock_ DEFAULT_MUTEX_ACQUIRED_AFTER;
+  // TODO: External locking during CompilerDriver::PreCompile(), no locking during compilation.
+  mutable ReaderWriterMutex rejected_classes_lock_ DEFAULT_MUTEX_ACQUIRED_AFTER;
   std::set<ClassReference> rejected_classes_ GUARDED_BY(rejected_classes_lock_);
 
   friend class verifier::VerifierDepsTest;

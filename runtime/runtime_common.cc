@@ -23,13 +23,17 @@
 #include <sstream>
 #include <string>
 
-#include "android-base/stringprintf.h"
+#include <android-base/logging.h>
+#include <android-base/stringprintf.h>
 
-#include "base/logging.h"
+#include "base/aborting.h"
+#include "base/file_utils.h"
+#include "base/logging.h"  // For LogHelper, GetCmdLine.
 #include "base/macros.h"
 #include "base/mutex.h"
 #include "native_stack_dump.h"
-#include "thread-inl.h"
+#include "runtime.h"
+#include "thread-current-inl.h"
 #include "thread_list.h"
 
 namespace art {
@@ -367,68 +371,54 @@ static bool IsTimeoutSignal(int signal_number) {
 #pragma GCC diagnostic ignored "-Wframe-larger-than="
 #endif
 
-void HandleUnexpectedSignalCommon(int signal_number,
-                                  siginfo_t* info,
-                                  void* raw_context,
-                                  bool running_on_linux) {
-  bool handle_timeout_signal = running_on_linux;
-  bool dump_on_stderr = running_on_linux;
+std::string GetFaultMessageForAbortLogging() {
+  Runtime* runtime = Runtime::Current();
+  return  (runtime != nullptr) ? runtime->GetFaultMessage() : "";
+}
 
-  static bool handling_unexpected_signal = false;
-  if (handling_unexpected_signal) {
-    LogHelper::LogLineLowStack(__FILE__,
-                               __LINE__,
-                               ::android::base::FATAL_WITHOUT_ABORT,
-                               "HandleUnexpectedSignal reentered\n");
-    if (handle_timeout_signal) {
-      if (IsTimeoutSignal(signal_number)) {
-        // Ignore a recursive timeout.
-        return;
-      }
+static void HandleUnexpectedSignalCommonDump(int signal_number,
+                                             siginfo_t* info,
+                                             void* raw_context,
+                                             bool handle_timeout_signal,
+                                             bool dump_on_stderr) {
+  auto logger = [&](auto& stream) {
+    bool has_address = (signal_number == SIGILL || signal_number == SIGBUS ||
+                        signal_number == SIGFPE || signal_number == SIGSEGV);
+    OsInfo os_info;
+    const char* cmd_line = GetCmdLine();
+    if (cmd_line == nullptr) {
+      cmd_line = "<unset>";  // Because no-one called InitLogging.
     }
-    _exit(1);
-  }
-  handling_unexpected_signal = true;
+    pid_t tid = GetTid();
+    std::string thread_name(GetThreadName(tid));
+    UContext thread_context(raw_context);
+    Backtrace thread_backtrace(raw_context);
 
-  gAborting++;  // set before taking any locks
-  MutexLock mu(Thread::Current(), *Locks::unexpected_signal_lock_);
+    stream << "*** *** *** *** *** *** *** *** *** *** *** *** *** *** *** ***" << std::endl
+           << StringPrintf("Fatal signal %d (%s), code %d (%s)",
+                             signal_number,
+                             GetSignalName(signal_number),
+                             info->si_code,
+                             GetSignalCodeName(signal_number, info->si_code))
+           << (has_address ? StringPrintf(" fault addr %p", info->si_addr) : "") << std::endl
+           << "OS: " << Dumpable<OsInfo>(os_info) << std::endl
+           << "Cmdline: " << cmd_line << std::endl
+           << "Thread: " << tid << " \"" << thread_name << "\"" << std::endl
+           << "Registers:\n" << Dumpable<UContext>(thread_context) << std::endl
+           << "Backtrace:\n" << Dumpable<Backtrace>(thread_backtrace) << std::endl;
+    stream << std::flush;
+  };
 
-  bool has_address = (signal_number == SIGILL || signal_number == SIGBUS ||
-                      signal_number == SIGFPE || signal_number == SIGSEGV);
-
-  OsInfo os_info;
-  const char* cmd_line = GetCmdLine();
-  if (cmd_line == nullptr) {
-    cmd_line = "<unset>";  // Because no-one called InitLogging.
-  }
-  pid_t tid = GetTid();
-  std::string thread_name(GetThreadName(tid));
-  UContext thread_context(raw_context);
-  Backtrace thread_backtrace(raw_context);
-
-  std::ostringstream stream;
-  stream << "*** *** *** *** *** *** *** *** *** *** *** *** *** *** *** ***\n"
-         << StringPrintf("Fatal signal %d (%s), code %d (%s)",
-                         signal_number,
-                         GetSignalName(signal_number),
-                         info->si_code,
-                         GetSignalCodeName(signal_number, info->si_code))
-         << (has_address ? StringPrintf(" fault addr %p", info->si_addr) : "") << '\n'
-         << "OS: " << Dumpable<OsInfo>(os_info) << '\n'
-         << "Cmdline: " << cmd_line << '\n'
-         << "Thread: " << tid << " \"" << thread_name << "\"" << '\n'
-         << "Registers:\n" << Dumpable<UContext>(thread_context) << '\n'
-         << "Backtrace:\n" << Dumpable<Backtrace>(thread_backtrace) << '\n';
   if (dump_on_stderr) {
     // Note: We are using cerr directly instead of LOG macros to ensure even just partial output
     //       makes it out. That means we lose the "dalvikvm..." prefix, but that is acceptable
     //       considering this is an abort situation.
-    std::cerr << stream.str() << std::flush;
+    logger(std::cerr);
   } else {
-    LOG(FATAL_WITHOUT_ABORT) << stream.str() << std::flush;
+    logger(LOG_STREAM(FATAL_WITHOUT_ABORT));
   }
   if (kIsDebugBuild && signal_number == SIGSEGV) {
-    PrintFileToLog("/proc/self/maps", LogSeverity::FATAL_WITHOUT_ABORT);
+    PrintFileToLog("/proc/self/maps", android::base::LogSeverity::FATAL_WITHOUT_ABORT);
   }
 
   Runtime* runtime = Runtime::Current();
@@ -442,10 +432,75 @@ void HandleUnexpectedSignalCommon(int signal_number,
     }
 
     if (dump_on_stderr) {
-      std::cerr << "Fault message: " << runtime->GetFaultMessage() << std::endl;
+      std::cerr << "Fault message: " << GetFaultMessageForAbortLogging() << std::endl;
     } else {
-      LOG(FATAL_WITHOUT_ABORT) << "Fault message: " << runtime->GetFaultMessage();
+      LOG(FATAL_WITHOUT_ABORT) << "Fault message: " << GetFaultMessageForAbortLogging();
     }
+  }
+}
+
+void HandleUnexpectedSignalCommon(int signal_number,
+                                  siginfo_t* info,
+                                  void* raw_context,
+                                  bool handle_timeout_signal,
+                                  bool dump_on_stderr) {
+  // Local _static_ storing the currently handled signal (or -1).
+  static int handling_unexpected_signal = -1;
+
+  // Whether the dump code should be run under the unexpected-signal lock. For diagnostics we
+  // allow recursive unexpected-signals in certain cases - avoid a deadlock.
+  bool grab_lock = true;
+
+  if (handling_unexpected_signal != -1) {
+    LogHelper::LogLineLowStack(__FILE__,
+                               __LINE__,
+                               ::android::base::FATAL_WITHOUT_ABORT,
+                               "HandleUnexpectedSignal reentered\n");
+    // Print the signal number. Don't use any standard functions, just some arithmetic. Just best
+    // effort, with a minimal buffer.
+    if (0 < signal_number && signal_number < 100) {
+      char buf[] = { ' ',
+                     'S',
+                     static_cast<char>('0' + (signal_number / 10)),
+                     static_cast<char>('0' + (signal_number % 10)),
+                     '\n',
+                     0 };
+      LogHelper::LogLineLowStack(__FILE__,
+                                 __LINE__,
+                                 ::android::base::FATAL_WITHOUT_ABORT,
+                                 buf);
+    }
+    if (handle_timeout_signal) {
+      if (IsTimeoutSignal(signal_number)) {
+        // Ignore a recursive timeout.
+        return;
+      }
+    }
+    // If we were handling a timeout signal, try to go on. Otherwise hard-exit.
+    // This relies on the expectation that we'll only ever get one timeout signal.
+    if (!handle_timeout_signal || handling_unexpected_signal != GetTimeoutSignal()) {
+      _exit(1);
+    }
+    grab_lock = false;  // The "outer" handling instance already holds the lock.
+  }
+  handling_unexpected_signal = signal_number;
+
+  gAborting++;  // set before taking any locks
+
+  if (grab_lock) {
+    MutexLock mu(Thread::Current(), *Locks::unexpected_signal_lock_);
+
+    HandleUnexpectedSignalCommonDump(signal_number,
+                                     info,
+                                     raw_context,
+                                     handle_timeout_signal,
+                                     dump_on_stderr);
+  } else {
+    HandleUnexpectedSignalCommonDump(signal_number,
+                                     info,
+                                     raw_context,
+                                     handle_timeout_signal,
+                                     dump_on_stderr);
   }
 }
 

@@ -17,12 +17,14 @@
 #include "java_lang_Thread.h"
 
 #include "common_throws.h"
-#include "jni_internal.h"
-#include "monitor.h"
+#include "jni/jni_internal.h"
 #include "mirror/object.h"
+#include "monitor.h"
+#include "native_util.h"
+#include "nativehelper/jni_macros.h"
+#include "nativehelper/scoped_utf_chars.h"
 #include "scoped_fast_native_object_access-inl.h"
 #include "scoped_thread_state_change-inl.h"
-#include "ScopedUtfChars.h"
 #include "thread.h"
 #include "thread_list.h"
 #include "verify_object.h"
@@ -35,7 +37,7 @@ static jobject Thread_currentThread(JNIEnv* env, jclass) {
 }
 
 static jboolean Thread_interrupted(JNIEnv* env, jclass) {
-  return static_cast<JNIEnvExt*>(env)->self->Interrupted() ? JNI_TRUE : JNI_FALSE;
+  return static_cast<JNIEnvExt*>(env)->GetSelf()->Interrupted() ? JNI_TRUE : JNI_FALSE;
 }
 
 static jboolean Thread_isInterrupted(JNIEnv* env, jobject java_thread) {
@@ -84,6 +86,8 @@ static jint Thread_nativeGetStatus(JNIEnv* env, jobject java_thread, jboolean ha
     case kWaiting:                        return kJavaWaiting;
     case kStarting:                       return kJavaNew;
     case kNative:                         return kJavaRunnable;
+    case kWaitingForTaskProcessor:        return kJavaWaiting;
+    case kWaitingForLockInflation:        return kJavaWaiting;
     case kWaitingForGcToComplete:         return kJavaWaiting;
     case kWaitingPerformingGc:            return kJavaWaiting;
     case kWaitingForCheckPointsToRun:     return kJavaWaiting;
@@ -100,6 +104,7 @@ static jint Thread_nativeGetStatus(JNIEnv* env, jobject java_thread, jboolean ha
     case kWaitingForVisitObjects:         return kJavaWaiting;
     case kWaitingWeakGcRootRead:          return kJavaRunnable;
     case kWaitingForGcThreadFlip:         return kJavaWaiting;
+    case kNativeForAbort:                 return kJavaWaiting;
     case kSuspended:                      return kJavaRunnable;
     // Don't add a 'default' here so the compiler can spot incompatible enum changes.
   }
@@ -107,19 +112,18 @@ static jint Thread_nativeGetStatus(JNIEnv* env, jobject java_thread, jboolean ha
   return -1;  // Unreachable.
 }
 
-static jboolean Thread_nativeHoldsLock(JNIEnv* env, jobject java_thread, jobject java_object) {
+static jboolean Thread_holdsLock(JNIEnv* env, jclass, jobject java_object) {
   ScopedObjectAccess soa(env);
   ObjPtr<mirror::Object> object = soa.Decode<mirror::Object>(java_object);
   if (object == nullptr) {
     ThrowNullPointerException("object == null");
     return JNI_FALSE;
   }
-  MutexLock mu(soa.Self(), *Locks::thread_list_lock_);
-  Thread* thread = Thread::FromManagedThread(soa, java_thread);
-  return thread->HoldsLock(object.Ptr());
+  Thread* thread = soa.Self();
+  return thread->HoldsLock(object);
 }
 
-static void Thread_nativeInterrupt(JNIEnv* env, jobject java_thread) {
+static void Thread_interrupt0(JNIEnv* env, jobject java_thread) {
   ScopedFastNativeObjectAccess soa(env);
   MutexLock mu(soa.Self(), *Locks::thread_list_lock_);
   Thread* thread = Thread::FromManagedThread(soa, java_thread);
@@ -128,7 +132,7 @@ static void Thread_nativeInterrupt(JNIEnv* env, jobject java_thread) {
   }
 }
 
-static void Thread_nativeSetName(JNIEnv* env, jobject peer, jstring java_name) {
+static void Thread_setNativeName(JNIEnv* env, jobject peer, jstring java_name) {
   ScopedUtfChars name(env, java_name);
   {
     ScopedObjectAccess soa(env);
@@ -143,13 +147,17 @@ static void Thread_nativeSetName(JNIEnv* env, jobject peer, jstring java_name) {
   ThreadList* thread_list = Runtime::Current()->GetThreadList();
   bool timed_out;
   // Take suspend thread lock to avoid races with threads trying to suspend this one.
-  Thread* thread = thread_list->SuspendThreadByPeer(peer, true, false, &timed_out);
+  Thread* thread = thread_list->SuspendThreadByPeer(peer,
+                                                    /* request_suspension= */ true,
+                                                    SuspendReason::kInternal,
+                                                    &timed_out);
   if (thread != nullptr) {
     {
       ScopedObjectAccess soa(env);
       thread->SetThreadName(name.c_str());
     }
-    thread_list->Resume(thread, false);
+    bool resumed = thread_list->Resume(thread, SuspendReason::kInternal);
+    DCHECK(resumed);
   } else if (timed_out) {
     LOG(ERROR) << "Trying to set thread name to '" << name.c_str() << "' failed as the thread "
         "failed to suspend within a generous timeout.";
@@ -161,7 +169,7 @@ static void Thread_nativeSetName(JNIEnv* env, jobject peer, jstring java_name) {
  * from Thread.MIN_PRIORITY to Thread.MAX_PRIORITY (1-10), with "normal"
  * threads at Thread.NORM_PRIORITY (5).
  */
-static void Thread_nativeSetPriority(JNIEnv* env, jobject java_thread, jint new_priority) {
+static void Thread_setPriority0(JNIEnv* env, jobject java_thread, jint new_priority) {
   ScopedObjectAccess soa(env);
   MutexLock mu(soa.Self(), *Locks::thread_list_lock_);
   Thread* thread = Thread::FromManagedThread(soa, java_thread);
@@ -192,10 +200,10 @@ static JNINativeMethod gMethods[] = {
   FAST_NATIVE_METHOD(Thread, isInterrupted, "()Z"),
   NATIVE_METHOD(Thread, nativeCreate, "(Ljava/lang/Thread;JZ)V"),
   NATIVE_METHOD(Thread, nativeGetStatus, "(Z)I"),
-  NATIVE_METHOD(Thread, nativeHoldsLock, "(Ljava/lang/Object;)Z"),
-  FAST_NATIVE_METHOD(Thread, nativeInterrupt, "()V"),
-  NATIVE_METHOD(Thread, nativeSetName, "(Ljava/lang/String;)V"),
-  NATIVE_METHOD(Thread, nativeSetPriority, "(I)V"),
+  NATIVE_METHOD(Thread, holdsLock, "(Ljava/lang/Object;)Z"),
+  FAST_NATIVE_METHOD(Thread, interrupt0, "()V"),
+  NATIVE_METHOD(Thread, setNativeName, "(Ljava/lang/String;)V"),
+  NATIVE_METHOD(Thread, setPriority0, "(I)V"),
   FAST_NATIVE_METHOD(Thread, sleep, "(Ljava/lang/Object;JI)V"),
   NATIVE_METHOD(Thread, yield, "()V"),
 };

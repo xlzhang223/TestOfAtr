@@ -14,9 +14,10 @@
  * limitations under the License.
  */
 
+#include "instruction_simplifier_arm.h"
+
 #include "code_generator.h"
 #include "common_arm.h"
-#include "instruction_simplifier_arm.h"
 #include "instruction_simplifier_shared.h"
 #include "mirror/array-inl.h"
 #include "mirror/string.h"
@@ -29,18 +30,65 @@ using helpers::HasShifterOperand;
 
 namespace arm {
 
-using helpers::ShifterOperandSupportsExtension;
+class InstructionSimplifierArmVisitor : public HGraphVisitor {
+ public:
+  InstructionSimplifierArmVisitor(HGraph* graph, OptimizingCompilerStats* stats)
+      : HGraphVisitor(graph), stats_(stats) {}
+
+ private:
+  void RecordSimplification() {
+    MaybeRecordStat(stats_, MethodCompilationStat::kInstructionSimplificationsArch);
+  }
+
+  bool TryMergeIntoUsersShifterOperand(HInstruction* instruction);
+  bool TryMergeIntoShifterOperand(HInstruction* use, HInstruction* bitfield_op, bool do_merge);
+  bool CanMergeIntoShifterOperand(HInstruction* use, HInstruction* bitfield_op) {
+    return TryMergeIntoShifterOperand(use, bitfield_op, /* do_merge= */ false);
+  }
+  bool MergeIntoShifterOperand(HInstruction* use, HInstruction* bitfield_op) {
+    DCHECK(CanMergeIntoShifterOperand(use, bitfield_op));
+    return TryMergeIntoShifterOperand(use, bitfield_op, /* do_merge= */ true);
+  }
+
+  /**
+   * This simplifier uses a special-purpose BB visitor.
+   * (1) No need to visit Phi nodes.
+   * (2) Since statements can be removed in a "forward" fashion,
+   *     the visitor should test if each statement is still there.
+   */
+  void VisitBasicBlock(HBasicBlock* block) override {
+    // TODO: fragile iteration, provide more robust iterators?
+    for (HInstructionIterator it(block->GetInstructions()); !it.Done(); it.Advance()) {
+      HInstruction* instruction = it.Current();
+      if (instruction->IsInBlock()) {
+        instruction->Accept(this);
+      }
+    }
+  }
+
+  void VisitAnd(HAnd* instruction) override;
+  void VisitArrayGet(HArrayGet* instruction) override;
+  void VisitArraySet(HArraySet* instruction) override;
+  void VisitMul(HMul* instruction) override;
+  void VisitOr(HOr* instruction) override;
+  void VisitShl(HShl* instruction) override;
+  void VisitShr(HShr* instruction) override;
+  void VisitTypeConversion(HTypeConversion* instruction) override;
+  void VisitUShr(HUShr* instruction) override;
+
+  OptimizingCompilerStats* stats_;
+};
 
 bool InstructionSimplifierArmVisitor::TryMergeIntoShifterOperand(HInstruction* use,
                                                                  HInstruction* bitfield_op,
                                                                  bool do_merge) {
-  DCHECK(HasShifterOperand(use, kArm));
+  DCHECK(HasShifterOperand(use, InstructionSet::kArm));
   DCHECK(use->IsBinaryOperation());
   DCHECK(CanFitInShifterOperand(bitfield_op));
   DCHECK(!bitfield_op->HasEnvironmentUses());
 
-  Primitive::Type type = use->GetType();
-  if (type != Primitive::kPrimInt && type != Primitive::kPrimLong) {
+  DataType::Type type = use->GetType();
+  if (type != DataType::Type::kInt32 && type != DataType::Type::kInt64) {
     return false;
   }
 
@@ -71,28 +119,28 @@ bool InstructionSimplifierArmVisitor::TryMergeIntoShifterOperand(HInstruction* u
   int shift_amount = 0;
 
   HDataProcWithShifterOp::GetOpInfoFromInstruction(bitfield_op, &op_kind, &shift_amount);
-  shift_amount &= use->GetType() == Primitive::kPrimInt
+  shift_amount &= use->GetType() == DataType::Type::kInt32
       ? kMaxIntShiftDistance
       : kMaxLongShiftDistance;
 
   if (HDataProcWithShifterOp::IsExtensionOp(op_kind)) {
-    if (!ShifterOperandSupportsExtension(use)) {
+    if (!use->IsAdd() && (!use->IsSub() || use->GetType() != DataType::Type::kInt64)) {
       return false;
     }
   // Shift by 1 is a special case that results in the same number and type of instructions
   // as this simplification, but potentially shorter code.
-  } else if (type == Primitive::kPrimLong && shift_amount == 1) {
+  } else if (type == DataType::Type::kInt64 && shift_amount == 1) {
     return false;
   }
 
   if (do_merge) {
     HDataProcWithShifterOp* alu_with_op =
-        new (GetGraph()->GetArena()) HDataProcWithShifterOp(use,
-                                                            other_input,
-                                                            bitfield_op->InputAt(0),
-                                                            op_kind,
-                                                            shift_amount,
-                                                            use->GetDexPc());
+        new (GetGraph()->GetAllocator()) HDataProcWithShifterOp(use,
+                                                                other_input,
+                                                                bitfield_op->InputAt(0),
+                                                                op_kind,
+                                                                shift_amount,
+                                                                use->GetDexPc());
     use->GetBlock()->ReplaceAndRemoveInstructionWith(use, alu_with_op);
     if (bitfield_op->GetUses().empty()) {
       bitfield_op->GetBlock()->RemoveInstruction(bitfield_op);
@@ -116,7 +164,7 @@ bool InstructionSimplifierArmVisitor::TryMergeIntoUsersShifterOperand(HInstructi
   // Check whether we can merge the instruction in all its users' shifter operand.
   for (const HUseListNode<HInstruction*>& use : uses) {
     HInstruction* user = use.GetUser();
-    if (!HasShifterOperand(user, kArm)) {
+    if (!HasShifterOperand(user, InstructionSet::kArm)) {
       return false;
     }
     if (!CanMergeIntoShifterOperand(user, bitfield_op)) {
@@ -144,19 +192,24 @@ void InstructionSimplifierArmVisitor::VisitAnd(HAnd* instruction) {
 
 void InstructionSimplifierArmVisitor::VisitArrayGet(HArrayGet* instruction) {
   size_t data_offset = CodeGenerator::GetArrayDataOffset(instruction);
-  Primitive::Type type = instruction->GetType();
+  DataType::Type type = instruction->GetType();
 
   // TODO: Implement reading (length + compression) for String compression feature from
-  // negative offset (count_offset - data_offset). Thumb2Assembler does not support T4
-  // encoding of "LDR (immediate)" at the moment.
+  // negative offset (count_offset - data_offset). Thumb2Assembler (now removed) did
+  // not support T4 encoding of "LDR (immediate)", but ArmVIXLMacroAssembler might.
   // Don't move array pointer if it is charAt because we need to take the count first.
   if (mirror::kUseStringCompression && instruction->IsStringCharAt()) {
     return;
   }
 
-  if (type == Primitive::kPrimLong
-      || type == Primitive::kPrimFloat
-      || type == Primitive::kPrimDouble) {
+  // TODO: Support intermediate address for object arrays on arm.
+  if (type == DataType::Type::kReference) {
+    return;
+  }
+
+  if (type == DataType::Type::kInt64
+      || type == DataType::Type::kFloat32
+      || type == DataType::Type::kFloat64) {
     // T32 doesn't support ShiftedRegOffset mem address mode for these types
     // to enable optimization.
     return;
@@ -171,13 +224,13 @@ void InstructionSimplifierArmVisitor::VisitArrayGet(HArrayGet* instruction) {
 }
 
 void InstructionSimplifierArmVisitor::VisitArraySet(HArraySet* instruction) {
-  size_t access_size = Primitive::ComponentSize(instruction->GetComponentType());
+  size_t access_size = DataType::Size(instruction->GetComponentType());
   size_t data_offset = mirror::Array::DataOffset(access_size).Uint32Value();
-  Primitive::Type type = instruction->GetComponentType();
+  DataType::Type type = instruction->GetComponentType();
 
-  if (type == Primitive::kPrimLong
-      || type == Primitive::kPrimFloat
-      || type == Primitive::kPrimDouble) {
+  if (type == DataType::Type::kInt64
+      || type == DataType::Type::kFloat32
+      || type == DataType::Type::kFloat64) {
     // T32 doesn't support ShiftedRegOffset mem address mode for these types
     // to enable optimization.
     return;
@@ -192,7 +245,7 @@ void InstructionSimplifierArmVisitor::VisitArraySet(HArraySet* instruction) {
 }
 
 void InstructionSimplifierArmVisitor::VisitMul(HMul* instruction) {
-  if (TryCombineMultiplyAccumulate(instruction, kArm)) {
+  if (TryCombineMultiplyAccumulate(instruction, InstructionSet::kArm)) {
     RecordSimplification();
   }
 }
@@ -216,15 +269,15 @@ void InstructionSimplifierArmVisitor::VisitShr(HShr* instruction) {
 }
 
 void InstructionSimplifierArmVisitor::VisitTypeConversion(HTypeConversion* instruction) {
-  Primitive::Type result_type = instruction->GetResultType();
-  Primitive::Type input_type = instruction->GetInputType();
+  DataType::Type result_type = instruction->GetResultType();
+  DataType::Type input_type = instruction->GetInputType();
 
   if (input_type == result_type) {
     // We let the arch-independent code handle this.
     return;
   }
 
-  if (Primitive::IsIntegralType(result_type) && Primitive::IsIntegralType(input_type)) {
+  if (DataType::IsIntegralType(result_type) && DataType::IsIntegralType(input_type)) {
     TryMergeIntoUsersShifterOperand(instruction);
   }
 }
@@ -233,6 +286,12 @@ void InstructionSimplifierArmVisitor::VisitUShr(HUShr* instruction) {
   if (instruction->InputAt(1)->IsConstant()) {
     TryMergeIntoUsersShifterOperand(instruction);
   }
+}
+
+bool InstructionSimplifierArm::Run() {
+  InstructionSimplifierArmVisitor visitor(graph_, stats_);
+  visitor.VisitReversePostOrder();
+  return true;
 }
 
 }  // namespace arm

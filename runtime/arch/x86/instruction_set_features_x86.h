@@ -29,12 +29,11 @@ class X86InstructionSetFeatures : public InstructionSetFeatures {
  public:
   // Process a CPU variant string like "atom" or "nehalem" and create InstructionSetFeatures.
   static X86FeaturesUniquePtr FromVariant(const std::string& variant,
-                                                                      std::string* error_msg,
-                                                                      bool x86_64 = false);
+                                          std::string* error_msg,
+                                          bool x86_64 = false);
 
   // Parse a bitmap and create an InstructionSetFeatures.
-  static X86FeaturesUniquePtr FromBitmap(uint32_t bitmap,
-                                                                     bool x86_64 = false);
+  static X86FeaturesUniquePtr FromBitmap(uint32_t bitmap, bool x86_64 = false);
 
   // Turn C pre-processor #defines into the equivalent instruction set features.
   static X86FeaturesUniquePtr FromCppDefines(bool x86_64 = false);
@@ -50,15 +49,17 @@ class X86InstructionSetFeatures : public InstructionSetFeatures {
   // InstructionSetFeatures. This works around kernel bugs in AT_HWCAP and /proc/cpuinfo.
   static X86FeaturesUniquePtr FromAssembly(bool x86_64 = false);
 
-  bool Equals(const InstructionSetFeatures* other) const OVERRIDE;
+  bool Equals(const InstructionSetFeatures* other) const override;
 
-  virtual InstructionSet GetInstructionSet() const OVERRIDE {
-    return kX86;
+  bool HasAtLeast(const InstructionSetFeatures* other) const override;
+
+  InstructionSet GetInstructionSet() const override {
+    return InstructionSet::kX86;
   }
 
-  uint32_t AsBitmap() const OVERRIDE;
+  uint32_t AsBitmap() const override;
 
-  std::string GetFeatureString() const OVERRIDE;
+  std::string GetFeatureString() const override;
 
   virtual ~X86InstructionSetFeatures() {}
 
@@ -66,11 +67,13 @@ class X86InstructionSetFeatures : public InstructionSetFeatures {
 
   bool HasPopCnt() const { return has_POPCNT_; }
 
+  bool HasAVX2() const { return has_AVX2_; }
+
  protected:
   // Parse a string of the form "ssse3" adding these to a new InstructionSetFeatures.
-  virtual std::unique_ptr<const InstructionSetFeatures>
+  std::unique_ptr<const InstructionSetFeatures>
       AddFeaturesFromSplitString(const std::vector<std::string>& features,
-                                 std::string* error_msg) const OVERRIDE {
+                                 std::string* error_msg) const override {
     return AddFeaturesFromSplitString(features, false, error_msg);
   }
 

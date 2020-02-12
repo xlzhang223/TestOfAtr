@@ -16,7 +16,9 @@
 
 #include "compiler_filter.h"
 
-#include "utils.h"
+#include <ostream>
+
+#include "base/utils.h"
 
 namespace art {
 
@@ -163,6 +165,10 @@ CompilerFilter::Filter CompilerFilter::GetSafeModeFilterFrom(Filter filter) {
 
 bool CompilerFilter::IsAsGoodAs(Filter current, Filter target) {
   return current >= target;
+}
+
+bool CompilerFilter::IsBetter(Filter current, Filter target) {
+  return current > target;
 }
 
 std::string CompilerFilter::NameOfFilter(Filter filter) {

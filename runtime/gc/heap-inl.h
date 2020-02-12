@@ -20,7 +20,9 @@
 #include "heap.h"
 
 #include "allocation_listener.h"
+#include "base/quasi_atomic.h"
 #include "base/time_utils.h"
+#include "gc/accounting/atomic_stack.h"
 #include "gc/accounting/card_table-inl.h"
 #include "gc/allocation_record.h"
 #include "gc/collector/semi_space.h"
@@ -29,12 +31,12 @@
 #include "gc/space/large_object_space.h"
 #include "gc/space/region_space-inl.h"
 #include "gc/space/rosalloc_space-inl.h"
+#include "handle_scope-inl.h"
 #include "obj_ptr-inl.h"
 #include "runtime.h"
-#include "handle_scope-inl.h"
 #include "thread-inl.h"
-#include "utils.h"
 #include "verify_object.h"
+#include "write_barrier-inl.h"
 //zhangxianlong
  #include "leakleak/leakleak.h"
 //end
@@ -67,8 +69,10 @@ inline mirror::Object* Heap::AllocObjectWithAllocator(Thread* self,
                                                            pre_fence_visitor);
     if (obj != nullptr) {
       //zhangxianlong alloc new obj
-      // if(byte_count >= (unsigned long)leakleak::Leaktrace::getInstance().getTsize())
-        leakleak::Leaktrace::getInstance().new_obj(obj.Ptr(),byte_count);
+      // if(byte_count >= (unsigned long)leakleak::getInstance()->getTsize())
+      //if(Thread::Current()->Getiscopy()==0)
+        leakleak::getInstance()->new_obj(obj.Ptr(),byte_count);
+      
       //end
       return obj.Ptr();
     } else {
@@ -111,8 +115,9 @@ inline mirror::Object* Heap::AllocObjectWithAllocator(Thread* self,
     pre_fence_visitor(obj, usable_size);
     QuasiAtomic::ThreadFenceForConstructor();
   } else {
-    // bytes allocated that takes bulk thread-local buffer allocations into account.
-    size_t bytes_tl_bulk_allocated = 0;
+    // Bytes allocated that includes bulk thread-local buffer allocations in addition to direct
+    // non-TLAB object allocations.
+    size_t bytes_tl_bulk_allocated = 0u;
     obj = TryToAllocate<kInstrumented, false>(self, allocator, byte_count, &bytes_allocated,
                                               &usable_size, &bytes_tl_bulk_allocated);
     if (UNLIKELY(obj == nullptr)) {
@@ -136,14 +141,18 @@ inline mirror::Object* Heap::AllocObjectWithAllocator(Thread* self,
                                                     klass,
                                                     byte_count,
                                                     pre_fence_visitor);
-          leakleak::Leaktrace::getInstance().new_obj(ret,byte_count);
+          //if(Thread::Current()->Getiscopy()==0)
+            leakleak::getInstance()->new_obj(ret,byte_count);
           return ret;
           //end
           //  return AllocObject</*kInstrumented*/true>(self,
           //                                           klass,
           //                                           byte_count,
           //                                           pre_fence_visitor);
-          
+          // return AllocObject</*kInstrumented=*/true>(self,
+          //                                            klass,
+          //                                            byte_count,
+          //                                            pre_fence_visitor);
         }
         return nullptr;
       }
@@ -164,12 +173,18 @@ inline mirror::Object* Heap::AllocObjectWithAllocator(Thread* self,
       // enabled. We don't need this for kAllocatorTypeRosAlloc/DlMalloc
       // cases because we don't directly allocate into the main alloc
       // space (besides promotions) under the SS/GSS collector.
-      WriteBarrierField(obj, mirror::Object::ClassOffset(), klass);
+      WriteBarrier::ForFieldWrite(obj, mirror::Object::ClassOffset(), klass);
     }
     pre_fence_visitor(obj, usable_size);
     QuasiAtomic::ThreadFenceForConstructor();
-    new_num_bytes_allocated = static_cast<size_t>(
-        num_bytes_allocated_.FetchAndAddRelaxed(bytes_tl_bulk_allocated)) + bytes_tl_bulk_allocated;
+    if (bytes_tl_bulk_allocated > 0) {
+      size_t num_bytes_allocated_before =
+          num_bytes_allocated_.fetch_add(bytes_tl_bulk_allocated, std::memory_order_relaxed);
+      new_num_bytes_allocated = num_bytes_allocated_before + bytes_tl_bulk_allocated;
+      // Only trace when we get an increase in the number of bytes allocated. This happens when
+      // obtaining a new TLAB and isn't often enough to hurt performance according to golem.
+      TraceHeapSize(new_num_bytes_allocated);
+    }
   }
   if (kIsDebugBuild && Runtime::Current()->IsStarted()) {
     CHECK_LE(obj->SizeOf(), usable_size);
@@ -194,7 +209,7 @@ inline mirror::Object* Heap::AllocObjectWithAllocator(Thread* self,
       DCHECK(allocation_records_ != nullptr);
       allocation_records_->RecordAllocation(self, &obj, bytes_allocated);
     }
-    AllocationListener* l = alloc_listener_.LoadSequentiallyConsistent();
+    AllocationListener* l = alloc_listener_.load(std::memory_order_seq_cst);
     if (l != nullptr) {
       // Same as above. We assume that a listener that was once stored will never be deleted.
       // Otherwise we'd have to perform this under a lock.
@@ -218,19 +233,17 @@ inline mirror::Object* Heap::AllocObjectWithAllocator(Thread* self,
   // optimized out. And for the other allocators, AllocatorMayHaveConcurrentGC is a constant since
   // the allocator_type should be constant propagated.
   if (AllocatorMayHaveConcurrentGC(allocator) && IsGcConcurrent()) {
-    CheckConcurrentGC(self, new_num_bytes_allocated, &obj);
+    // New_num_bytes_allocated is zero if we didn't update num_bytes_allocated_.
+    // That's fine.
+    CheckConcurrentGCForJava(self, new_num_bytes_allocated, &obj);
   }
-
   VerifyObject(obj);
   self->VerifyStack();
-  
-  
   //zhangxianlong alloc new obj
-  // if(byte_count >= (unsigned long)leakleak::Leaktrace::getInstance().getTsize())
-    leakleak::Leaktrace::getInstance().new_obj(obj.Ptr(),byte_count);
+  // if(byte_count >= (unsigned long)leakleak::getInstance()->getTsize())
+  //if(Thread::Current()->Getiscopy()==0)
+    leakleak::getInstance()->new_obj(obj.Ptr(),byte_count);
   //end
-  
-
   return obj.Ptr();
 }
 
@@ -267,8 +280,8 @@ inline mirror::Object* Heap::TryToAllocate(Thread* self,
                                            size_t* bytes_allocated,
                                            size_t* usable_size,
                                            size_t* bytes_tl_bulk_allocated) {
-  if (allocator_type != kAllocatorTypeTLAB &&
-      allocator_type != kAllocatorTypeRegionTLAB &&
+  if (allocator_type != kAllocatorTypeRegionTLAB &&
+      allocator_type != kAllocatorTypeTLAB &&
       allocator_type != kAllocatorTypeRosAlloc &&
       UNLIKELY(IsOutOfMemoryOnAllocation(allocator_type, alloc_size, kGrow))) {
     return nullptr;
@@ -288,7 +301,7 @@ inline mirror::Object* Heap::TryToAllocate(Thread* self,
     }
     case kAllocatorTypeRosAlloc: {
       if (kInstrumented && UNLIKELY(is_running_on_memory_tool_)) {
-        // If running on valgrind or asan, we should be using the instrumented path.
+        // If running on ASan, we should be using the instrumented path.
         size_t max_bytes_tl_bulk_allocated = rosalloc_space_->MaxBytesBulkAllocatedFor(alloc_size);
         if (UNLIKELY(IsOutOfMemoryOnAllocation(allocator_type,
                                                max_bytes_tl_bulk_allocated,
@@ -319,7 +332,7 @@ inline mirror::Object* Heap::TryToAllocate(Thread* self,
     }
     case kAllocatorTypeDlMalloc: {
       if (kInstrumented && UNLIKELY(is_running_on_memory_tool_)) {
-        // If running on valgrind, we should be using the instrumented path.
+        // If running on ASan, we should be using the instrumented path.
         ret = dlmalloc_space_->Alloc(self,
                                      alloc_size,
                                      bytes_allocated,
@@ -409,46 +422,47 @@ inline bool Heap::ShouldAllocLargeObject(ObjPtr<mirror::Class> c, size_t byte_co
 inline bool Heap::IsOutOfMemoryOnAllocation(AllocatorType allocator_type,
                                             size_t alloc_size,
                                             bool grow) {
-  size_t new_footprint = num_bytes_allocated_.LoadSequentiallyConsistent() + alloc_size;
-  if (UNLIKELY(new_footprint > max_allowed_footprint_)) {
-    if (UNLIKELY(new_footprint > growth_limit_)) {
+  size_t old_target = target_footprint_.load(std::memory_order_relaxed);
+  while (true) {
+    size_t old_allocated = num_bytes_allocated_.load(std::memory_order_relaxed);
+    size_t new_footprint = old_allocated + alloc_size;
+    // Tests against heap limits are inherently approximate, since multiple allocations may
+    // race, and this is not atomic with the allocation.
+    if (UNLIKELY(new_footprint <= old_target)) {
+      return false;
+    } else if (UNLIKELY(new_footprint > growth_limit_)) {
       return true;
     }
-    if (!AllocatorMayHaveConcurrentGC(allocator_type) || !IsGcConcurrent()) {
-      if (!grow) {
+    // We are between target_footprint_ and growth_limit_ .
+    if (AllocatorMayHaveConcurrentGC(allocator_type) && IsGcConcurrent()) {
+      return false;
+    } else {
+      if (grow) {
+        if (target_footprint_.compare_exchange_weak(/*inout ref*/old_target, new_footprint,
+                                                    std::memory_order_relaxed)) {
+          VlogHeapGrowth(old_target, new_footprint, alloc_size);
+          return false;
+        }  // else try again.
+      } else {
         return true;
       }
-      // TODO: Grow for allocation is racy, fix it.
-      VLOG(heap) << "Growing heap from " << PrettySize(max_allowed_footprint_) << " to "
-          << PrettySize(new_footprint) << " for a " << PrettySize(alloc_size) << " allocation";
-      max_allowed_footprint_ = new_footprint;
     }
   }
-  return false;
 }
 
-inline void Heap::CheckConcurrentGC(Thread* self,
+inline bool Heap::ShouldConcurrentGCForJava(size_t new_num_bytes_allocated) {
+  // For a Java allocation, we only check whether the number of Java allocated bytes excceeds a
+  // threshold. By not considering native allocation here, we (a) ensure that Java heap bounds are
+  // maintained, and (b) reduce the cost of the check here.
+  return new_num_bytes_allocated >= concurrent_start_bytes_;
+}
+
+inline void Heap::CheckConcurrentGCForJava(Thread* self,
                                     size_t new_num_bytes_allocated,
                                     ObjPtr<mirror::Object>* obj) {
-  if (UNLIKELY(new_num_bytes_allocated >= concurrent_start_bytes_)) {
-    RequestConcurrentGCAndSaveObject(self, false, obj);
+  if (UNLIKELY(ShouldConcurrentGCForJava(new_num_bytes_allocated))) {
+    RequestConcurrentGCAndSaveObject(self, false /* force_full */, obj);
   }
-}
-
-inline void Heap::WriteBarrierField(ObjPtr<mirror::Object> dst,
-                                    MemberOffset offset ATTRIBUTE_UNUSED,
-                                    ObjPtr<mirror::Object> new_value ATTRIBUTE_UNUSED) {
-  card_table_->MarkCard(dst.Ptr());
-}
-
-inline void Heap::WriteBarrierArray(ObjPtr<mirror::Object> dst,
-                                    int start_offset ATTRIBUTE_UNUSED,
-                                    size_t length ATTRIBUTE_UNUSED) {
-  card_table_->MarkCard(dst.Ptr());
-}
-
-inline void Heap::WriteBarrierEveryFieldOf(ObjPtr<mirror::Object> obj) {
-  card_table_->MarkCard(obj.Ptr());
 }
 
 }  // namespace gc

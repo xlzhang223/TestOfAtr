@@ -23,23 +23,28 @@
 
 #include <gtest/gtest.h>
 
+#include "base/file_utils.h"
+#include "base/os.h"
+#include "base/stl_util.h"
+#include "base/utils.h"
 #include "common_runtime_test.h"
 #include "compiler_callbacks.h"
+#include "dex/art_dex_file_loader.h"
+#include "dex/dex_file_loader.h"
 #include "exec_utils.h"
 #include "gc/heap.h"
 #include "gc/space/image_space.h"
 #include "oat_file_assistant.h"
-#include "os.h"
 #include "runtime.h"
-#include "utils.h"
 
 namespace art {
 
 // Test class that provides some helpers to set a test up for compilation using dex2oat.
 class Dex2oatEnvironmentTest : public CommonRuntimeTest {
  public:
-  virtual void SetUp() OVERRIDE {
+  void SetUp() override {
     CommonRuntimeTest::SetUp();
+    const ArtDexFileLoader dex_file_loader;
 
     // Create a scratch directory to work from.
 
@@ -70,7 +75,8 @@ class Dex2oatEnvironmentTest : public CommonRuntimeTest {
       << "Expected dex file to be at: " << GetDexSrc1();
     ASSERT_TRUE(OS::FileExists(GetStrippedDexSrc1().c_str()))
       << "Expected stripped dex file to be at: " << GetStrippedDexSrc1();
-    ASSERT_FALSE(DexFile::GetMultiDexChecksums(GetStrippedDexSrc1().c_str(), &checksums, &error_msg))
+    ASSERT_FALSE(
+        dex_file_loader.GetMultiDexChecksums(GetStrippedDexSrc1().c_str(), &checksums, &error_msg))
       << "Expected stripped dex file to be stripped: " << GetStrippedDexSrc1();
     ASSERT_TRUE(OS::FileExists(GetDexSrc2().c_str()))
       << "Expected dex file to be at: " << GetDexSrc2();
@@ -79,20 +85,28 @@ class Dex2oatEnvironmentTest : public CommonRuntimeTest {
     // GetMultiDexSrc1, but a different secondary dex checksum.
     static constexpr bool kVerifyChecksum = true;
     std::vector<std::unique_ptr<const DexFile>> multi1;
-    ASSERT_TRUE(DexFile::Open(GetMultiDexSrc1().c_str(),
-          GetMultiDexSrc1().c_str(), kVerifyChecksum, &error_msg, &multi1)) << error_msg;
+    ASSERT_TRUE(dex_file_loader.Open(GetMultiDexSrc1().c_str(),
+                                     GetMultiDexSrc1().c_str(),
+                                     /* verify= */ true,
+                                     kVerifyChecksum,
+                                     &error_msg,
+                                     &multi1)) << error_msg;
     ASSERT_GT(multi1.size(), 1u);
 
     std::vector<std::unique_ptr<const DexFile>> multi2;
-    ASSERT_TRUE(DexFile::Open(GetMultiDexSrc2().c_str(),
-          GetMultiDexSrc2().c_str(), kVerifyChecksum, &error_msg, &multi2)) << error_msg;
+    ASSERT_TRUE(dex_file_loader.Open(GetMultiDexSrc2().c_str(),
+                                     GetMultiDexSrc2().c_str(),
+                                     /* verify= */ true,
+                                     kVerifyChecksum,
+                                     &error_msg,
+                                     &multi2)) << error_msg;
     ASSERT_GT(multi2.size(), 1u);
 
     ASSERT_EQ(multi1[0]->GetLocationChecksum(), multi2[0]->GetLocationChecksum());
     ASSERT_NE(multi1[1]->GetLocationChecksum(), multi2[1]->GetLocationChecksum());
   }
 
-  virtual void SetUpRuntimeOptions(RuntimeOptions* options) OVERRIDE {
+  void SetUpRuntimeOptions(RuntimeOptions* options) override {
     // options->push_back(std::make_pair("-verbose:oat", nullptr));
 
     // Set up the image location.
@@ -103,7 +117,7 @@ class Dex2oatEnvironmentTest : public CommonRuntimeTest {
     callbacks_.reset();
   }
 
-  virtual void TearDown() OVERRIDE {
+  void TearDown() override {
     ClearDirectory(odex_dir_.c_str());
     ASSERT_EQ(0, rmdir(odex_dir_.c_str()));
 
@@ -144,26 +158,6 @@ class Dex2oatEnvironmentTest : public CommonRuntimeTest {
   std::string GetSystemImageFile() const {
     return GetImageDirectory() + "/" + GetInstructionSetString(kRuntimeISA)
       + "/core.art";
-  }
-
-  bool GetCachedImageFile(const std::string& image_location,
-                          /*out*/std::string* image,
-                          /*out*/std::string* error_msg) const {
-    std::string cache;
-    bool have_android_data;
-    bool dalvik_cache_exists;
-    bool is_global_cache;
-    GetDalvikCache(GetInstructionSetString(kRuntimeISA),
-                   true,
-                   &cache,
-                   &have_android_data,
-                   &dalvik_cache_exists,
-                   &is_global_cache);
-    if (!dalvik_cache_exists) {
-      *error_msg = "Failed to create dalvik cache";
-      return false;
-    }
-    return GetDalvikCacheFilename(image_location.c_str(), cache.c_str(), image, error_msg);
   }
 
   // Returns the path to an image location whose contents differ from the

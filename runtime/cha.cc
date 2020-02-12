@@ -17,8 +17,12 @@
 #include "cha.h"
 
 #include "art_method-inl.h"
+#include "base/logging.h"  // For VLOG
+#include "base/mutex.h"
 #include "jit/jit.h"
 #include "jit/jit_code_cache.h"
+#include "linear_alloc.h"
+#include "mirror/class_loader.h"
 #include "runtime.h"
 #include "scoped_thread_state_change-inl.h"
 #include "stack.h"
@@ -31,34 +35,24 @@ namespace art {
 void ClassHierarchyAnalysis::AddDependency(ArtMethod* method,
                                            ArtMethod* dependent_method,
                                            OatQuickMethodHeader* dependent_header) {
-  auto it = cha_dependency_map_.find(method);
-  if (it == cha_dependency_map_.end()) {
-    cha_dependency_map_[method] =
-        new std::vector<std::pair<art::ArtMethod*, art::OatQuickMethodHeader*>>();
-    it = cha_dependency_map_.find(method);
-  } else {
-    DCHECK(it->second != nullptr);
-  }
-  it->second->push_back(std::make_pair(dependent_method, dependent_header));
+  const auto it = cha_dependency_map_.insert(
+      decltype(cha_dependency_map_)::value_type(method, ListOfDependentPairs())).first;
+  it->second.push_back({dependent_method, dependent_header});
 }
 
-std::vector<std::pair<ArtMethod*, OatQuickMethodHeader*>>*
-    ClassHierarchyAnalysis::GetDependents(ArtMethod* method) {
+static const ClassHierarchyAnalysis::ListOfDependentPairs s_empty_vector;
+
+const ClassHierarchyAnalysis::ListOfDependentPairs& ClassHierarchyAnalysis::GetDependents(
+    ArtMethod* method) {
   auto it = cha_dependency_map_.find(method);
   if (it != cha_dependency_map_.end()) {
-    DCHECK(it->second != nullptr);
     return it->second;
   }
-  return nullptr;
+  return s_empty_vector;
 }
 
-void ClassHierarchyAnalysis::RemoveDependencyFor(ArtMethod* method) {
-  auto it = cha_dependency_map_.find(method);
-  if (it != cha_dependency_map_.end()) {
-    auto dependents = it->second;
-    cha_dependency_map_.erase(it);
-    delete dependents;
-  }
+void ClassHierarchyAnalysis::RemoveAllDependenciesFor(ArtMethod* method) {
+  cha_dependency_map_.erase(method);
 }
 
 void ClassHierarchyAnalysis::RemoveDependentsWithMethodHeaders(
@@ -66,22 +60,120 @@ void ClassHierarchyAnalysis::RemoveDependentsWithMethodHeaders(
   // Iterate through all entries in the dependency map and remove any entry that
   // contains one of those in method_headers.
   for (auto map_it = cha_dependency_map_.begin(); map_it != cha_dependency_map_.end(); ) {
-    auto dependents = map_it->second;
-    for (auto vec_it = dependents->begin(); vec_it != dependents->end(); ) {
-      OatQuickMethodHeader* method_header = vec_it->second;
-      auto it = std::find(method_headers.begin(), method_headers.end(), method_header);
-      if (it != method_headers.end()) {
-        vec_it = dependents->erase(vec_it);
-      } else {
-        vec_it++;
-      }
-    }
+    ListOfDependentPairs& dependents = map_it->second;
+    dependents.erase(
+        std::remove_if(
+            dependents.begin(),
+            dependents.end(),
+            [&method_headers](MethodAndMethodHeaderPair& dependent) {
+              return method_headers.find(dependent.second) != method_headers.end();
+            }),
+        dependents.end());
+
     // Remove the map entry if there are no more dependents.
-    if (dependents->empty()) {
+    if (dependents.empty()) {
       map_it = cha_dependency_map_.erase(map_it);
-      delete dependents;
     } else {
       map_it++;
+    }
+  }
+}
+
+void ClassHierarchyAnalysis::ResetSingleImplementationInHierarchy(ObjPtr<mirror::Class> klass,
+                                                                  const LinearAlloc* alloc,
+                                                                  const PointerSize pointer_size)
+                                                                  const {
+  // Presumably called from some sort of class visitor, no null pointers expected.
+  DCHECK(klass != nullptr);
+  DCHECK(alloc != nullptr);
+
+  // Skip interfaces since they cannot provide SingleImplementations to work with.
+  if (klass->IsInterface()) {
+    return;
+  }
+
+  // This method is called while visiting classes in the class table of a class loader.
+  // That means, some 'klass'es can belong to other classloaders. Argument 'alloc'
+  // allows to explicitly indicate a classloader, which is going to be deleted.
+  // Filter out classes, that do not belong to it.
+  if (!alloc->ContainsUnsafe(klass->GetMethodsPtr())) {
+    return;
+  }
+
+  // CHA analysis is only applied to resolved classes.
+  if (!klass->IsResolved()) {
+    return;
+  }
+
+  ObjPtr<mirror::Class> super = klass->GetSuperClass<kDefaultVerifyFlags, kWithoutReadBarrier>();
+
+  // Skip Object class and primitive classes.
+  if (super == nullptr) {
+    return;
+  }
+
+  // The class is going to be deleted. Iterate over the virtual methods of its superclasses to see
+  // if they have SingleImplementations methods defined by 'klass'.
+  // Skip all virtual methods that do not override methods from super class since they cannot be
+  // SingleImplementations for anything.
+  int32_t vtbl_size = super->GetVTableLength<kDefaultVerifyFlags>();
+  ObjPtr<mirror::ClassLoader> loader =
+      klass->GetClassLoader<kDefaultVerifyFlags, kWithoutReadBarrier>();
+  for (int vtbl_index = 0; vtbl_index < vtbl_size; ++vtbl_index) {
+    ArtMethod* method =
+        klass->GetVTableEntry<kDefaultVerifyFlags, kWithoutReadBarrier>(vtbl_index, pointer_size);
+    if (!alloc->ContainsUnsafe(method)) {
+      continue;
+    }
+
+    // Find all occurrences of virtual methods in parents' SingleImplementations fields
+    // and reset them.
+    // No need to reset SingleImplementations for the method itself (it will be cleared anyways),
+    // so start with a superclass and move up looking into a corresponding vtbl slot.
+    for (ObjPtr<mirror::Class> super_it = super;
+         super_it != nullptr &&
+             super_it->GetVTableLength<kDefaultVerifyFlags>() > vtbl_index;
+         super_it = super_it->GetSuperClass<kDefaultVerifyFlags, kWithoutReadBarrier>()) {
+      // Skip superclasses that are also going to be unloaded.
+      ObjPtr<mirror::ClassLoader> super_loader = super_it->
+          GetClassLoader<kDefaultVerifyFlags, kWithoutReadBarrier>();
+      if (super_loader == loader) {
+        continue;
+      }
+
+      ArtMethod* super_method = super_it->
+          GetVTableEntry<kDefaultVerifyFlags, kWithoutReadBarrier>(vtbl_index, pointer_size);
+      if (super_method->IsAbstract() &&
+          super_method->HasSingleImplementation<kWithoutReadBarrier>() &&
+          super_method->GetSingleImplementation(pointer_size) == method) {
+        // Do like there was no single implementation defined previously
+        // for this method of the superclass.
+        super_method->SetSingleImplementation(nullptr, pointer_size);
+      } else {
+        // No related SingleImplementations could possibly be found any further.
+        DCHECK(!super_method->HasSingleImplementation<kWithoutReadBarrier>());
+        break;
+      }
+    }
+  }
+
+  // Check all possible interface methods too.
+  ObjPtr<mirror::IfTable> iftable = klass->GetIfTable<kDefaultVerifyFlags, kWithoutReadBarrier>();
+  const size_t ifcount = klass->GetIfTableCount<kDefaultVerifyFlags>();
+  for (size_t i = 0; i < ifcount; ++i) {
+    ObjPtr<mirror::Class> interface =
+        iftable->GetInterface<kDefaultVerifyFlags, kWithoutReadBarrier>(i);
+    for (size_t j = 0,
+         count = iftable->GetMethodArrayCount<kDefaultVerifyFlags, kWithoutReadBarrier>(i);
+         j < count;
+         ++j) {
+      ArtMethod* method = interface->GetVirtualMethod(j, pointer_size);
+      if (method->HasSingleImplementation<kWithoutReadBarrier>() &&
+          alloc->ContainsUnsafe(method->GetSingleImplementation(pointer_size)) &&
+          !method->IsDefault()) {
+        // Do like there was no single implementation defined previously for this method.
+        method->SetSingleImplementation(nullptr, pointer_size);
+      }
     }
   }
 }
@@ -90,7 +182,7 @@ void ClassHierarchyAnalysis::RemoveDependentsWithMethodHeaders(
 // headers, sets the should_deoptimize flag on stack to 1.
 // TODO: also set the register value to 1 when should_deoptimize is allocated in
 // a register.
-class CHAStackVisitor FINAL  : public StackVisitor {
+class CHAStackVisitor final  : public StackVisitor {
  public:
   CHAStackVisitor(Thread* thread_in,
                   Context* context,
@@ -99,7 +191,7 @@ class CHAStackVisitor FINAL  : public StackVisitor {
         method_headers_(method_headers) {
   }
 
-  bool VisitFrame() OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_) {
+  bool VisitFrame() override REQUIRES_SHARED(Locks::mutator_lock_) {
     ArtMethod* method = GetMethod();
     // Avoid types of methods that do not have an oat quick method header.
     if (method == nullptr ||
@@ -154,13 +246,13 @@ class CHAStackVisitor FINAL  : public StackVisitor {
   DISALLOW_COPY_AND_ASSIGN(CHAStackVisitor);
 };
 
-class CHACheckpoint FINAL : public Closure {
+class CHACheckpoint final : public Closure {
  public:
   explicit CHACheckpoint(const std::unordered_set<OatQuickMethodHeader*>& method_headers)
       : barrier_(0),
         method_headers_(method_headers) {}
 
-  void Run(Thread* thread) OVERRIDE {
+  void Run(Thread* thread) override {
     // Note thread and self may not be equal if thread was already suspended at
     // the point of the request.
     Thread* self = Thread::Current();
@@ -185,23 +277,43 @@ class CHACheckpoint FINAL : public Closure {
   DISALLOW_COPY_AND_ASSIGN(CHACheckpoint);
 };
 
-void ClassHierarchyAnalysis::VerifyNonSingleImplementation(mirror::Class* verify_class,
-                                                           uint16_t verify_index,
-                                                           ArtMethod* excluded_method) {
+
+static void VerifyNonSingleImplementation(ObjPtr<mirror::Class> verify_class,
+                                          uint16_t verify_index,
+                                          ArtMethod* excluded_method)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  if (!kIsDebugBuild) {
+    return;
+  }
+
   // Grab cha_lock_ to make sure all single-implementation updates are seen.
+  MutexLock cha_mu(Thread::Current(), *Locks::cha_lock_);
+
   PointerSize image_pointer_size =
       Runtime::Current()->GetClassLinker()->GetImagePointerSize();
-  MutexLock cha_mu(Thread::Current(), *Locks::cha_lock_);
+
+  ObjPtr<mirror::Class> input_verify_class = verify_class;
+
   while (verify_class != nullptr) {
     if (verify_index >= verify_class->GetVTableLength()) {
       return;
     }
     ArtMethod* verify_method = verify_class->GetVTableEntry(verify_index, image_pointer_size);
     if (verify_method != excluded_method) {
+      auto construct_parent_chain = [](ObjPtr<mirror::Class> failed, ObjPtr<mirror::Class> in)
+          REQUIRES_SHARED(Locks::mutator_lock_) {
+        std::string tmp = in->PrettyClass();
+        while (in != failed) {
+          in = in->GetSuperClass();
+          tmp = tmp + "->" + in->PrettyClass();
+        }
+        return tmp;
+      };
       DCHECK(!verify_method->HasSingleImplementation())
           << "class: " << verify_class->PrettyClass()
           << " verify_method: " << verify_method->PrettyMethod(true)
-          << " excluded_method: " << excluded_method->PrettyMethod(true);
+          << " (" << construct_parent_chain(verify_class, input_verify_class) << ")"
+          << " excluded_method: " << ArtMethod::PrettyMethod(excluded_method);
       if (verify_method->IsAbstract()) {
         DCHECK(verify_method->GetSingleImplementation(image_pointer_size) == nullptr);
       }
@@ -250,24 +362,19 @@ void ClassHierarchyAnalysis::CheckVirtualMethodSingleImplementationInfo(
     // method_in_super already has multiple implementations. All methods in the
     // same vtable slots in its super classes should have
     // non-single-implementation already.
-    if (kIsDebugBuild) {
-      VerifyNonSingleImplementation(klass->GetSuperClass()->GetSuperClass(),
-                                    method_in_super->GetMethodIndex(),
-                                    nullptr /* excluded_method */);
-    }
+    VerifyNonSingleImplementation(klass->GetSuperClass()->GetSuperClass(),
+                                  method_in_super->GetMethodIndex(),
+                                  /* excluded_method= */ nullptr);
     return;
   }
 
   uint16_t method_index = method_in_super->GetMethodIndex();
   if (method_in_super->IsAbstract()) {
-    if (kIsDebugBuild) {
-      // An abstract method should have made all methods in the same vtable
-      // slot above it in the class hierarchy having non-single-implementation.
-      mirror::Class* super_super = klass->GetSuperClass()->GetSuperClass();
-      VerifyNonSingleImplementation(super_super,
-                                    method_index,
-                                    method_in_super);
-    }
+    // An abstract method should have made all methods in the same vtable
+    // slot above it in the class hierarchy having non-single-implementation.
+    VerifyNonSingleImplementation(klass->GetSuperClass()->GetSuperClass(),
+                                  method_index,
+                                  method_in_super);
 
     if (virtual_method->IsAbstract()) {
       // SUPER: abstract, VIRTUAL: abstract.
@@ -326,7 +433,7 @@ void ClassHierarchyAnalysis::CheckVirtualMethodSingleImplementationInfo(
 
     // method_in_super might be the single-implementation of another abstract method,
     // which should be also invalidated of its single-implementation status.
-    mirror::Class* super_super = klass->GetSuperClass()->GetSuperClass();
+    ObjPtr<mirror::Class> super_super = klass->GetSuperClass()->GetSuperClass();
     while (super_super != nullptr &&
            method_index < super_super->GetVTableLength()) {
       ArtMethod* method_in_super_super = super_super->GetVTableEntry(method_index, pointer_size);
@@ -349,11 +456,9 @@ void ClassHierarchyAnalysis::CheckVirtualMethodSingleImplementationInfo(
           // other methods (abstract or not) in the vtable slot to be non-single-implementation.
         }
 
-        if (kIsDebugBuild) {
-          VerifyNonSingleImplementation(super_super->GetSuperClass(),
-                                        method_index,
-                                        method_in_super_super);
-        }
+        VerifyNonSingleImplementation(super_super->GetSuperClass(),
+                                      method_index,
+                                      method_in_super_super);
         // No need to go any further.
         return;
       } else {
@@ -403,7 +508,8 @@ void ClassHierarchyAnalysis::CheckInterfaceMethodSingleImplementationInfo(
     return;
   }
   DCHECK(!single_impl->IsAbstract());
-  if (single_impl->GetDeclaringClass() == implementation_method->GetDeclaringClass()) {
+  if ((single_impl->GetDeclaringClass() == implementation_method->GetDeclaringClass()) &&
+      !implementation_method->IsDefaultConflicting()) {
     // Same implementation. Since implementation_method may be a copy of a default
     // method, we need to check the declaring class for equality.
     return;
@@ -439,7 +545,10 @@ void ClassHierarchyAnalysis::InitSingleImplementationFlag(Handle<mirror::Class> 
       method->SetHasSingleImplementation(true);
       DCHECK(method->GetSingleImplementation(pointer_size) == nullptr);
     }
-  } else {
+  // Default conflicting methods cannot be treated with single implementations,
+  // as we need to call them (and not inline them) in case of ICCE.
+  // See class_linker.cc:EnsureThrowsInvocationError.
+  } else if (!method->IsDefaultConflicting()) {
     method->SetHasSingleImplementation(true);
     // Single implementation of non-abstract method is itself.
     DCHECK_EQ(method->GetSingleImplementation(pointer_size), method);
@@ -456,7 +565,7 @@ void ClassHierarchyAnalysis::UpdateAfterLoadingOf(Handle<mirror::Class> klass) {
     return;
   }
 
-  mirror::Class* super_class = klass->GetSuperClass();
+  ObjPtr<mirror::Class> super_class = klass->GetSuperClass();
   if (super_class == nullptr) {
     return;
   }
@@ -496,13 +605,13 @@ void ClassHierarchyAnalysis::UpdateAfterLoadingOf(Handle<mirror::Class> klass) {
   }
 
   if (klass->IsInstantiable()) {
-    auto* iftable = klass->GetIfTable();
+    ObjPtr<mirror::IfTable> iftable = klass->GetIfTable();
     const size_t ifcount = klass->GetIfTableCount();
     for (size_t i = 0; i < ifcount; ++i) {
-      mirror::Class* interface = iftable->GetInterface(i);
+      ObjPtr<mirror::Class> interface = iftable->GetInterface(i);
       for (size_t j = 0, count = iftable->GetMethodArrayCount(i); j < count; ++j) {
         ArtMethod* interface_method = interface->GetVirtualMethod(j, image_pointer_size);
-        mirror::PointerArray* method_array = iftable->GetMethodArray(i);
+        ObjPtr<mirror::PointerArray> method_array = iftable->GetMethodArray(i);
         ArtMethod* implementation_method =
             method_array->GetElementPtrSize<ArtMethod*>(j, image_pointer_size);
         DCHECK(implementation_method != nullptr) << klass->PrettyClass();
@@ -532,42 +641,54 @@ void ClassHierarchyAnalysis::InvalidateSingleImplementationMethods(
       // We do this under cha_lock_. Committing code also grabs this lock to
       // make sure the code is only committed when all single-implementation
       // assumptions are still true.
-      MutexLock cha_mu(self, *Locks::cha_lock_);
-      // Invalidate compiled methods that assume some virtual calls have only
-      // single implementations.
-      for (ArtMethod* invalidated : invalidated_single_impl_methods) {
-        if (!invalidated->HasSingleImplementation()) {
-          // It might have been invalidated already when other class linking is
-          // going on.
-          continue;
-        }
-        invalidated->SetHasSingleImplementation(false);
-        if (invalidated->IsAbstract()) {
-          // Clear the single implementation method.
-          invalidated->SetSingleImplementation(nullptr, image_pointer_size);
-        }
+      std::vector<std::pair<ArtMethod*, OatQuickMethodHeader*>> headers;
+      {
+        MutexLock cha_mu(self, *Locks::cha_lock_);
+        // Invalidate compiled methods that assume some virtual calls have only
+        // single implementations.
+        for (ArtMethod* invalidated : invalidated_single_impl_methods) {
+          if (!invalidated->HasSingleImplementation()) {
+            // It might have been invalidated already when other class linking is
+            // going on.
+            continue;
+          }
+          invalidated->SetHasSingleImplementation(false);
+          if (invalidated->IsAbstract()) {
+            // Clear the single implementation method.
+            invalidated->SetSingleImplementation(nullptr, image_pointer_size);
+          }
 
-        if (runtime->IsAotCompiler()) {
-          // No need to invalidate any compiled code as the AotCompiler doesn't
-          // run any code.
-          continue;
-        }
+          if (runtime->IsAotCompiler()) {
+            // No need to invalidate any compiled code as the AotCompiler doesn't
+            // run any code.
+            continue;
+          }
 
-        // Invalidate all dependents.
-        auto dependents = GetDependents(invalidated);
-        if (dependents == nullptr) {
-          continue;
+          // Invalidate all dependents.
+          for (const auto& dependent : GetDependents(invalidated)) {
+            ArtMethod* method = dependent.first;;
+            OatQuickMethodHeader* method_header = dependent.second;
+            VLOG(class_linker) << "CHA invalidated compiled code for " << method->PrettyMethod();
+            DCHECK(runtime->UseJitCompilation());
+            // We need to call JitCodeCache::InvalidateCompiledCodeFor but we cannot do it here
+            // since it would run into problems with lock-ordering. We don't want to re-order the
+            // locks since that would make code-commit racy.
+            headers.push_back({method, method_header});
+            dependent_method_headers.insert(method_header);
+          }
+          RemoveAllDependenciesFor(invalidated);
         }
-        for (const auto& dependent : *dependents) {
-          ArtMethod* method = dependent.first;;
-          OatQuickMethodHeader* method_header = dependent.second;
-          VLOG(class_linker) << "CHA invalidated compiled code for " << method->PrettyMethod();
-          DCHECK(runtime->UseJitCompilation());
-          runtime->GetJit()->GetCodeCache()->InvalidateCompiledCodeFor(
-              method, method_header);
-          dependent_method_headers.insert(method_header);
+      }
+      // Since we are still loading the class that invalidated the code it's fine we have this after
+      // getting rid of the dependency. Any calls would need to be with the old version (since the
+      // new one isn't loaded yet) which still works fine. We will deoptimize just after this to
+      // ensure everything gets the new state.
+      jit::Jit* jit = Runtime::Current()->GetJit();
+      if (jit != nullptr) {
+        jit::JitCodeCache* code_cache = jit->GetCodeCache();
+        for (const auto& pair : headers) {
+          code_cache->InvalidateCompiledCodeFor(pair.first, pair.second);
         }
-        RemoveDependencyFor(invalidated);
       }
     }
 
@@ -579,6 +700,19 @@ void ClassHierarchyAnalysis::InvalidateSingleImplementationMethods(
     size_t threads_running_checkpoint = runtime->GetThreadList()->RunCheckpoint(&checkpoint);
     if (threads_running_checkpoint != 0) {
       checkpoint.WaitForThreadsToRunThroughCheckpoint(threads_running_checkpoint);
+    }
+  }
+}
+
+void ClassHierarchyAnalysis::RemoveDependenciesForLinearAlloc(const LinearAlloc* linear_alloc) {
+  MutexLock mu(Thread::Current(), *Locks::cha_lock_);
+  for (auto it = cha_dependency_map_.begin(); it != cha_dependency_map_.end(); ) {
+    // Use unsafe to avoid locking since the allocator is going to be deleted.
+    if (linear_alloc->ContainsUnsafe(it->first)) {
+      // About to delete the ArtMethod, erase the entry from the map.
+      it = cha_dependency_map_.erase(it);
+    } else {
+      ++it;
     }
   }
 }

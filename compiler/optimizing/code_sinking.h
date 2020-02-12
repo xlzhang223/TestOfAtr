@@ -28,10 +28,12 @@ namespace art {
  */
 class CodeSinking : public HOptimization {
  public:
-  CodeSinking(HGraph* graph, OptimizingCompilerStats* stats)
-      : HOptimization(graph, kCodeSinkingPassName, stats) {}
+  CodeSinking(HGraph* graph,
+              OptimizingCompilerStats* stats,
+              const char* name = kCodeSinkingPassName)
+      : HOptimization(graph, name, stats) {}
 
-  void Run() OVERRIDE;
+  bool Run() override;
 
   static constexpr const char* kCodeSinkingPassName = "code_sinking";
 

@@ -19,9 +19,9 @@
 
 #include "base/casts.h"
 #include "base/macros.h"
-#include "java_vm_ext.h"
-#include "jni_env_ext.h"
-#include "thread-inl.h"
+#include "jni/java_vm_ext.h"
+#include "jni/jni_env_ext.h"
+#include "thread-current-inl.h"
 
 namespace art {
 namespace {
@@ -58,7 +58,7 @@ extern "C" JNIEXPORT void JNICALL Java_Main_destroyJavaVMAndExit(JNIEnv* env, jc
   Thread* const self = Thread::Current();
   self->SetTopOfStack(nullptr);
   self->SetTopOfShadowStack(nullptr);
-  JavaVM* vm = down_cast<JNIEnvExt*>(env)->vm;
+  JavaVM* vm = down_cast<JNIEnvExt*>(env)->GetVm();
   vm->DetachCurrentThread();
   // Open ourself again to make sure the native library does not get unloaded from
   // underneath us due to DestroyJavaVM. b/28406866

@@ -16,19 +16,28 @@
 
 #include "compiler.h"
 
-#include "base/logging.h"
-#include "driver/compiler_driver.h"
+#include <android-base/logging.h>
+
+#include "base/macros.h"
+#include "base/utils.h"
+#include "dex/code_item_accessors-inl.h"
+#include "dex/dex_file.h"
+#include "oat.h"
 #include "optimizing/optimizing_compiler.h"
-#include "utils.h"
 
 namespace art {
 
-Compiler* Compiler::Create(CompilerDriver* driver, Compiler::Kind kind) {
+Compiler* Compiler::Create(const CompilerOptions& compiler_options,
+                           CompiledMethodStorage* storage,
+                           Compiler::Kind kind) {
+  // Check that oat version when runtime was compiled matches the oat version of the compiler.
+  constexpr std::array<uint8_t, 4> compiler_oat_version = OatHeader::kOatVersion;
+  OatHeader::CheckOatVersion(compiler_oat_version);
   switch (kind) {
     case kQuick:
       // TODO: Remove Quick in options.
     case kOptimizing:
-      return CreateOptimizingCompiler(driver);
+      return CreateOptimizingCompiler(compiler_options, storage);
 
     default:
       LOG(FATAL) << "UNREACHABLE";
@@ -36,7 +45,7 @@ Compiler* Compiler::Create(CompilerDriver* driver, Compiler::Kind kind) {
   }
 }
 
-bool Compiler::IsPathologicalCase(const DexFile::CodeItem& code_item,
+bool Compiler::IsPathologicalCase(const dex::CodeItem& code_item,
                                   uint32_t method_idx,
                                   const DexFile& dex_file) {
   /*
@@ -44,15 +53,16 @@ bool Compiler::IsPathologicalCase(const DexFile::CodeItem& code_item,
    * Dalvik uses 16-bit uints for instruction and register counts.  We'll limit to a quarter
    * of that, which also guarantees we cannot overflow our 16-bit internal Quick SSA name space.
    */
-  if (code_item.insns_size_in_code_units_ >= UINT16_MAX / 4) {
+  CodeItemDataAccessor accessor(dex_file, &code_item);
+  if (accessor.InsnsSizeInCodeUnits() >= UINT16_MAX / 4) {
     LOG(INFO) << "Method exceeds compiler instruction limit: "
-              << code_item.insns_size_in_code_units_
+              << accessor.InsnsSizeInCodeUnits()
               << " in " << dex_file.PrettyMethod(method_idx);
     return true;
   }
-  if (code_item.registers_size_ >= UINT16_MAX / 4) {
+  if (accessor.RegistersSize() >= UINT16_MAX / 4) {
     LOG(INFO) << "Method exceeds compiler virtual register limit: "
-              << code_item.registers_size_ << " in " << dex_file.PrettyMethod(method_idx);
+              << accessor.RegistersSize() << " in " << dex_file.PrettyMethod(method_idx);
     return true;
   }
   return false;

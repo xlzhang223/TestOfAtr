@@ -1,7 +1,7 @@
 
 #define LOG_TAG "leakleak"
 #include "leakleak.h"
-#include <utils/Log.h>
+#include <log/log.h>
 #include <jni.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -18,7 +18,6 @@
 #include "gc/heap.h"
 #include "runtime.h"
 #include "gc/space/large_object_space.h"
-#include "utils.h"
 #include "class_linker.h"
 #include "art_method-inl.h"
 #include "mirror/object_array-inl.h"
@@ -38,12 +37,21 @@ namespace art{
             int need_log =0 ;
             std::mutex my_lock;
             std::mutex my_lock2;
-            std::set<uint64_t> S_pc;
+            std::map<uintptr_t,int>  S_pc;
             std::map<uintptr_t,std::string> pc_method;
+            std::map<uintptr_t,std::string> pc_class;
             int count_obj = 0;
             int tol_size =0;
             int find_new=0;
-            
+            int scan_cnt = 0;
+            int try_cnt = 0;
+            int move_cnt = 0;
+            int move_cnt2 = 0;
+            int is_full = 0;
+            static Leaktrace* instance_ = new Leaktrace();
+            Leaktrace* getInstance(){
+                return instance_;
+            }
             // const int MB = 1024 *1024;
             std::vector<int> myio::get_int(std::string path){
                 std::vector<int> v;
@@ -128,6 +136,7 @@ namespace art{
                 main_end=_end;
             };
             void Leaktrace::set_bitmap_ptr(uint64_t _end){
+                // LOG(WARNING)<<"Leakleak,set_bitmap_ptr: "<<_end ;
                 bitmap_ptr=_end;
             };
             uint64_t Leaktrace::get_main_begin(){
@@ -137,18 +146,19 @@ namespace art{
                 return main_end;
             };
             uint64_t Leaktrace::get_bitmap_ptr(){
+                // LOG(WARNING)<<"Leakleak,get_bitmap_ptr: "<<bitmap_ptr ;
                 return bitmap_ptr;
             };
             //std::unordered_map<uint64_t,uint64_t> addr_pc,addr_pc_t;
 
             void Leaktrace::dump_info(uint64_t tim){
                 if(!try_thread_istrace()) return;
-                if(need_log)LOG(WARNING)<<"ZHANG,info about gc time: "<<tim ;
+                if(need_log)LOG(WARNING)<<"Leakleak,info about gc time: "<<tim ;
                 // std::fstream F;
                 // F.open("/data/local/tmp/track");
                 // F<<cnt++<<" hello_world\n";
                 // F.close();
-                // ALOGD("ZHANG,THIS IS LOG");
+                // ALOGD("Leakleak,THIS IS LOG");
             }
 
             
@@ -182,10 +192,9 @@ namespace art{
 
 
 
-            void Leaktrace::addedge(mirror::Object *obj){
+            void Leaktrace::addedge(mirror::Object *obj,gc::collector::GcType ty){
                 
-                int gc = Thread::Current()-> GetGCnum();
-                if(!try_thread_istrace() || gc % mod_k != 0 ){
+                if(!try_thread_istrace()){
                     // my_lock.unlock();
                     return;
                 }
@@ -197,48 +206,84 @@ namespace art{
                 // finder.addedge(ref,obj);
                 // t = clock() - t;
                 // map_time += t;
-                 if(Runtime::Current()-> GetHeap()==nullptr){
+                if(Runtime::Current()-> GetHeap()==nullptr){
                     // my_lock.unlock();
+                   // LOG(WARNING)<< "Leakleak,addegde but something wrong with heap";
                     return;
                 }
-                uint64_t o = reinterpret_cast<uint64_t>((void*)obj);
-                if(o<main_begin||o>=main_end){
-                    // my_lock.unlock();
+                int gc = Thread::Current()-> GetGCnum();
+                if(GC_K==0 || GC_K%mod_k!=0) return;
+                if (ty != gc::collector::kGcTypePartial)
+                {
+                //     ALOGD("Leakleak, addedge ,kGcTypePartial ");
+                // }
+                // else if (ty == gc::collector::kGcTypeSticky)
+                // {
+                //     ALOGD("Leakleak, addedge ,kGcTypeSticky  ");
                     return;
                 }
-                //ReaderMutexLock mu(Thread::Current(), *Locks::mutator_lock_);
+                auto ptr = Runtime::Current()-> GetHeap()-> main_access_bitmap_.get();
+                if(ptr==nullptr||!ptr->HasAddress(obj)){
+                    return;
+                }//ReaderMutexLock mu(Thread::Current(), *Locks::mutator_lock_);
                 std::pair<uint64_t,uint16_t> p={0,0};
                 my_lock.lock();
+                scan_cnt ++;
                 if(addr_pc.count(low(obj))){
                     p=addr_pc[low(obj)];
+                    addr_pc[low(obj)].second=gc;
                     my_lock.unlock();
+                    // {
+                    //     ReaderMutexLock mu(Thread::Current(), *Locks::mutator_lock_);
+                    //     std::string class_name = obj->GetClass() -> PrettyDescriptor();
+                    //     LOG(WARNING)<< "Leakleak,addegde class in hashtable: " << class_name <<" class pc:"<<(void*)p.first << " gc:" << gc <<" last gc:"<<p.second;
+                    // }
                 }
                 else{
+                    // {
+                    //     ReaderMutexLock mu(Thread::Current(), *Locks::mutator_lock_);
+                    //     std::string class_name = obj->GetClass() -> PrettyDescriptor();
+                    //     LOG(WARNING)<< "Leakleak,addegde class not in hashtable: " << class_name ;//<<" class pc:"<<(void*)p.first << " gc:" << gc <<" last gc:"<<p.second;
+                    // }
                     my_lock.unlock();
                     return;
                 }
-                
-                auto ptr = Runtime::Current()-> GetHeap()-> main_access_bitmap_ .get();
-                if(p.first != 0 && ptr != nullptr){
+                //auto ptr = Runtime::Current()-> GetHeap()-> main_access_bitmap_ .get();
+                if(p.first != 0 && ptr != nullptr && GC_K - p.second >= mod_k){
+                        try_cnt ++;
                         my_lock.lock();
                         if(ptr ->Test(obj)){
                             // addr_pc_t[o]=p;
+                            // vis[low(obj)]=p.second;
                             ptr ->Clear(obj);
-                            vis[low(obj)]=p.second;
-                        //this obj is not touch during k gc
-                        //LOG(WARNING)<<"ZHANG,this "<<reinterpret_cast<uint64_t>((void*)obj)<<" NOTLEAK "<<
-                        //     "and alloc at"<<p;
+                            //this obj is not touch during k gc
+                            // LOG(WARNING)<<"Leakleak,this "<<reinterpret_cast<uint64_t>((void*)obj)<<" NOTLEAK "<<
+                            // "and alloc at"<<(void*)p.first;
                         }
-
-                        else if(ptr ->Test(obj) == 0 && vis.count(low(obj)) == 0 && gc - p.second >= mod_k){
+                        else{// && vis.count(low(obj)) == 0){
                         /* code */
                             //s_ans.insert(p);
+                            // vis[low(obj)]=p.second;
                             ++m_ans[p.first];
-                            vis[low(obj)]=p.second;
-                           // LOG(WARNING)<<"ZHANG,this "<<o<<" LEAK and alloc at"<<p;
+
+                            // LOG(WARNING)<<"Leakleak,this "<<reinterpret_cast<uint64_t>((void*)obj)<<" LEAK "<<
+                            // "and alloc at"<<(void*)p.first;
+                            // {
+                            //     ReaderMutexLock mu(Thread::Current(), *Locks::mutator_lock_);
+                            //     std::string class_name = obj->GetClass() -> PrettyDescriptor();
+                            //     LOG(WARNING)<< "Leakleak,find leak class: " << class_name <<" class pc:"<<(void*)p.first << " gc:" << gc <<" last gc:"<<p.second;;
+                            // }
+                           // LOG(WARNING)<<"Leakleak,this "<<o<<" LEAK and alloc at"<<p;
                         }
                         my_lock.unlock();
                 }
+                // else{
+                //     {
+                //         ReaderMutexLock mu(Thread::Current(), *Locks::mutator_lock_);
+                //         std::string class_name = obj->GetClass() -> PrettyDescriptor();
+                //         LOG(WARNING)<< "Leakleak,addegde class not try : " << class_name <<" class pc:"<<(void*)p.first << " gc:" << gc <<" last gc:"<<p.second;
+                //     }
+                // }
                 {
                     return;
                 }
@@ -249,7 +294,7 @@ namespace art{
                 // char name[LEN] = "noname";
                 // GetProcNameByPid(name, LEN, getpid());
                 // if(strstr(name,"myapp")!=NULL)
-                ALOGD("ZHANG, %s ",S.c_str());
+                ALOGD("Leakleak, %s ",S.c_str());
 
             }
 
@@ -257,7 +302,7 @@ namespace art{
                 if(!try_thread_istrace()) return;
                 char name[LEN] = "noname";
                 GetProcNameByPid(name, LEN, getpid());
-                // ALOGD("ZHANG, %s is init! init !~~~!~~~!",name);
+                // ALOGD("Leakleak, %s is init! init !~~~!~~~!",name);
             }
             
             // void dump_obj(mirror::Object *obj, std::string s){
@@ -268,100 +313,134 @@ namespace art{
             //     // ReaderMutexLock mu(Thread::Current(), *Locks::mutator_lock_);
             //     // std::string sname=obj->PrettyTypeOf();
                 
-            //     // ALOGD(" ZHANG,GC-OBJ %s,HASHCODE: %d ,INFO: %s!",sname.c_str(),obj->IdentityHashCode(),s.c_str());
+            //     // ALOGD(" Leakleak,GC-OBJ %s,HASHCODE: %d ,INFO: %s!",sname.c_str(),obj->IdentityHashCode(),s.c_str());
             // }
             int Leaktrace::try_thread_istrace(){
-                if(Thread::Current() == nullptr){
-                    // return 0;
-                    char name[LEN] = "noname";
-                    GetProcNameByPid(name, LEN, getpid());
-                    
-                    std::vector<std::string> v = io.get_app();
-                    int f = 0;
-                    for(auto str: v){
-                        if(strstr(name,str.c_str())!=NULL){
-                            f=1;
-                        }
-                    }
-                    if(f){
-                        // is = 1;
-                        ALOGD("ZHANG, heap_BEGIN no thread,and app name is trace:%s   ",name);
-                        // LOG(WARNING)<<"zhang i want X:"<<sizeof(uintptr_t)*8;
-                        istrace = true; 
-                        // addr_pc.clear();
-                        auto vv = io.get_int("/data/local/tmp/GC_K.txt");
-                        if(vv.size()>0){
-                            mod_k = vv[0];
-                        }
-                        vv = io.get_int("/data/local/tmp/Tsize.txt");
-                        if(vv.size()>0){
-                            t_size = vv[0];
-                        }
-                        // Thread::Current()-> Setistrace(1);
-                        return 1;
-                    }
-                    else
-                    {
-                        // is = 0;
-                        // Thread::Current()-> Setistrace(0);
-                        ALOGD("ZHANG, heap_BEGIN no thread,but this app is not to trace:%s",name);
-                        /* code */
-                        return 0;
-                    }
-                }
-                int is = Thread::Current()-> Getistrace();
-                if(is == -1){
-                    // return 0;
-                    // std::string t<"ZHANG,hhread_name;
-                    // Thread::Current() ->GetThreadName(thread_name);
-                    // LOG(WARNING)<ave a try of ThreadName:"<<thread_name;
+                return istrace;
+                // if(Thread::Current() == nullptr){
+                //     // return 0;
+                //     char name[LEN] = "noname";
+                //     GetProcNameByPid(name, LEN, getpid());
+                //      //LOG(WARNING)<<"Leakleak,pname: "<<name<<" pid"<<getpid();
+                //     std::vector<std::string> v = io.get_app();
+                //     int f = 0;
+                //     for(auto str: v){
+                //         if(strstr(name,str.c_str())!=NULL){
+                //             f=1;
+                //         }
+                //     }
+                //         LOG(WARNING)<<"Leakleak,info about offset: "<< Thread::AllocSiteOffset<PointerSize::k64>().Int32Value();
+                //     if(f){
+                //         // is = 1;
+                //         ALOGD("Leakleak, heap_BEGIN no thread,and app name is trace:%s   ",name);
+                //         // LOG(WARNING)<<"zhang i want X:"<<sizeof(uintptr_t)*8;
+                //         istrace = true; 
+                //         // addr_pc.clear();
+                //         auto vv = io.get_int("/data/local/tmp/GC_K.txt");
+                //         if(vv.size()>0){
+                //             mod_k = vv[0];
+                //         }
+                //         vv = io.get_int("/data/local/tmp/Tsize.txt");
+                //         if(vv.size()>0){
+                //             t_size = vv[0];
+                //         }
+                //         // Thread::Current()-> Setistrace(1);
+                //         return 1;
+                //     }
+                //     else
+                //     {
+                //         // is = 0;
+                //         // Thread::Current()-> Setistrace(0);
+                //         ALOGD("Leakleak, heap_BEGIN no thread,but this app is not to trace:%s",name);
+                //         /* code */
+                //         return 0;
+                //     }
+                // }
+                // int is = Thread::Current()-> Getistrace();
+                // if(is == -1){
+                //     // return 0;
+                //     // std::string t<"Leakleak,hhread_name;
+                //     // Thread::Current() ->GetThreadName(thread_name);
+                //     // LOG(WARNING)<ave a try of ThreadName:"<<thread_name;
 
-                    char name[LEN] = "noname";
-                    GetProcNameByPid(name, LEN, getpid());
-                    
-                    std::vector<std::string> v = io.get_app();
-                    int f = 0;
-                    for(auto str: v){
-                        if(strstr(name,str.c_str())!=NULL){
-                            f=1;
-                        }
-                    }
-                    if(f){
-                        is = 1;
-                        ALOGD("ZHANG, Thread_BEGIN ,and app name is trace:%s   ",name);
-                        // LOG(WARNING)<<"zhang i want X:"<<sizeof(uintptr_t)*8;
-                        istrace = true; 
-                        // addr_pc.clear();
-                        auto vv = io.get_int("/data/local/tmp/GC_K.txt");
-                        if(vv.size()>0){
-                            mod_k = vv[0];
-                        }
-                        vv = io.get_int("/data/local/tmp/Tsize.txt");
-                        if(vv.size()>0){
-                            t_size = vv[0];
-                        }
-                        Thread::Current()-> Setistrace(1);
-                    }
-                    else
-                    {
-                        is = 0;
-                        Thread::Current()-> Setistrace(0);
-                        // ALOGD("ZHANG, Thread_BEGIN ,but this app is not to trace:%s",name);
-                        /* code */
-                    }
-                }
-                return is;
+                //     char name[LEN] = "noname";
+                //     GetProcNameByPid(name, LEN, getpid());
+                //     // std::string s(name);
+                //    // LOG(WARNING)<<"Leakleak,pname: "<<name<<" pid"<<getpid();
+                //     std::vector<std::string> v = io.get_app();
+                //     int f = 0;
+                //     for(auto str: v){
+                //         if(strstr(name,str.c_str())!=NULL){
+                //             f=1;
+                //         }
+                //     }
+                //     if(f){
+                //         is = 1;
+                //         ALOGD("Leakleak, Thread_BEGIN ,and app name is trace:%s   ",name);
+                //         // LOG(WARNING)<<"zhang i want X:"<<sizeof(uintptr_t)*8;
+                //         istrace = true; 
+                //         // addr_pc.clear();
+                //         auto vv = io.get_int("/data/local/tmp/GC_K.txt");
+                //         if(vv.size()>0){
+                //             mod_k = vv[0];
+                //         }
+                //         vv = io.get_int("/data/local/tmp/Tsize.txt");
+                //         if(vv.size()>0){
+                //             t_size = vv[0];
+                //         }
+                //         Thread::Current()-> Setistrace(1);
+                //     }
+                //     else
+                //     {
+                //         is = 0;
+                //         Thread::Current()-> Setistrace(0);
+                //         ALOGD("Leakleak, Thread_BEGIN ,but this app is not to trace:%s",name);
+                //         /* code */
+                //     }
+                // }
+                // return is;
             }
             
             void Leaktrace::heap_init(){
-                if(try_thread_istrace())
-                    addr_pc.clear();
+                char name[LEN] = "noname";
+                GetProcNameByPid(name, LEN, getpid());
+                    //LOG(WARNING)<<"Leakleak,pname: "<<name<<" pid"<<getpid();
+                std::vector<std::string> v = io.get_app();
+                int f = 0;
+                for(auto str: v){
+                    if(strstr(name,str.c_str())!=NULL){
+                        f=1;
+                    }
+                }
+                 LOG(WARNING)<<"Leakleak,info about offset: "<< Thread::AllocSiteOffset<PointerSize::k64>().Int32Value();
+                if(f){
+                    // is = 1;
+                    ALOGD("Leakleak, heap_BEGIN no thread,and app name is trace:%s   ",name);
+                    // LOG(WARNING)<<"zhang i want X:"<<sizeof(uintptr_t)*8;
+                    istrace = true; 
+                    // addr_pc.clear();
+                    auto vv = io.get_int("/data/local/tmp/GC_K.txt");
+                    if(vv.size()>0){
+                        mod_k = vv[0];
+                    }
+                    vv = io.get_int("/data/local/tmp/Tsize.txt");
+                    if(vv.size()>0){
+                        t_size = vv[0];
+                    }
+                    // Thread::Current()-> Setistrace(1);
+                    // return 1;
+                }
+                if(!try_thread_istrace())return;
+                my_lock.lock();
+                addr_pc.clear();
+                my_lock.unlock();
+                
                 // char name[LEN] = "noname";
                 // GetProcNameByPid(name, LEN, getpid());
                 
                 // std::string str = io.get_app();
                 // if(strstr(name,str.c_str())!=NULL){
-                //     ALOGD("ZHANG, heap_BEGIN ,and app name is trace:%s   ",name);
+                //     ALOGD("Leakleak, heap_BEGIN ,and app name is trace:%s   ",name);
                 //     LOG(WARNING)<<"zhang i want X:"<<sizeof(uintptr_t)*8;
                 //     istrace = true; 
                 //     addr_pc.clear();
@@ -377,7 +456,7 @@ namespace art{
                 // }
                 // else
                 // {
-                //     ALOGD("ZHANG, heap_BEGIN ,but this app is not to trace:%s",name);
+                //     ALOGD("Leakleak, heap_BEGIN ,but this app is not to trace:%s",name);
                 //     /* code */
                 // }
 
@@ -395,37 +474,62 @@ namespace art{
                 
                 // std::string str = io.get_app();
                 // if(strstr(name,str.c_str())!=NULL){
-                //     ALOGD("ZHANG, LOG ,and app name is trace:%s",name);
+                //     ALOGD("Leakleak, LOG ,and app name is trace:%s",name);
                 //     istrace = true; 
                 //     // addr_pc.clear();
                 // }
                 // else{
-                //     //ALOGD("ZHANG, LOG ,but this app is not to trace:%s",name);
+                //     //ALOGD("Leakleak, LOG ,but this app is not to trace:%s",name);
                 //     /* code */
                 
                 // }
 
             }
 
-            void Leaktrace::gc_begin(){
+            void Leaktrace::gc_begin(gc::collector::GcType ty){
                 // char name[LEN] = "noname";
                 // GetProcNameByPid(name, LEN, getpid());
                 // std::string str = io.get_app();
                 // if(strstr(name,str.c_str())!=NULL){
-                //     ALOGD("ZHANG, GC_BEGIN ,and app name is trace:%s",name);
+                //     ALOGD("Leakleak, GC_BEGIN ,and app name is trace:%s",name);
                 //     istrace = true; 
                 // }
                 // else
                 // {
-                //     ALOGD("ZHANG, GC_BEGIN ,but this app is not to trace:%s",name);
+                //     ALOGD("Leakleak, GC_BEGIN ,but this app is not to trace:%s",name);
                 //     /* code */
                 // }
                 if(!try_thread_istrace()) return;
-                // ALOGD("ZHANG, GC_BEGIN and this is %d",GC_K+1);
-                GC_K++;
-                Thread::Current()-> SetGCnum(GC_K);
-                // if(GC_K % mod_k == 0)
-                //     gc_time = clock();
+                if (ty == gc::collector::kGcTypePartial)
+                {
+                    // ALOGD("Leakleak, GC_BEGIN and this is %d",GC_K+1);
+                    GC_K++;
+                    Thread::Current()-> SetGCnum(GC_K);
+                    //isFull = true;
+                    ALOGD("Leakleak, GC_BEGIN ,kGcTypePartial and this is:%d",GC_K);
+                }
+                // else if (ty == gc::collector::kGcTypeSticky)
+                // {
+                //     Thread::Current()-> SetGCnum(GC_K);
+                //     ALOGD("Leakleak, GC_BEGIN ,kGcTypeSticky  ");
+                // }
+                else{
+                    Thread::Current()-> SetGCnum(GC_K);
+                }
+                
+                // if(GC_K % mod_k == 0){
+           
+                //     if(ty== gc::collector::kGcTypeSticky){
+                //             ALOGD("Leakleak, GC_BEGIN ,kGcTypeSticky  ");
+                //     }
+                //     else if (ty == gc::collector::kGcTypePartial)
+                //     {
+                //         ALOGD("Leakleak, GC_BEGIN ,kGcTypePartial  ");
+                //     }
+                //     else{
+                //         ALOGD("Leakleak, GC_BEGIN ,something wrong with GCtype  ");
+                //     }
+                // }
                 //if(GC_K % mod_k == 0)vis.clear();
                 // finder.setpack(str);
                 // read_time = 0;
@@ -446,16 +550,18 @@ namespace art{
                 // at = nullptr;
             }
 
-            void Leaktrace::gc_end(){
+            void Leaktrace::gc_end(gc::collector::GcType ty){
                 // GetProcNameByPid(name, LEN, getpid());
                 if(!try_thread_istrace()) return;
+                //isFull = 0;
                 int gc = Thread::Current()-> GetGCnum();
-                if(gc % mod_k == 0){
+                gc = GC_K;
+                if(gc % mod_k == 0 && ty == gc::collector::kGcTypePartial ){
                 // char name[LEN] = "noname";
                     // gc_time = clock() - gc_time;
                     //TODO:
                     /*dump something */
-                    // ALOGD("ZHANG, GC_END and this is %d",gc);
+                    // ALOGD("Leakleak, GC_END and this is %d",gc);
                     // swap(addr_pc_t,addr_pc);
                     // addr_pc_t.clear();
                     //ReaderMutexLock mu(Thread::Current(), *Locks::mutator_lock_);
@@ -465,64 +571,80 @@ namespace art{
                     //         ptr->Clear(it.first);
                     //     }
                     //     else{
-                    //         LOG(WARNING)<<"ZHANG,this "<<it.first<<" LEAK and alloc at"<<it.second<<"and GC is "<<gc;
+                    //         LOG(WARNING)<<"Leakleak,this "<<it.first<<" LEAK and alloc at"<<it.second<<"and GC is "<<gc;
                     //     }
                     // }
                     char name[LEN] = "noname";
                     GetProcNameByPid(name, LEN, getpid());
-                    std::stringstream stream;
-                    LOG(WARNING)<<"ZHANG,info about: "<<name <<" hashtable_size:"<<16* (addr_pc.size()+vis.size());
-                    stream <<"info about: "<<name <<":\n";
                     my_lock.lock();
+                    std::stringstream stream;
+                    LOG(WARNING)<<"Leakleak,info about: "<<name <<" hashtable_size:"<<16* (addr_pc.size())<<" scan cnt "<<scan_cnt<<" try cnt "<<try_cnt<<" move cnt "<<move_cnt<<" success move "<<move_cnt2<<" gc: "<<gc;
+                    stream <<"info about: "<<name <<":\n";
+                    auto ptr = Runtime::Current()-> GetHeap()-> main_access_bitmap_.get();
+                    if(ptr!=nullptr){
+
+                        for(auto it=addr_large_pc.begin();it!=addr_large_pc.end();it++){
+                            if(ptr ->Test(high(it->first))){
+                                ptr ->Clear(high(it->first));
+                            }
+                            else{
+                                ++m_ans[it->second.first];
+                            }
+                            it->second.second = gc;
+                        }
+                    }
+                    
                     for(auto it:m_ans){
                             auto pc = it.first;
                             jit::Jit* jit = Runtime::Current()->GetJit();
                             if(pc > 0 && (jit!=nullptr && jit->GetCodeCache()->ContainsPc((void*)pc))){
                                 my_lock2.lock();
                                 auto jt = pc_method.upper_bound(it.first);
-                                my_lock2.unlock();
-                                if(jt == pc_method.begin()) continue;
-                                jt--;
+                                if(jt != pc_method.begin()){
+                                    jt--;
                                 // if(it.second>1)
-                                    LOG(WARNING)<<"ZHANG,maybe leak at "<<(void*)it.first<<"and GC is " << gc << " and from method"<< jt->second;
-                                    stream <<"maybe leak at "<<(void*)it.first<<"and GC is " << gc << " and from method"<< jt->second <<std::endl;
+                                    LOG(WARNING)<<"Leakleak,maybe leak at "<<(void*)it.first<<" and GC is " << gc << " and from method "<< jt->second<<" and class is "<<pc_class[it.first];
+                                    stream <<"maybe leak at "<<(void*)it.first<<" and GC is " << gc << " and from method "<< jt->second<<" and class is "<<pc_class[it.first] <<std::endl;
+
+                                }
+                                my_lock2.unlock();
 
                             }
                             else{
                                 // if(it.second>1)
-                                    LOG(WARNING)<<"ZHANG,maybe leak at  "<<(void*)it.first<<"and GC is " << gc ;
-                                    stream<<"maybe leak at  "<<(void*)it.first<<"and GC is " << gc <<std::endl;
+                                    LOG(WARNING)<<"Leakleak,maybe leak at  "<<(void*)it.first<<" and GC is " << gc <<" and class is "<<pc_class[it.first];
+                                    stream<<"maybe leak at  "<<(void*)it.first<<" and GC is " << gc <<" and class is "<<pc_class[it.first]<<std::endl;
                             }
                     }
+                    m_ans.clear();
                     std::vector<uint32_t> to_erase;
-                    std::vector<uint32_t> to_erasev;
-                    for(auto it:vis){
-                        if(GC_K - it.second >= mod_k*3/2)
-                            to_erasev.push_back(it.first);
-                    }
                     for(auto it:addr_pc){
-                        if(GC_K - it.second.second >= mod_k*3/2 && vis.count(it.first)==0)
+                        if(GC_K - it.second.second >= mod_k*2 )
                             to_erase.push_back(it.first);
                     }
                     for(auto it:to_erase){
                         addr_pc.erase(it);
                     }
-                    for(auto it:to_erasev){
-                        vis.erase(it);
-                    }
-                    m_ans.clear();
-                    my_lock.unlock();
-                    LOG(WARNING)<<"ZHANG,alloc obj tol:"<<count_obj;
-                    LOG(WARNING)<<"ZHANG,alloc obj byte tol:"<<tol_size;
-                    LOG(WARNING)<<"ZHANG,diff pc tol:"<<S_pc.size();
-                    LOG(WARNING)<<"ZHANG,find new tol:"<<find_new;
+                    // for(auto it:S_pc){
+                    //     auto pc = it.first;
+
+                    //     {
+                    //         ReaderMutexLock mu(Thread::Current(), *Locks::mutator_lock_);
+                    //         LOG(WARNING)<< "Leakleak,pc alloc: " << pc_class[pc] <<" class pc:"<<(void*)pc << " count " << it.second ;
+                    //     }
+                    // }
+                    LOG(WARNING)<<"Leakleak,alloc obj tol:"<<count_obj;
+                    LOG(WARNING)<<"Leakleak,alloc obj byte tol:"<<tol_size;
+                    LOG(WARNING)<<"Leakleak,diff pc tol:"<<S_pc.size();
+                    LOG(WARNING)<<"Leakleak,find new tol:"<<find_new;
 
                     stream<<"alloc obj tol:"<<count_obj<<std::endl;
                     stream<<"alloc obj byte tol:"<<tol_size<<std::endl;
                     stream<<"diff pc tol:"<<S_pc.size()<<std::endl;
                     stream<<"find new tol:"<<find_new<<std::endl;
+                    my_lock.unlock();
                     io.put_ans(stream.str());
-                    // LOG(WARNING)<<"ZHANG,cost mem:"<<sizeof(getInstance())+sizeof(*Runtime::Current()-> GetHeap()-> main_access_bitmap_ .get());
+                    // LOG(WARNING)<<"Leakleak,cost mem:"<<sizeof(getInstance())+sizeof(*Runtime::Current()-> GetHeap()-> main_access_bitmap_ .get());
                     // if((gc/2) % mod_k == 0)vis.clear();
                 }
                 
@@ -531,11 +653,21 @@ namespace art{
                 }
                 // gc_time = clock() - gc_time;
                 // istrace = false; 
-                // // ALOGD("ZHANG, GC_END,read_time: %d, GC_time: %d, map_time: %d ,name: %d ,code: %d!,objcnt: %d",read_time,gc_time,map_time,name_time,code_time,finder.getsize());
+                // // ALOGD("Leakleak, GC_END,read_time: %d, GC_time: %d, map_time: %d ,name: %d ,code: %d!,objcnt: %d",read_time,gc_time,map_time,name_time,code_time,finder.getsize());
                 // finder.work();
                 // finder.clear();
             }
-
+            void Leaktrace::heap_end(){
+                    if(!try_thread_istrace()) return;
+                    LOG(WARNING)<<"Leakleak,info about: "<<" scan cnt "<<scan_cnt<<" try cnt "<<try_cnt<<" move cnt "<<move_cnt<<" success move "<<move_cnt2<<" gc_tol: "<<GC_K;
+                    for(auto it:S_pc){
+                        auto pc = it.first;
+                        {
+                            ReaderMutexLock mu(Thread::Current(), *Locks::mutator_lock_);
+                            LOG(WARNING)<< "Leakleak,HEAP END pc alloc: " << pc_class[pc] <<" class pc:"<<(void*)pc ;//<< " count " << it.second ;
+                        }
+                    }
+            }
             void Leaktrace::interpreter_touch_obj(mirror::Object *I){
                 if(!try_thread_istrace()) return;
                 if( I == nullptr) return;
@@ -546,11 +678,17 @@ namespace art{
                     // my_lock.lock();
                     Runtime::Current()-> GetHeap()-> main_access_bitmap_ -> Set(I);
                     // my_lock.unlock();
-                    //ALOGD("ZHANG, %s touch %d",S.c_str(),(int)i);
+                    //ALOGD("Leakleak, %s touch %d",S.c_str(),(int)i);
                 }
             
             }
-
+            void Leaktrace::Free_obj(mirror::Object *obj){
+                if(!try_thread_istrace()) return;
+                //  LOG(WARNING)<< "Leakleak,Free low: "<<low(obj);
+                 if(addr_large_pc.count(low(obj))){
+                     addr_large_pc.erase(low(obj));
+                 }
+            }
             void Leaktrace::CC_move_from_to(mirror::Object *I,mirror::Object *J){
                 if(!try_thread_istrace()) return;
                 if(I == nullptr||J == nullptr||I == J) return;
@@ -558,21 +696,16 @@ namespace art{
                 //ReaderMutexLock mu(Thread::Current(), *Locks::mutator_lock_);
                 auto ptr = Runtime::Current()-> GetHeap()-> main_access_bitmap_.get();
                 if(ptr!=nullptr&&ptr->HasAddress(I)&&ptr->HasAddress(J)){
+                    move_cnt++;
                     my_lock.lock();
                         if(addr_pc.count(low(I))){
+                            move_cnt2++;
                             addr_pc[low(J)]=addr_pc[low(I)];
                             addr_pc.erase(low(I));
-                                //addr_pc[reinterpret_cast<uint64_t>((void*)I)]=0;
                             if(ptr->Test(I)){
                                 ptr -> Set(J);
                                 ptr -> Clear(I);
                             }
-                            if(vis.count(low(I))){
-                                vis[low(J)]=vis[low(I)];
-                                vis.erase(low(I));
-                            }
-                            my_lock.unlock();
-                            return;
                         }
                     my_lock.unlock();
                 }
@@ -582,14 +715,13 @@ namespace art{
                 }
             }
 
-            
-            //std::set<mirror::Class *> classes_;
-            void Leaktrace::NewClass(mirror::Class *klass) {
-                if (klass && classes_.find(klass) == classes_.end()) {
-                    classes_.insert(klass);
+            void Leaktrace::NewClass(mirror::Class *klass,void* pc) {
+                if (klass && classes_.find({klass,pc}) == classes_.end()) {
+                    classes_.insert({klass,pc});
 
-                    ReaderMutexLock mu(Thread::Current(), *Locks::mutator_lock_);
-                    std::string class_name = klass -> PrettyDescriptor();
+                    // ReaderMutexLock mu(Thread::Current(), *Locks::mutator_lock_);
+                    // std::string class_name = klass -> PrettyDescriptor();
+                    //  LOG(WARNING)<< "Leakleak,update class: " << class_name <<" pc "<<pc;
                     // uint32_t obj_size = klass->GetObjectSize();
                     // // if (obj_size == 0U)
                     // //   obj_size = klass->GetClassSize();
@@ -613,33 +745,36 @@ namespace art{
                     // //       NewMethodLinked(class_name, *(array->Get(i)));
                     // //   }
                     // // };
-                    auto pointer_size = Runtime::Current()->GetClassLinker()->GetImagePointerSize();
-                    auto direct_methods = klass->GetDirectMethods(pointer_size);
-                    for (auto& m : direct_methods) {
-                        NewMethodLinked(class_name, m);
-                    }
-                    auto virtual_methods = klass->GetVirtualMethods(pointer_size);
-                    for (auto& m : virtual_methods) {
-                        NewMethodLinked(class_name, m);
-                    }
-                    for (auto i = 0; i < klass->GetVTableLength(); i++) {
-                        NewMethodLinked(class_name, *(klass->GetVTableEntry(i, pointer_size)));
-                    }
-                    // auto im_methods = klass->GetImTable();
-                    // if (im_methods)
-                    //   for (int i = 0; i < im_methods->GetLength(); ++i)
-                    //     NewMethodLinked(class_name, im_methods->Get(i));
-                    // DumpMethods(im_methods);
+                    
+                    
+                    //     auto pointer_size = Runtime::Current()->GetClassLinker()->GetImagePointerSize();
+                    //     auto direct_methods = klass->GetDirectMethods(pointer_size);
+                    //     for (auto& m : direct_methods) {
+                    //         NewMethodLinked(class_name, m);
+                    //     }
+                    //     auto virtual_methods = klass->GetVirtualMethods(pointer_size);
+                    //     for (auto& m : virtual_methods) {
+                    //         NewMethodLinked(class_name, m);
+                    //     }
+                    //     for (auto i = 0; i < klass->GetVTableLength(); i++) {
+                    //         NewMethodLinked(class_name, *(klass->GetVTableEntry(i, pointer_size)));
+                    //     }
+                    //     // auto im_methods = klass->GetImTable();
+                    //     // if (im_methods)
+                    //     //   for (int i = 0; i < im_methods->GetLength(); ++i)
+                    //     //     NewMethodLinked(class_name, im_methods->Get(i));
+                    //     // DumpMethods(im_methods);
 
-                    // interface table is an array of pair (Class*, ObjectArray<ArtMethod*>)
-                    auto if_table = klass->GetIfTable();
-                    auto method_array_size = klass->GetIfTableCount();
-                    for (int i = 0; i < method_array_size; ++i) {
-                        auto* method_array = if_table->GetMethodArray(i);
-                        for (size_t k = 0; k < if_table->GetMethodArrayCount(i); k++) {
-                            NewMethodLinked(class_name, *(method_array->GetElementPtrSize<ArtMethod*>(k, pointer_size)));
-                        }
-                    }
+                    //     // interface table is an array of pair (Class*, ObjectArray<ArtMethod*>)
+                    //     auto if_table = klass->GetIfTable();
+                    //     auto method_array_size = klass->GetIfTableCount();
+                    //     for (int i = 0; i < method_array_size; ++i) {
+                    //         auto method_array = if_table->GetMethodArray(i);
+                    //         for (size_t k = 0; k < if_table->GetMethodArrayCount(i); k++) {
+                    //             NewMethodLinked(class_name, *(method_array->GetElementPtrSize<ArtMethod*>(k, pointer_size)));
+                    //         }
+                    //     }
+                    
                 }
             }
 
@@ -651,7 +786,7 @@ namespace art{
                 auto code = reinterpret_cast<uintptr_t>(method.GetEntryPointFromQuickCompiledCode());
                 ReaderMutexLock mu(Thread::Current(), *Locks::mutator_lock_);
                 std::string method_name(class_name + "::" + method.GetName());
-                LOG(WARNING)<< "ZHANG,find class method: " << method_name << "and code: " << code;
+                LOG(WARNING)<< "Leakleak,find class method: " << method_name << "and code: " << code;
                 // PRINT(class_fp_, "m %8X %8X %s\n", code, code + method->GetCodeSize(), method_name.c_str());
                 // method_meta_info_.push_back(ClassOrMethod(reinterpret_cast<unsigned int>(code),
                 //                                         reinterpret_cast<unsigned int>(code) + method.GetCodeSize(),
@@ -667,7 +802,7 @@ namespace art{
                     //NewClass(klass);
                     std::string class_name = klass -> PrettyDescriptor();
                     std::string method_name(class_name + "::" + method->GetName());
-                    LOG(WARNING)<< "ZHANG,update method: " << method_name << "and code: " << reinterpret_cast<uintptr_t>(code);
+                    LOG(WARNING)<< "Leakleak,update method: " << method_name << "and code: " << reinterpret_cast<uintptr_t>(code);
                 }
             }
 
@@ -681,56 +816,63 @@ namespace art{
                 std::stringstream stream;
                 if(osr)
                     method_name += "(osr)";
-                if(need_log)LOG(WARNING)<< "ZHANG,JIT method: " << method_name << " and code: " << (void*)(code);
+                LOG(WARNING)<< "Leakleak,JIT method: " << method_name << " and code: " << (void*)(code);
                 
                 stream<< "JIT method: " << method_name << " and code: " << (void*)(code);
                 
-                // else
-                // LOG(WARNING)<< "ZHANG,JIT method: " << method_name << " (osr)and code: " << reinterpret_cast<uintptr_t>(code);
+                // LOG(WARNING)<< "Leakleak,JIT method: " << method_name << " (osr)and code: " << reinterpret_cast<uintptr_t>(code);
                 my_lock2.lock();
                 pc_method[reinterpret_cast<uintptr_t>(code)]=method_name;
                 my_lock2.unlock();
             }
-            // void Leaktrace::JITMethod(ArtMethod &method,uint32_t code) {
-            //     // leading character 'm' means this line is Method information
-            //     // auto code = reinterpret_cast<uintptr_t>(method.GetEntryPointFromQuickCompiledCode());
-            //     ReaderMutexLock mu(Thread::Current(), *Locks::mutator_lock_);
-            //     auto klass =method.GetDeclaringClass();
-            //     std::string method_name(class_name + "::" + method.GetName());
-            //     LOG(WARNING)<< "ZHANG,find class method: " << method_name << "and code: " << code;
-            //     // PRINT(class_fp_, "m %8X %8X %s\n", code, code + method->GetCodeSize(), method_name.c_str());
-            //     // method_meta_info_.push_back(ClassOrMethod(reinterpret_cast<unsigned int>(code),
-            //     //                                         reinterpret_cast<unsigned int>(code) + method.GetCodeSize(),
-            //     //                                         method_name));
-            // }
-            void Leaktrace::new_obj(mirror::Object *obj,int _byte){
+
+            void Leaktrace::new_obj(mirror::Object *obj,uint32_t _byte){
                 if(!try_thread_istrace()) return;
                 //obj->
+                if(Runtime::Current()-> GetHeap()==nullptr){
+                    return;
+                }
                 if(obj == nullptr ) return;
-                uint64_t o = reinterpret_cast<uint64_t>((void*)obj);
-
                 find_new++;
                 tol_size += _byte;
-                if(_byte < getTsize()) return;
-                if(o<main_begin||o>=main_end) return;
+                if(_byte < (uint32_t)getTsize()) return;
+                auto ptr = Runtime::Current()-> GetHeap()-> main_access_bitmap_.get();
+                if(ptr==nullptr||!ptr->HasAddress(obj))return;
+    
                 uintptr_t pc = Thread::Current()-> GetAllocSite();
-                //jit::Jit* jit = Runtime::Current()->GetJit();
-                //if(pc > 0 && (jit!=nullptr && jit->GetCodeCache()->ContainsPc((void*)pc))){
+                Thread::Current()-> SetAllocSite();
+
+                // {
+                //    ReaderMutexLock mu(Thread::Current(), *Locks::mutator_lock_);
+                //    NewClass(obj->GetClass(),(void*)pc);
+                //      ReaderMutexLock mu(Thread::Current(), *Locks::mutator_lock_);
+                //     std::string class_name = obj->GetClass() -> PrettyDescriptor();
+                //      LOG(WARNING)<< "Leakleak,update class: " << class_name ;
+                //     LOG(WARNING)<<"Leakleak,and class from "<<(void*)pc;
+                // }
+
                 if(pc != 0 ){
-                    // {
-                    //     ReaderMutexLock mu(Thread::Current(), *Locks::mutator_lock_);
-                    //     NewClass(obj->GetClass());
-                    // }
-                    S_pc.insert(pc);
-                    count_obj ++;
+
                     my_lock.lock();
-                    addr_pc[low(obj)]={pc,GC_K};
+                    if(pc_class.count(pc)==0){
+                        ReaderMutexLock mu(Thread::Current(), *Locks::mutator_lock_);
+                        pc_class[pc] = obj->GetClass() -> PrettyDescriptor();
+                        // LOG(WARNING)<< "Leakleak,alloc obj: " << pc_class[pc] <<" pc:"<<(void*)pc;
+                    }
+                    count_obj ++;
+                    S_pc[pc]++;
+                    if(_byte < large_size){
+                        addr_pc[low(obj)]={pc,GC_K};
+                    }
+                    else{
+                        addr_large_pc[low(obj)]={pc,GC_K};
+                    }
                     my_lock.unlock();
                 }
                 {
                     return;
                 }
-                //LOG(WARNING)<<"ZHANG,new obj "<<reinterpret_cast<uint64_t>((void*)obj)<<" pc is "<<pc;
+                //LOG(WARNING)<<"Leakleak,new obj "<<reinterpret_cast<uint64_t>((void*)obj)<<" pc is "<<pc;
             }
         }
         
@@ -789,8 +931,8 @@ namespace art{
         //         int t = clock();
         //         std::string s = u->PrettyTypeOf();
         //         if(_set2.count(s)){
-        //             // ALOGD("ZHANG,need to check class: %s ",s.c_str());
-        //             // for(auto c:_set2) ALOGD("ZHANG, string in set: %s ",c.c_str());
+        //             // ALOGD("Leakleak,need to check class: %s ",s.c_str());
+        //             // for(auto c:_set2) ALOGD("Leakleak, string in set: %s ",c.c_str());
         //             int code = u->IdentityHashCode();
         //             t = clock() - t;
         //             code_time += t; 
@@ -801,7 +943,7 @@ namespace art{
         //             // }
         //         }
             
-        //         // ALOGD("ZHANG,addedge %s to %s",u->PrettyTypeOf().c_str(),v->PrettyTypeOf().c_str());
+        //         // ALOGD("Leakleak,addedge %s to %s",u->PrettyTypeOf().c_str(),v->PrettyTypeOf().c_str());
         //     }
 
         //     void clear(){
@@ -831,7 +973,7 @@ namespace art{
 
         //         }
         //         io.put_ans(ret);
-        //         // ALOGD("ZHANG, chian of ref is :  %s",ret.c_str());
+        //         // ALOGD("Leakleak, chian of ref is :  %s",ret.c_str());
         //         return;
         //     }
 
@@ -862,13 +1004,13 @@ namespace art{
         //     }
 
         //     void addcode(int x){
-        //         // ALOGD("ZHANG,ADD code: %d",x);
+        //         // ALOGD("Leakleak,ADD code: %d",x);
                 
         //         _set.insert(x);
         //     }
 
         //     void addname(std::string x){
-        //         // ALOGD("ZHANG,ADD name: %s",x.c_str());
+        //         // ALOGD("Leakleak,ADD name: %s",x.c_str());
         //         _set2.insert(x);
         //     }
 

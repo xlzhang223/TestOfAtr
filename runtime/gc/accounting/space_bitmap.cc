@@ -19,10 +19,10 @@
 #include "android-base/stringprintf.h"
 
 #include "art_field-inl.h"
-#include "dex_file-inl.h"
-#include "mem_map.h"
-#include "mirror/object-inl.h"
+#include "base/mem_map.h"
+#include "dex/dex_file-inl.h"
 #include "mirror/class-inl.h"
+#include "mirror/object-inl.h"
 #include "mirror/object_array.h"
 
 namespace art {
@@ -33,7 +33,12 @@ using android::base::StringPrintf;
 
 template<size_t kAlignment>
 size_t SpaceBitmap<kAlignment>::ComputeBitmapSize(uint64_t capacity) {
+  // Number of space (heap) bytes covered by one bitmap word.
+  // (Word size in bytes = `sizeof(intptr_t)`, which is expected to be
+  // 4 on a 32-bit architecture and 8 on a 64-bit one.)
   const uint64_t kBytesCoveredPerWord = kAlignment * kBitsPerIntPtrT;
+  // Calculate the number of words required to cover a space (heap)
+  // having a size of `capacity` bytes.
   return (RoundUp(capacity, kBytesCoveredPerWord) / kBytesCoveredPerWord) * sizeof(intptr_t);
 }
 
@@ -44,20 +49,26 @@ size_t SpaceBitmap<kAlignment>::ComputeHeapSize(uint64_t bitmap_bytes) {
 
 template<size_t kAlignment>
 SpaceBitmap<kAlignment>* SpaceBitmap<kAlignment>::CreateFromMemMap(
-    const std::string& name, MemMap* mem_map, uint8_t* heap_begin, size_t heap_capacity) {
-  CHECK(mem_map != nullptr);
-  uintptr_t* bitmap_begin = reinterpret_cast<uintptr_t*>(mem_map->Begin());
+    const std::string& name, MemMap&& mem_map, uint8_t* heap_begin, size_t heap_capacity) {
+  CHECK(mem_map.IsValid());
+  uintptr_t* bitmap_begin = reinterpret_cast<uintptr_t*>(mem_map.Begin());
   const size_t bitmap_size = ComputeBitmapSize(heap_capacity);
-  return new SpaceBitmap(name, mem_map, bitmap_begin, bitmap_size, heap_begin);
+  return new SpaceBitmap(
+      name, std::move(mem_map), bitmap_begin, bitmap_size, heap_begin, heap_capacity);
 }
 
 template<size_t kAlignment>
-SpaceBitmap<kAlignment>::SpaceBitmap(const std::string& name, MemMap* mem_map, uintptr_t* bitmap_begin,
-                                     size_t bitmap_size, const void* heap_begin)
-    : mem_map_(mem_map),
+SpaceBitmap<kAlignment>::SpaceBitmap(const std::string& name,
+                                     MemMap&& mem_map,
+                                     uintptr_t* bitmap_begin,
+                                     size_t bitmap_size,
+                                     const void* heap_begin,
+                                     size_t heap_capacity)
+    : mem_map_(std::move(mem_map)),
       bitmap_begin_(reinterpret_cast<Atomic<uintptr_t>*>(bitmap_begin)),
       bitmap_size_(bitmap_size),
       heap_begin_(reinterpret_cast<uintptr_t>(heap_begin)),
+      heap_limit_(reinterpret_cast<uintptr_t>(heap_begin) + heap_capacity),
       name_(name) {
   CHECK(bitmap_begin_ != nullptr);
   CHECK_NE(bitmap_size, 0U);
@@ -69,41 +80,21 @@ SpaceBitmap<kAlignment>::~SpaceBitmap() {}
 template<size_t kAlignment>
 SpaceBitmap<kAlignment>* SpaceBitmap<kAlignment>::Create(
     const std::string& name, uint8_t* heap_begin, size_t heap_capacity) {
-  // Round up since heap_capacity is not necessarily a multiple of kAlignment * kBitsPerWord.
+  // Round up since `heap_capacity` is not necessarily a multiple of `kAlignment * kBitsPerIntPtrT`
+  // (we represent one word as an `intptr_t`).
   const size_t bitmap_size = ComputeBitmapSize(heap_capacity);
   std::string error_msg;
-  std::unique_ptr<MemMap> mem_map(MemMap::MapAnonymous(name.c_str(), nullptr, bitmap_size,
-                                                       PROT_READ | PROT_WRITE, false, false,
-                                                       &error_msg));
-  if (UNLIKELY(mem_map.get() == nullptr)) {
+  MemMap mem_map = MemMap::MapAnonymous(name.c_str(),
+                                        bitmap_size,
+                                        PROT_READ | PROT_WRITE,
+                                        /*low_4gb=*/ false,
+                                        &error_msg);
+  if (UNLIKELY(!mem_map.IsValid())) {
     LOG(ERROR) << "Failed to allocate bitmap " << name << ": " << error_msg;
     return nullptr;
   }
-  return CreateFromMemMap(name, mem_map.release(), heap_begin, heap_capacity);
+  return CreateFromMemMap(name, std::move(mem_map), heap_begin, heap_capacity);
 }
-
-//zhang 
-//init my_main_bitset  // expected mean real ?
-template<size_t kAlignment>
-SpaceBitmap<kAlignment>* SpaceBitmap<kAlignment>::CreateFromRequestAddress(
-									   const std::string& name,  uint8_t* expected_ptr, uint8_t* heap_begin, size_t heap_capacity) {
-  // Round up since heap_capacity is not necessarily a multiple of kAlignment * kBitsPerWord.
-  const size_t bitmap_size = ComputeBitmapSize(heap_capacity);
-  //LOG(ERROR) << "zhang allocate bitmap_size " << bitmap_size;
-  //LOG(ERROR) << "zhang allocate bitmap_begin " << (uintptr_t)heap_begin;
-  std::string error_msg;
-  std::unique_ptr<MemMap> mem_map(MemMap::MapAnonymous(name.c_str(), expected_ptr, bitmap_size,
-                                                       PROT_READ | PROT_WRITE, false, false,
-                                                       &error_msg));
-  if (UNLIKELY(mem_map.get() == nullptr)) {
-    LOG(ERROR) << "zhang Failed to allocate bitmap " << name << ": " << error_msg;
-    return nullptr;
-  }
-  return CreateFromMemMap(name, mem_map.release(), heap_begin, heap_capacity);
-}
-
-//end
-
 
 template<size_t kAlignment>
 void SpaceBitmap<kAlignment>::SetHeapLimit(uintptr_t new_end) {
@@ -112,6 +103,7 @@ void SpaceBitmap<kAlignment>::SetHeapLimit(uintptr_t new_end) {
   if (new_size < bitmap_size_) {
     bitmap_size_ = new_size;
   }
+  heap_limit_ = new_end;
   // Not sure if doing this trim is necessary, since nothing past the end of the heap capacity
   // should be marked.
 }
@@ -125,7 +117,7 @@ std::string SpaceBitmap<kAlignment>::Dump() const {
 template<size_t kAlignment>
 void SpaceBitmap<kAlignment>::Clear() {
   if (bitmap_begin_ != nullptr) {
-    mem_map_->MadviseDontNeedAndZero();
+    mem_map_.MadviseDontNeedAndZero();
   }
 }
 
@@ -133,7 +125,7 @@ template<size_t kAlignment>
 void SpaceBitmap<kAlignment>::ClearRange(const mirror::Object* begin, const mirror::Object* end) {
   uintptr_t begin_offset = reinterpret_cast<uintptr_t>(begin) - heap_begin_;
   uintptr_t end_offset = reinterpret_cast<uintptr_t>(end) - heap_begin_;
-  // Align begin and end to word boundaries.
+  // Align begin and end to bitmap word boundaries.
   while (begin_offset < end_offset && OffsetBitIndex(begin_offset) != 0) {
     Clear(reinterpret_cast<mirror::Object*>(heap_begin_ + begin_offset));
     begin_offset += kAlignment;
@@ -142,6 +134,7 @@ void SpaceBitmap<kAlignment>::ClearRange(const mirror::Object* begin, const mirr
     end_offset -= kAlignment;
     Clear(reinterpret_cast<mirror::Object*>(heap_begin_ + end_offset));
   }
+  // Bitmap word boundaries.
   const uintptr_t start_index = OffsetToIndex(begin_offset);
   const uintptr_t end_index = OffsetToIndex(end_offset);
   ZeroAndReleasePages(reinterpret_cast<uint8_t*>(&bitmap_begin_[start_index]),
@@ -155,28 +148,7 @@ void SpaceBitmap<kAlignment>::CopyFrom(SpaceBitmap* source_bitmap) {
   Atomic<uintptr_t>* const src = source_bitmap->Begin();
   Atomic<uintptr_t>* const dest = Begin();
   for (size_t i = 0; i < count; ++i) {
-    dest[i].StoreRelaxed(src[i].LoadRelaxed());
-  }
-}
-
-template<size_t kAlignment>
-void SpaceBitmap<kAlignment>::Walk(ObjectCallback* callback, void* arg) {
-  CHECK(bitmap_begin_ != nullptr);
-  CHECK(callback != nullptr);
-
-  uintptr_t end = OffsetToIndex(HeapLimit() - heap_begin_ - 1);
-  Atomic<uintptr_t>* bitmap_begin = bitmap_begin_;
-  for (uintptr_t i = 0; i <= end; ++i) {
-    uintptr_t w = bitmap_begin[i].LoadRelaxed();
-    if (w != 0) {
-      uintptr_t ptr_base = IndexToOffset(i) + heap_begin_;
-      do {
-        const size_t shift = CTZ(w);
-        mirror::Object* obj = reinterpret_cast<mirror::Object*>(ptr_base + shift * kAlignment);
-        (*callback)(obj, arg);
-        w ^= (static_cast<uintptr_t>(1)) << shift;
-      } while (w != 0);
-    }
+    dest[i].store(src[i].load(std::memory_order_relaxed), std::memory_order_relaxed);
   }
 }
 
@@ -197,42 +169,48 @@ void SpaceBitmap<kAlignment>::SweepWalk(const SpaceBitmap<kAlignment>& live_bitm
     return;
   }
 
-  // TODO: rewrite the callbacks to accept a std::vector<mirror::Object*> rather than a mirror::Object**?
-  constexpr size_t buffer_size = sizeof(intptr_t) * kBitsPerIntPtrT;
-#ifdef __LP64__
-  // Heap-allocate for smaller stack frame.
-  std::unique_ptr<mirror::Object*[]> pointer_buf_ptr(new mirror::Object*[buffer_size]);
-  mirror::Object** pointer_buf = pointer_buf_ptr.get();
-#else
-  // Stack-allocate buffer as it's small enough.
-  mirror::Object* pointer_buf[buffer_size];
-#endif
-  mirror::Object** pb = &pointer_buf[0];
-
-  size_t start = OffsetToIndex(sweep_begin - live_bitmap.heap_begin_);
-  size_t end = OffsetToIndex(sweep_end - live_bitmap.heap_begin_ - 1);
-  CHECK_LT(end, live_bitmap.Size() / sizeof(intptr_t));
+  size_t buffer_size = sizeof(intptr_t) * kBitsPerIntPtrT;
   Atomic<uintptr_t>* live = live_bitmap.bitmap_begin_;
   Atomic<uintptr_t>* mark = mark_bitmap.bitmap_begin_;
+  const size_t start = OffsetToIndex(sweep_begin - live_bitmap.heap_begin_);
+  const size_t end = OffsetToIndex(sweep_end - live_bitmap.heap_begin_ - 1);
+  CHECK_LT(end, live_bitmap.Size() / sizeof(intptr_t));
+
+  if (Runtime::Current()->IsRunningOnMemoryTool()) {
+    // For memory tool, make the buffer large enough to hold all allocations. This is done since
+    // we get the size of objects (and hence read the class) inside of the freeing logic. This can
+    // cause crashes for unloaded classes since the class may get zeroed out before it is read.
+    // See b/131542326
+    for (size_t i = start; i <= end; i++) {
+      uintptr_t garbage =
+          live[i].load(std::memory_order_relaxed) & ~mark[i].load(std::memory_order_relaxed);
+      buffer_size += POPCOUNT(garbage);
+    }
+  }
+  std::vector<mirror::Object*> pointer_buf(buffer_size);
+  mirror::Object** cur_pointer = &pointer_buf[0];
+  mirror::Object** pointer_end = cur_pointer + (buffer_size - kBitsPerIntPtrT);
+
   for (size_t i = start; i <= end; i++) {
-    uintptr_t garbage = live[i].LoadRelaxed() & ~mark[i].LoadRelaxed();
+    uintptr_t garbage =
+        live[i].load(std::memory_order_relaxed) & ~mark[i].load(std::memory_order_relaxed);
     if (UNLIKELY(garbage != 0)) {
       uintptr_t ptr_base = IndexToOffset(i) + live_bitmap.heap_begin_;
       do {
         const size_t shift = CTZ(garbage);
         garbage ^= (static_cast<uintptr_t>(1)) << shift;
-        *pb++ = reinterpret_cast<mirror::Object*>(ptr_base + shift * kAlignment);
+        *cur_pointer++ = reinterpret_cast<mirror::Object*>(ptr_base + shift * kAlignment);
       } while (garbage != 0);
       // Make sure that there are always enough slots available for an
       // entire word of one bits.
-      if (pb >= &pointer_buf[buffer_size - kBitsPerIntPtrT]) {
-        (*callback)(pb - &pointer_buf[0], &pointer_buf[0], arg);
-        pb = &pointer_buf[0];
+      if (cur_pointer >= pointer_end) {
+        (*callback)(cur_pointer - &pointer_buf[0], &pointer_buf[0], arg);
+        cur_pointer  = &pointer_buf[0];
       }
     }
   }
-  if (pb > &pointer_buf[0]) {
-    (*callback)(pb - &pointer_buf[0], &pointer_buf[0], arg);
+  if (cur_pointer > &pointer_buf[0]) {
+    (*callback)(cur_pointer - &pointer_buf[0], &pointer_buf[0], arg);
   }
 }
 

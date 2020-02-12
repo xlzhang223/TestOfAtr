@@ -17,9 +17,12 @@
 #ifndef ART_COMPILER_OPTIMIZING_GRAPH_CHECKER_H_
 #define ART_COMPILER_OPTIMIZING_GRAPH_CHECKER_H_
 
-#include "nodes.h"
-
 #include <ostream>
+
+#include "base/arena_bit_vector.h"
+#include "base/bit_vector-inl.h"
+#include "base/scoped_arena_allocator.h"
+#include "nodes.h"
 
 namespace art {
 
@@ -28,48 +31,50 @@ class GraphChecker : public HGraphDelegateVisitor {
  public:
   explicit GraphChecker(HGraph* graph, const char* dump_prefix = "art::GraphChecker: ")
     : HGraphDelegateVisitor(graph),
-      errors_(graph->GetArena()->Adapter(kArenaAllocGraphChecker)),
+      errors_(graph->GetAllocator()->Adapter(kArenaAllocGraphChecker)),
       dump_prefix_(dump_prefix),
-      seen_ids_(graph->GetArena(),
-                graph->GetCurrentInstructionId(),
-                false,
-                kArenaAllocGraphChecker),
-      blocks_storage_(graph->GetArena()->Adapter(kArenaAllocGraphChecker)),
-      visited_storage_(graph->GetArena(), 0u, true, kArenaAllocGraphChecker) {}
-
-  // Check the whole graph (in reverse post-order).
-  void Run() {
-    // VisitReversePostOrder is used instead of VisitInsertionOrder,
-    // as the latter might visit dead blocks removed by the dominator
-    // computation.
-    VisitReversePostOrder();
+      allocator_(graph->GetArenaStack()),
+      seen_ids_(&allocator_, graph->GetCurrentInstructionId(), false, kArenaAllocGraphChecker) {
+    seen_ids_.ClearAllBits();
   }
 
-  void VisitBasicBlock(HBasicBlock* block) OVERRIDE;
+  // Check the whole graph. The pass_change parameter indicates whether changes
+  // may have occurred during the just executed pass. The default value is
+  // conservatively "true" (something may have changed). The last_size parameter
+  // and return value pass along the observed graph sizes.
+  size_t Run(bool pass_change = true, size_t last_size = 0);
 
-  void VisitInstruction(HInstruction* instruction) OVERRIDE;
-  void VisitPhi(HPhi* phi) OVERRIDE;
+  void VisitBasicBlock(HBasicBlock* block) override;
 
-  void VisitBinaryOperation(HBinaryOperation* op) OVERRIDE;
-  void VisitBooleanNot(HBooleanNot* instruction) OVERRIDE;
-  void VisitBoundType(HBoundType* instruction) OVERRIDE;
-  void VisitBoundsCheck(HBoundsCheck* check) OVERRIDE;
-  void VisitCheckCast(HCheckCast* check) OVERRIDE;
-  void VisitCondition(HCondition* op) OVERRIDE;
-  void VisitConstant(HConstant* instruction) OVERRIDE;
-  void VisitDeoptimize(HDeoptimize* instruction) OVERRIDE;
-  void VisitIf(HIf* instruction) OVERRIDE;
-  void VisitInstanceOf(HInstanceOf* check) OVERRIDE;
-  void VisitInvokeStaticOrDirect(HInvokeStaticOrDirect* invoke) OVERRIDE;
-  void VisitLoadException(HLoadException* load) OVERRIDE;
-  void VisitNeg(HNeg* instruction) OVERRIDE;
-  void VisitPackedSwitch(HPackedSwitch* instruction) OVERRIDE;
-  void VisitReturn(HReturn* ret) OVERRIDE;
-  void VisitReturnVoid(HReturnVoid* ret) OVERRIDE;
-  void VisitSelect(HSelect* instruction) OVERRIDE;
-  void VisitTryBoundary(HTryBoundary* try_boundary) OVERRIDE;
-  void VisitTypeConversion(HTypeConversion* instruction) OVERRIDE;
+  void VisitInstruction(HInstruction* instruction) override;
+  void VisitPhi(HPhi* phi) override;
 
+  void VisitBinaryOperation(HBinaryOperation* op) override;
+  void VisitBooleanNot(HBooleanNot* instruction) override;
+  void VisitBoundType(HBoundType* instruction) override;
+  void VisitBoundsCheck(HBoundsCheck* check) override;
+  void VisitCheckCast(HCheckCast* check) override;
+  void VisitCondition(HCondition* op) override;
+  void VisitConstant(HConstant* instruction) override;
+  void VisitDeoptimize(HDeoptimize* instruction) override;
+  void VisitIf(HIf* instruction) override;
+  void VisitInstanceOf(HInstanceOf* check) override;
+  void VisitInvokeStaticOrDirect(HInvokeStaticOrDirect* invoke) override;
+  void VisitLoadException(HLoadException* load) override;
+  void VisitNeg(HNeg* instruction) override;
+  void VisitPackedSwitch(HPackedSwitch* instruction) override;
+  void VisitReturn(HReturn* ret) override;
+  void VisitReturnVoid(HReturnVoid* ret) override;
+  void VisitSelect(HSelect* instruction) override;
+  void VisitTryBoundary(HTryBoundary* try_boundary) override;
+  void VisitTypeConversion(HTypeConversion* instruction) override;
+
+  void CheckTypeCheckBitstringInput(HTypeCheckInstruction* check,
+                                    size_t input_pos,
+                                    bool check_value,
+                                    uint32_t expected_value,
+                                    const char* name);
+  void HandleTypeCheckInstruction(HTypeCheckInstruction* instruction);
   void HandleLoop(HBasicBlock* loop_header);
   void HandleBooleanInput(HInstruction* instruction, size_t input_index);
 
@@ -104,11 +109,8 @@ class GraphChecker : public HGraphDelegateVisitor {
  private:
   // String displayed before dumped errors.
   const char* const dump_prefix_;
+  ScopedArenaAllocator allocator_;
   ArenaBitVector seen_ids_;
-
-  // To reduce the total arena memory allocation, we reuse the same storage.
-  ArenaVector<HBasicBlock*> blocks_storage_;
-  ArenaBitVector visited_storage_;
 
   DISALLOW_COPY_AND_ASSIGN(GraphChecker);
 };

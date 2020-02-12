@@ -25,16 +25,16 @@
 
 namespace art {
 
-class EmitSwapMipsTest : public ::testing::Test {
+class EmitSwapMipsTest : public OptimizingUnitTest {
  public:
-  void SetUp() OVERRIDE {
-    allocator_.reset(new ArenaAllocator(&pool_));
-    graph_ = CreateGraph(allocator_.get());
-    isa_features_ = MipsInstructionSetFeatures::FromCppDefines();
-    codegen_ = new (graph_->GetArena()) mips::CodeGeneratorMIPS(graph_,
-                                                                *isa_features_.get(),
-                                                                CompilerOptions());
-    moves_ = new (allocator_.get()) HParallelMove(allocator_.get());
+  void SetUp() override {
+    instruction_set_ = InstructionSet::kMips;
+    instruction_set_features_ = MipsInstructionSetFeatures::FromCppDefines();
+    OptimizingUnitTest::SetUp();
+    graph_ = CreateGraph();
+    codegen_.reset(
+        new (graph_->GetAllocator()) mips::CodeGeneratorMIPS(graph_, *compiler_options_));
+    moves_ = new (GetAllocator()) HParallelMove(GetAllocator());
     test_helper_.reset(
         new AssemblerTestInfrastructure(GetArchitectureString(),
                                         GetAssemblerCmdName(),
@@ -46,9 +46,12 @@ class EmitSwapMipsTest : public ::testing::Test {
                                         GetAssemblyHeader()));
   }
 
-  void TearDown() OVERRIDE {
-    allocator_.reset();
+  void TearDown() override {
     test_helper_.reset();
+    codegen_.reset();
+    graph_ = nullptr;
+    ResetPoolAndAllocator();
+    OptimizingUnitTest::TearDown();
   }
 
   // Get the typically used name for this architecture.
@@ -91,7 +94,9 @@ class EmitSwapMipsTest : public ::testing::Test {
     return nullptr;
   }
 
-  void DriverWrapper(HParallelMove* move, std::string assembly_text, std::string test_name) {
+  void DriverWrapper(HParallelMove* move,
+                     const std::string& assembly_text,
+                     const std::string& test_name) {
     codegen_->GetMoveResolver()->EmitNativeCode(move);
     assembler_ = codegen_->GetAssembler();
     assembler_->FinalizeCode();
@@ -102,26 +107,23 @@ class EmitSwapMipsTest : public ::testing::Test {
   }
 
  protected:
-  ArenaPool pool_;
   HGraph* graph_;
   HParallelMove* moves_;
-  mips::CodeGeneratorMIPS* codegen_;
+  std::unique_ptr<mips::CodeGeneratorMIPS> codegen_;
   mips::MipsAssembler* assembler_;
-  std::unique_ptr<ArenaAllocator> allocator_;
   std::unique_ptr<AssemblerTestInfrastructure> test_helper_;
-  std::unique_ptr<const MipsInstructionSetFeatures> isa_features_;
 };
 
 TEST_F(EmitSwapMipsTest, TwoRegisters) {
   moves_->AddMove(
       Location::RegisterLocation(4),
       Location::RegisterLocation(5),
-      Primitive::kPrimInt,
+      DataType::Type::kInt32,
       nullptr);
   moves_->AddMove(
       Location::RegisterLocation(5),
       Location::RegisterLocation(4),
-      Primitive::kPrimInt,
+      DataType::Type::kInt32,
       nullptr);
   const char* expected =
       "or $t8, $a1, $zero\n"
@@ -134,12 +136,12 @@ TEST_F(EmitSwapMipsTest, TwoRegisterPairs) {
   moves_->AddMove(
       Location::RegisterPairLocation(4, 5),
       Location::RegisterPairLocation(6, 7),
-      Primitive::kPrimLong,
+      DataType::Type::kInt64,
       nullptr);
   moves_->AddMove(
       Location::RegisterPairLocation(6, 7),
       Location::RegisterPairLocation(4, 5),
-      Primitive::kPrimLong,
+      DataType::Type::kInt64,
       nullptr);
   const char* expected =
       "or $t8, $a2, $zero\n"
@@ -155,12 +157,12 @@ TEST_F(EmitSwapMipsTest, TwoFpuRegistersFloat) {
   moves_->AddMove(
       Location::FpuRegisterLocation(4),
       Location::FpuRegisterLocation(2),
-      Primitive::kPrimFloat,
+      DataType::Type::kFloat32,
       nullptr);
   moves_->AddMove(
       Location::FpuRegisterLocation(2),
       Location::FpuRegisterLocation(4),
-      Primitive::kPrimFloat,
+      DataType::Type::kFloat32,
       nullptr);
   const char* expected =
       "mov.s $f6, $f2\n"
@@ -173,12 +175,12 @@ TEST_F(EmitSwapMipsTest, TwoFpuRegistersDouble) {
   moves_->AddMove(
       Location::FpuRegisterLocation(4),
       Location::FpuRegisterLocation(2),
-      Primitive::kPrimDouble,
+      DataType::Type::kFloat64,
       nullptr);
   moves_->AddMove(
       Location::FpuRegisterLocation(2),
       Location::FpuRegisterLocation(4),
-      Primitive::kPrimDouble,
+      DataType::Type::kFloat64,
       nullptr);
   const char* expected =
       "mov.d $f6, $f2\n"
@@ -191,12 +193,12 @@ TEST_F(EmitSwapMipsTest, RegisterAndFpuRegister) {
   moves_->AddMove(
       Location::RegisterLocation(4),
       Location::FpuRegisterLocation(2),
-      Primitive::kPrimFloat,
+      DataType::Type::kFloat32,
       nullptr);
   moves_->AddMove(
       Location::FpuRegisterLocation(2),
       Location::RegisterLocation(4),
-      Primitive::kPrimFloat,
+      DataType::Type::kFloat32,
       nullptr);
   const char* expected =
       "or $t8, $a0, $zero\n"
@@ -209,12 +211,12 @@ TEST_F(EmitSwapMipsTest, RegisterPairAndFpuRegister) {
   moves_->AddMove(
       Location::RegisterPairLocation(4, 5),
       Location::FpuRegisterLocation(4),
-      Primitive::kPrimDouble,
+      DataType::Type::kFloat64,
       nullptr);
   moves_->AddMove(
       Location::FpuRegisterLocation(4),
       Location::RegisterPairLocation(4, 5),
-      Primitive::kPrimDouble,
+      DataType::Type::kFloat64,
       nullptr);
   const char* expected =
       "mfc1 $t8, $f4\n"
@@ -230,22 +232,22 @@ TEST_F(EmitSwapMipsTest, TwoStackSlots) {
   moves_->AddMove(
       Location::StackSlot(52),
       Location::StackSlot(48),
-      Primitive::kPrimInt,
+      DataType::Type::kInt32,
       nullptr);
   moves_->AddMove(
       Location::StackSlot(48),
       Location::StackSlot(52),
-      Primitive::kPrimInt,
+      DataType::Type::kInt32,
       nullptr);
   const char* expected =
-      "addiu $sp, $sp, -4\n"
+      "addiu $sp, $sp, -16\n"
       "sw $v0, 0($sp)\n"
-      "lw $v0, 56($sp)\n"
-      "lw $t8, 52($sp)\n"
-      "sw $v0, 52($sp)\n"
-      "sw $t8, 56($sp)\n"
+      "lw $v0, 68($sp)\n"
+      "lw $t8, 64($sp)\n"
+      "sw $v0, 64($sp)\n"
+      "sw $t8, 68($sp)\n"
       "lw $v0, 0($sp)\n"
-      "addiu $sp, $sp, 4\n";
+      "addiu $sp, $sp, 16\n";
   DriverWrapper(moves_, expected, "TwoStackSlots");
 }
 
@@ -253,26 +255,26 @@ TEST_F(EmitSwapMipsTest, TwoDoubleStackSlots) {
   moves_->AddMove(
       Location::DoubleStackSlot(56),
       Location::DoubleStackSlot(48),
-      Primitive::kPrimLong,
+      DataType::Type::kInt64,
       nullptr);
   moves_->AddMove(
       Location::DoubleStackSlot(48),
       Location::DoubleStackSlot(56),
-      Primitive::kPrimLong,
+      DataType::Type::kInt64,
       nullptr);
   const char* expected =
-      "addiu $sp, $sp, -4\n"
+      "addiu $sp, $sp, -16\n"
       "sw $v0, 0($sp)\n"
-      "lw $v0, 60($sp)\n"
-      "lw $t8, 52($sp)\n"
-      "sw $v0, 52($sp)\n"
-      "sw $t8, 60($sp)\n"
-      "lw $v0, 64($sp)\n"
-      "lw $t8, 56($sp)\n"
-      "sw $v0, 56($sp)\n"
-      "sw $t8, 64($sp)\n"
+      "lw $v0, 72($sp)\n"
+      "lw $t8, 64($sp)\n"
+      "sw $v0, 64($sp)\n"
+      "sw $t8, 72($sp)\n"
+      "lw $v0, 76($sp)\n"
+      "lw $t8, 68($sp)\n"
+      "sw $v0, 68($sp)\n"
+      "sw $t8, 76($sp)\n"
       "lw $v0, 0($sp)\n"
-      "addiu $sp, $sp, 4\n";
+      "addiu $sp, $sp, 16\n";
   DriverWrapper(moves_, expected, "TwoDoubleStackSlots");
 }
 
@@ -280,12 +282,12 @@ TEST_F(EmitSwapMipsTest, RegisterAndStackSlot) {
   moves_->AddMove(
       Location::RegisterLocation(4),
       Location::StackSlot(48),
-      Primitive::kPrimInt,
+      DataType::Type::kInt32,
       nullptr);
   moves_->AddMove(
       Location::StackSlot(48),
       Location::RegisterLocation(4),
-      Primitive::kPrimInt,
+      DataType::Type::kInt32,
       nullptr);
   const char* expected =
       "or $t8, $a0, $zero\n"
@@ -298,12 +300,12 @@ TEST_F(EmitSwapMipsTest, RegisterPairAndDoubleStackSlot) {
   moves_->AddMove(
       Location::RegisterPairLocation(4, 5),
       Location::DoubleStackSlot(32),
-      Primitive::kPrimLong,
+      DataType::Type::kInt64,
       nullptr);
   moves_->AddMove(
       Location::DoubleStackSlot(32),
       Location::RegisterPairLocation(4, 5),
-      Primitive::kPrimLong,
+      DataType::Type::kInt64,
       nullptr);
   const char* expected =
       "or $t8, $a0, $zero\n"
@@ -319,12 +321,12 @@ TEST_F(EmitSwapMipsTest, FpuRegisterAndStackSlot) {
   moves_->AddMove(
       Location::FpuRegisterLocation(4),
       Location::StackSlot(48),
-      Primitive::kPrimFloat,
+      DataType::Type::kFloat32,
       nullptr);
   moves_->AddMove(
       Location::StackSlot(48),
       Location::FpuRegisterLocation(4),
-      Primitive::kPrimFloat,
+      DataType::Type::kFloat32,
       nullptr);
   const char* expected =
       "mov.s $f6, $f4\n"
@@ -337,12 +339,12 @@ TEST_F(EmitSwapMipsTest, FpuRegisterAndDoubleStackSlot) {
   moves_->AddMove(
       Location::FpuRegisterLocation(4),
       Location::DoubleStackSlot(48),
-      Primitive::kPrimDouble,
+      DataType::Type::kFloat64,
       nullptr);
   moves_->AddMove(
       Location::DoubleStackSlot(48),
       Location::FpuRegisterLocation(4),
-      Primitive::kPrimDouble,
+      DataType::Type::kFloat64,
       nullptr);
   const char* expected =
       "mov.d $f6, $f4\n"

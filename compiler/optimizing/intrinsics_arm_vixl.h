@@ -27,16 +27,16 @@ namespace arm {
 class ArmVIXLAssembler;
 class CodeGeneratorARMVIXL;
 
-class IntrinsicLocationsBuilderARMVIXL FINAL : public IntrinsicVisitor {
+class IntrinsicLocationsBuilderARMVIXL final : public IntrinsicVisitor {
  public:
   explicit IntrinsicLocationsBuilderARMVIXL(CodeGeneratorARMVIXL* codegen);
 
   // Define visitor methods.
 
 #define OPTIMIZING_INTRINSICS(Name, IsStatic, NeedsEnvironmentOrCache, SideEffects, Exceptions, ...) \
-  void Visit ## Name(HInvoke* invoke) OVERRIDE;
+  void Visit ## Name(HInvoke* invoke) override;
 #include "intrinsics_list.h"
-INTRINSICS_LIST(OPTIMIZING_INTRINSICS)
+  INTRINSICS_LIST(OPTIMIZING_INTRINSICS)
 #undef INTRINSICS_LIST
 #undef OPTIMIZING_INTRINSICS
 
@@ -46,24 +46,24 @@ INTRINSICS_LIST(OPTIMIZING_INTRINSICS)
   bool TryDispatch(HInvoke* invoke);
 
  private:
-  ArenaAllocator* arena_;
-  CodeGenerator* codegen_;
-  ArmVIXLAssembler* assembler_;
+  ArenaAllocator* const allocator_;
+  CodeGenerator* const codegen_;
+  ArmVIXLAssembler* const assembler_;
   const ArmInstructionSetFeatures& features_;
 
   DISALLOW_COPY_AND_ASSIGN(IntrinsicLocationsBuilderARMVIXL);
 };
 
-class IntrinsicCodeGeneratorARMVIXL FINAL : public IntrinsicVisitor {
+class IntrinsicCodeGeneratorARMVIXL final : public IntrinsicVisitor {
  public:
   explicit IntrinsicCodeGeneratorARMVIXL(CodeGeneratorARMVIXL* codegen) : codegen_(codegen) {}
 
   // Define visitor methods.
 
 #define OPTIMIZING_INTRINSICS(Name, IsStatic, NeedsEnvironmentOrCache, SideEffects, Exceptions, ...) \
-  void Visit ## Name(HInvoke* invoke) OVERRIDE;
+  void Visit ## Name(HInvoke* invoke) override;
 #include "intrinsics_list.h"
-INTRINSICS_LIST(OPTIMIZING_INTRINSICS)
+  INTRINSICS_LIST(OPTIMIZING_INTRINSICS)
 #undef INTRINSICS_LIST
 #undef OPTIMIZING_INTRINSICS
 
@@ -71,7 +71,7 @@ INTRINSICS_LIST(OPTIMIZING_INTRINSICS)
   ArenaAllocator* GetAllocator();
   ArmVIXLAssembler* GetAssembler();
 
-  CodeGeneratorARMVIXL* codegen_;
+  CodeGeneratorARMVIXL* const codegen_;
 
   DISALLOW_COPY_AND_ASSIGN(IntrinsicCodeGeneratorARMVIXL);
 };

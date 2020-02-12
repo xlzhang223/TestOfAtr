@@ -107,9 +107,14 @@ public class ClassAttrs {
         inner.showMe();
 
         ClassAttrs attrs = new ClassAttrs();
-
-        /* anonymous, not local, not member */
-        printClassAttrs((new OtherClass() { int i = 5; }).getClass());
+        try {
+            /* anonymous, not local, not member */
+            printClassAttrs(Class.forName("ClassAttrs$1")); // ClassAttrs$1.j
+        } catch (ClassNotFoundException e) {
+            System.out.println("FAILED: " + e);
+            e.printStackTrace(System.out);
+            throw new AssertionError(e);
+        }
 
         /* member, not anonymous, not local */
         printClassAttrs(MemberClass.class);
@@ -133,12 +138,12 @@ public class ClassAttrs {
             System.out.println("field signature: "
                     + getSignatureAttribute(field));
         } catch (NoSuchMethodException nsme) {
-            System.err.println("FAILED: " + nsme);
+            System.out.println("FAILED: " + nsme);
         } catch (NoSuchFieldException nsfe) {
-            System.err.println("FAILED: " + nsfe);
+            System.out.println("FAILED: " + nsfe);
         } catch (RuntimeException re) {
-            System.err.println("FAILED: " + re);
-            re.printStackTrace();
+            System.out.println("FAILED: " + re);
+            re.printStackTrace(System.out);
         }
 
         test_isAssignableFrom();
@@ -228,7 +233,7 @@ public class ClassAttrs {
             method = c.getDeclaredMethod("getSignatureAttribute");
             method.setAccessible(true);
         } catch (Exception ex) {
-            ex.printStackTrace();
+            ex.printStackTrace(System.out);
             return "<unknown>";
         }
 

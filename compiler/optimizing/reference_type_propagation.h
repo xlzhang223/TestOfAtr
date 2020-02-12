@@ -18,12 +18,10 @@
 #define ART_COMPILER_OPTIMIZING_REFERENCE_TYPE_PROPAGATION_H_
 
 #include "base/arena_containers.h"
-#include "driver/dex_compilation_unit.h"
-#include "handle_scope-inl.h"
+#include "mirror/class-inl.h"
 #include "nodes.h"
 #include "obj_ptr.h"
 #include "optimization.h"
-#include "optimizing_compiler_stats.h"
 
 namespace art {
 
@@ -42,17 +40,23 @@ class ReferenceTypePropagation : public HOptimization {
   // Visit a single instruction.
   void Visit(HInstruction* instruction);
 
-  void Run() OVERRIDE;
+  bool Run() override;
 
   // Returns true if klass is admissible to the propagation: non-null and resolved.
   // For an array type, we also check if the component type is admissible.
-  static bool IsAdmissible(mirror::Class* klass) REQUIRES_SHARED(Locks::mutator_lock_) {
+  static bool IsAdmissible(ObjPtr<mirror::Class> klass) REQUIRES_SHARED(Locks::mutator_lock_) {
     return klass != nullptr &&
            klass->IsResolved() &&
            (!klass->IsArrayClass() || IsAdmissible(klass->GetComponentType()));
   }
 
   static constexpr const char* kReferenceTypePropagationPassName = "reference_type_propagation";
+
+  // Fix the reference type for an instruction whose inputs have changed.
+  // For a select instruction, the reference types of the inputs are merged
+  // and the resulting reference type is set on the select instruction.
+  static void FixUpInstructionType(HInstruction* instruction,
+                                   VariableSizedHandleScope* handle_scope);
 
  private:
   class HandleCache {
@@ -71,6 +75,8 @@ class ReferenceTypePropagation : public HOptimization {
 
     ReferenceTypeInfo::TypeHandle GetObjectClassHandle();
     ReferenceTypeInfo::TypeHandle GetClassClassHandle();
+    ReferenceTypeInfo::TypeHandle GetMethodHandleClassHandle();
+    ReferenceTypeInfo::TypeHandle GetMethodTypeClassHandle();
     ReferenceTypeInfo::TypeHandle GetStringClassHandle();
     ReferenceTypeInfo::TypeHandle GetThrowableClassHandle();
 
@@ -79,29 +85,17 @@ class ReferenceTypePropagation : public HOptimization {
 
     ReferenceTypeInfo::TypeHandle object_class_handle_;
     ReferenceTypeInfo::TypeHandle class_class_handle_;
+    ReferenceTypeInfo::TypeHandle method_handle_class_handle_;
+    ReferenceTypeInfo::TypeHandle method_type_class_handle_;
     ReferenceTypeInfo::TypeHandle string_class_handle_;
     ReferenceTypeInfo::TypeHandle throwable_class_handle_;
   };
 
   class RTPVisitor;
 
-  void VisitPhi(HPhi* phi);
-  void VisitBasicBlock(HBasicBlock* block);
-  void UpdateBoundType(HBoundType* bound_type) REQUIRES_SHARED(Locks::mutator_lock_);
-  void UpdatePhi(HPhi* phi) REQUIRES_SHARED(Locks::mutator_lock_);
-  void BoundTypeForIfNotNull(HBasicBlock* block);
-  void BoundTypeForIfInstanceOf(HBasicBlock* block);
-  void ProcessWorklist();
-  void AddToWorklist(HInstruction* instr);
-  void AddDependentInstructionsToWorklist(HInstruction* instr);
-
-  bool UpdateNullability(HInstruction* instr);
-  bool UpdateReferenceTypeInfo(HInstruction* instr);
-
-  static void UpdateArrayGet(HArrayGet* instr, HandleCache* handle_cache)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
-  ReferenceTypeInfo MergeTypes(const ReferenceTypeInfo& a, const ReferenceTypeInfo& b)
+  static ReferenceTypeInfo MergeTypes(const ReferenceTypeInfo& a,
+                                      const ReferenceTypeInfo& b,
+                                      HandleCache* handle_cache)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   void ValidateTypes();
@@ -114,12 +108,8 @@ class ReferenceTypePropagation : public HOptimization {
   Handle<mirror::DexCache> hint_dex_cache_;
   HandleCache handle_cache_;
 
-  ArenaVector<HInstruction*> worklist_;
-
   // Whether this reference type propagation is the first run we are doing.
   const bool is_first_run_;
-
-  static constexpr size_t kDefaultWorklistSize = 8;
 
   friend class ReferenceTypePropagationTest;
 

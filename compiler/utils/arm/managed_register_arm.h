@@ -17,16 +17,10 @@
 #ifndef ART_COMPILER_UTILS_ARM_MANAGED_REGISTER_ARM_H_
 #define ART_COMPILER_UTILS_ARM_MANAGED_REGISTER_ARM_H_
 
-#include "base/logging.h"
-#include "constants_arm.h"
-#include "debug/dwarf/register.h"
-#include "utils/managed_register.h"
+#include <android-base/logging.h>
 
-// TODO(VIXL): Make VIXL compile with -Wshadow.
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wshadow"
-#include "aarch32/macro-assembler-aarch32.h"
-#pragma GCC diagnostic pop
+#include "constants_arm.h"
+#include "utils/managed_register.h"
 
 namespace art {
 namespace arm {
@@ -96,29 +90,14 @@ class ArmManagedRegister : public ManagedRegister {
     return static_cast<Register>(id_);
   }
 
-  vixl::aarch32::Register AsVIXLRegister() const {
-    CHECK(IsCoreRegister());
-    return vixl::aarch32::Register(id_);
-  }
-
   constexpr SRegister AsSRegister() const {
     CHECK(IsSRegister());
     return static_cast<SRegister>(id_ - kNumberOfCoreRegIds);
   }
 
-  vixl::aarch32::SRegister AsVIXLSRegister() const {
-    CHECK(IsSRegister());
-    return vixl::aarch32::SRegister(id_ - kNumberOfCoreRegIds);
-  }
-
   constexpr DRegister AsDRegister() const {
     CHECK(IsDRegister());
     return static_cast<DRegister>(id_ - kNumberOfCoreRegIds - kNumberOfSRegIds);
-  }
-
-  vixl::aarch32::DRegister AsVIXLDRegister() const {
-    CHECK(IsDRegister());
-    return vixl::aarch32::DRegister(id_ - kNumberOfCoreRegIds - kNumberOfSRegIds);
   }
 
   constexpr SRegister AsOverlappingDRegisterLow() const {
@@ -149,18 +128,10 @@ class ArmManagedRegister : public ManagedRegister {
     return FromRegId(AllocIdLow()).AsCoreRegister();
   }
 
-  vixl::aarch32::Register AsVIXLRegisterPairLow() const {
-    return vixl::aarch32::Register(AsRegisterPairLow());
-  }
-
   constexpr Register AsRegisterPairHigh() const {
     CHECK(IsRegisterPair());
     // Appropriate mapping of register ids allows to use AllocIdHigh().
     return FromRegId(AllocIdHigh()).AsCoreRegister();
-  }
-
-  vixl::aarch32::Register AsVIXLRegisterPairHigh() const {
-    return vixl::aarch32::Register(AsRegisterPairHigh());
   }
 
   constexpr bool IsCoreRegister() const {
@@ -254,14 +225,14 @@ class ArmManagedRegister : public ManagedRegister {
     return FromDRegister(static_cast<DRegister>(r));
   }
 
- private:
-  constexpr bool IsValidManagedRegister() const {
-    return (0 <= id_) && (id_ < kNumberOfRegIds);
-  }
-
   int RegId() const {
     CHECK(!IsNoRegister());
     return id_;
+  }
+
+ private:
+  constexpr bool IsValidManagedRegister() const {
+    return (0 <= id_) && (id_ < kNumberOfRegIds);
   }
 
   int AllocId() const {

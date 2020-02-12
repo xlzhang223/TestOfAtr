@@ -24,20 +24,21 @@
 #include <set>
 #include <string>
 #include <utility>
+#include <memory>
 #include <vector>
 
-#include "arch/instruction_set.h"
+#include "base/file_utils.h"
+#include "base/locks.h"
 #include "base/macros.h"
-#include "base/mutex.h"
+#include "base/mem_map.h"
 #include "deoptimization_kind.h"
-#include "dex_file_types.h"
+#include "dex/dex_file_types.h"
 #include "experimental_flags.h"
+#include "gc/space/image_space_loading_order.h"
 #include "gc_root.h"
 #include "instrumentation.h"
-#include "jobject_comparator.h"
-#include "method_reference.h"
+#include "jdwp_provider.h"
 #include "obj_ptr.h"
-#include "object_callbacks.h"
 #include "offsets.h"
 #include "process_state.h"
 #include "quick/quick_method_frame_info.h"
@@ -46,48 +47,53 @@
 namespace art {
 
 namespace gc {
-  class AbstractSystemWeakHolder;
-  class Heap;
-  namespace collector {
-    class GarbageCollector;
-  }  // namespace collector
+class AbstractSystemWeakHolder;
+class Heap;
 }  // namespace gc
 
+namespace hiddenapi {
+enum class EnforcementPolicy;
+}  // namespace hiddenapi
+
 namespace jit {
-  class Jit;
-  class JitOptions;
+class Jit;
+class JitCodeCache;
+class JitOptions;
 }  // namespace jit
 
 namespace mirror {
-  class Array;
-  class ClassLoader;
-  class DexCache;
-  template<class T> class ObjectArray;
-  template<class T> class PrimitiveArray;
-  typedef PrimitiveArray<int8_t> ByteArray;
-  class String;
-  class Throwable;
+class Array;
+class ClassLoader;
+class DexCache;
+template<class T> class ObjectArray;
+template<class T> class PrimitiveArray;
+typedef PrimitiveArray<int8_t> ByteArray;
+class String;
+class Throwable;
 }  // namespace mirror
 namespace ti {
-  class Agent;
+class Agent;
+class AgentSpec;
 }  // namespace ti
 namespace verifier {
-  class MethodVerifier;
-  enum class VerifyMode : int8_t;
+class MethodVerifier;
+enum class VerifyMode : int8_t;
 }  // namespace verifier
 class ArenaPool;
 class ArtMethod;
-class ClassHierarchyAnalysis;
+enum class CalleeSaveType: uint32_t;
 class ClassLinker;
-class Closure;
 class CompilerCallbacks;
 class DexFile;
+enum class InstructionSet;
 class InternTable;
+class IsMarkedVisitor;
 class JavaVMExt;
 class LinearAlloc;
 class MonitorList;
 class MonitorPool;
 class NullPointerHandler;
+class OatFileAssistantTest;
 class OatFileManager;
 class Plugin;
 struct RuntimeArgumentMap;
@@ -96,6 +102,7 @@ class SignalCatcher;
 class StackOverflowHandler;
 class SuspensionHandler;
 class ThreadList;
+class ThreadPool;
 class Trace;
 struct TraceConfig;
 class Transaction;
@@ -140,10 +147,6 @@ class Runtime {
     return must_relocate_;
   }
 
-  bool IsDex2OatEnabled() const {
-    return dex2oat_enabled_ && IsImageDex2OatEnabled();
-  }
-
   bool IsImageDex2OatEnabled() const {
     return image_dex2oat_enabled_;
   }
@@ -161,12 +164,19 @@ class Runtime {
     return is_zygote_;
   }
 
+  bool IsSystemServer() const {
+    return is_system_server_;
+  }
+
+  void SetSystemServer(bool value) {
+    is_system_server_ = value;
+  }
+
   bool IsExplicitGcDisabled() const {
     return is_explicit_gc_disabled_;
   }
 
   std::string GetCompilerExecutable() const;
-  std::string GetPatchoatExecutable() const;
 
   const std::vector<std::string>& GetCompilerOptions() const {
     return compiler_options_;
@@ -182,6 +192,10 @@ class Runtime {
 
   const std::string& GetImageLocation() const {
     return image_location_;
+  }
+
+  bool IsUsingApexBootImageLocation() const {
+    return is_using_apex_boot_image_location_;
   }
 
   // Starts a runtime, which may cause threads to be started and code to run.
@@ -209,6 +223,8 @@ class Runtime {
   bool IsFinishedStarting() const {
     return finished_starting_;
   }
+
+  void RunRootClinits(Thread* self) REQUIRES_SHARED(Locks::mutator_lock_);
 
   static Runtime* Current() {
     return instance_;
@@ -242,8 +258,14 @@ class Runtime {
 
   ~Runtime();
 
-  const std::string& GetBootClassPathString() const {
-    return boot_class_path_string_;
+  const std::vector<std::string>& GetBootClassPath() const {
+    return boot_class_path_;
+  }
+
+  const std::vector<std::string>& GetBootClassPathLocations() const {
+    DCHECK(boot_class_path_locations_.empty() ||
+           boot_class_path_locations_.size() == boot_class_path_.size());
+    return boot_class_path_locations_.empty() ? boot_class_path_ : boot_class_path_locations_;
   }
 
   const std::string& GetClassPathString() const {
@@ -256,6 +278,10 @@ class Runtime {
 
   size_t GetDefaultStackSize() const {
     return default_stack_size_;
+  }
+
+  unsigned int GetFinalizerTimeoutMs() const {
+    return finalizer_timeout_ms_;
   }
 
   gc::Heap* GetHeap() const {
@@ -289,7 +315,12 @@ class Runtime {
   // Get the special object used to mark a cleared JNI weak global.
   mirror::Object* GetClearedJniWeakGlobal() REQUIRES_SHARED(Locks::mutator_lock_);
 
-  mirror::Throwable* GetPreAllocatedOutOfMemoryError() REQUIRES_SHARED(Locks::mutator_lock_);
+  mirror::Throwable* GetPreAllocatedOutOfMemoryErrorWhenThrowingException()
+      REQUIRES_SHARED(Locks::mutator_lock_);
+  mirror::Throwable* GetPreAllocatedOutOfMemoryErrorWhenThrowingOOME()
+      REQUIRES_SHARED(Locks::mutator_lock_);
+  mirror::Throwable* GetPreAllocatedOutOfMemoryErrorWhenHandlingStackOverflow()
+      REQUIRES_SHARED(Locks::mutator_lock_);
 
   mirror::Throwable* GetPreAllocatedNoClassDefFoundError()
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -327,7 +358,7 @@ class Runtime {
   // instead.
   void VisitImageRoots(RootVisitor* visitor) REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // Visit all of the roots we can do safely do concurrently.
+  // Visit all of the roots we can safely visit concurrently.
   void VisitConcurrentRoots(RootVisitor* visitor,
                             VisitRootFlags flags = kVisitRootFlagAllRoots)
       REQUIRES(!Locks::classlinker_classes_lock_, !Locks::trace_lock_)
@@ -339,11 +370,6 @@ class Runtime {
 
   void VisitTransactionRoots(RootVisitor* visitor)
       REQUIRES_SHARED(Locks::mutator_lock_);
-
-  // Flip thread roots from from-space refs to to-space refs.
-  size_t FlipThreadRoots(Closure* thread_flip_visitor, Closure* flip_callback,
-                         gc::collector::GarbageCollector* collector)
-      REQUIRES(!Locks::mutator_lock_);
 
   // Sweep system weaks, the system weak is deleted if the visitor return null. Otherwise, the
   // system weak is updated to be the visitor's returned value.
@@ -387,17 +413,8 @@ class Runtime {
     imt_unimplemented_method_ = nullptr;
   }
 
-  // Returns a special method that describes all callee saves being spilled to the stack.
-  enum CalleeSaveType {
-    kSaveAllCalleeSaves,  // All callee-save registers.
-    kSaveRefsOnly,        // Only those callee-save registers that can hold references.
-    kSaveRefsAndArgs,     // References (see above) and arguments (usually caller-save registers).
-    kSaveEverything,      // All registers, including both callee-save and caller-save.
-    kLastCalleeSaveType   // Value used for iteration
-  };
-
   bool HasCalleeSaveMethod(CalleeSaveType type) const {
-    return callee_save_methods_[type] != 0u;
+    return callee_save_methods_[static_cast<size_t>(type)] != 0u;
   }
 
   ArtMethod* GetCalleeSaveMethod(CalleeSaveType type)
@@ -406,15 +423,11 @@ class Runtime {
   ArtMethod* GetCalleeSaveMethodUnchecked(CalleeSaveType type)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  QuickMethodFrameInfo GetCalleeSaveMethodFrameInfo(CalleeSaveType type) const {
-    return callee_save_method_frame_infos_[type];
-  }
-
   QuickMethodFrameInfo GetRuntimeMethodFrameInfo(ArtMethod* method)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  static size_t GetCalleeSaveMethodOffset(CalleeSaveType type) {
-    return OFFSETOF_MEMBER(Runtime, callee_save_methods_[type]);
+  static constexpr size_t GetCalleeSaveMethodOffset(CalleeSaveType type) {
+    return OFFSETOF_MEMBER(Runtime, callee_save_methods_[static_cast<size_t>(type)]);
   }
 
   InstructionSet GetInstructionSet() const {
@@ -457,8 +470,13 @@ class Runtime {
   bool UseJitCompilation() const;
 
   void PreZygoteFork();
+  void PostZygoteFork();
   void InitNonZygoteOrPostFork(
-      JNIEnv* env, bool is_system_server, NativeBridgeAction action, const char* isa);
+      JNIEnv* env,
+      bool is_system_server,
+      NativeBridgeAction action,
+      const char* isa,
+      bool profile_system_server = false);
 
   const instrumentation::Instrumentation* GetInstrumentation() const {
     return &instrumentation_;
@@ -472,12 +490,17 @@ class Runtime {
                        const std::string& profile_output_filename);
 
   // Transaction support.
-  bool IsActiveTransaction() const {
-    return preinitialization_transaction_ != nullptr;
-  }
-  void EnterTransactionMode(Transaction* transaction);
+  bool IsActiveTransaction() const;
+  void EnterTransactionMode();
+  void EnterTransactionMode(bool strict, mirror::Class* root);
   void ExitTransactionMode();
+  void RollbackAllTransactions() REQUIRES_SHARED(Locks::mutator_lock_);
+  // Transaction rollback and exit transaction are always done together, it's convenience to
+  // do them in one function.
+  void RollbackAndExitTransactionMode() REQUIRES_SHARED(Locks::mutator_lock_);
   bool IsTransactionAborted() const;
+  const std::unique_ptr<Transaction>& GetTransaction() const;
+  bool IsActiveStrictTransactionMode() const;
 
   void AbortTransactionAndThrowAbortError(Thread* self, const std::string& abort_message)
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -514,12 +537,7 @@ class Runtime {
   void RecordResolveString(ObjPtr<mirror::DexCache> dex_cache, dex::StringIndex string_idx) const
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  void SetFaultMessage(const std::string& message) REQUIRES(!fault_message_lock_);
-  // Only read by the signal handler, NO_THREAD_SAFETY_ANALYSIS to prevent lock order violations
-  // with the unexpected_signal_lock_.
-  const std::string& GetFaultMessage() NO_THREAD_SAFETY_ANALYSIS {
-    return fault_message_;
-  }
+  void SetFaultMessage(const std::string& message);
 
   void AddCurrentRuntimeFeaturesAsDex2OatArguments(std::vector<std::string>* arg_vector) const;
 
@@ -527,8 +545,73 @@ class Runtime {
     return !implicit_so_checks_;
   }
 
+  void DisableVerifier();
   bool IsVerificationEnabled() const;
   bool IsVerificationSoftFail() const;
+
+  void SetHiddenApiEnforcementPolicy(hiddenapi::EnforcementPolicy policy) {
+    hidden_api_policy_ = policy;
+  }
+
+  hiddenapi::EnforcementPolicy GetHiddenApiEnforcementPolicy() const {
+    return hidden_api_policy_;
+  }
+
+  void SetCorePlatformApiEnforcementPolicy(hiddenapi::EnforcementPolicy policy) {
+    core_platform_api_policy_ = policy;
+  }
+
+  hiddenapi::EnforcementPolicy GetCorePlatformApiEnforcementPolicy() const {
+    return core_platform_api_policy_;
+  }
+
+  void SetHiddenApiExemptions(const std::vector<std::string>& exemptions) {
+    hidden_api_exemptions_ = exemptions;
+  }
+
+  const std::vector<std::string>& GetHiddenApiExemptions() {
+    return hidden_api_exemptions_;
+  }
+
+  void SetDedupeHiddenApiWarnings(bool value) {
+    dedupe_hidden_api_warnings_ = value;
+  }
+
+  bool ShouldDedupeHiddenApiWarnings() {
+    return dedupe_hidden_api_warnings_;
+  }
+
+  void SetHiddenApiEventLogSampleRate(uint32_t rate) {
+    hidden_api_access_event_log_rate_ = rate;
+  }
+
+  uint32_t GetHiddenApiEventLogSampleRate() const {
+    return hidden_api_access_event_log_rate_;
+  }
+
+  const std::string& GetProcessPackageName() const {
+    return process_package_name_;
+  }
+
+  void SetProcessPackageName(const char* package_name) {
+    if (package_name == nullptr) {
+      process_package_name_.clear();
+    } else {
+      process_package_name_ = package_name;
+    }
+  }
+
+  const std::string& GetProcessDataDirectory() const {
+    return process_data_directory_;
+  }
+
+  void SetProcessDataDirectory(const char* data_dir) {
+    if (data_dir == nullptr) {
+      process_data_directory_.clear();
+    } else {
+      process_data_directory_ = data_dir;
+    }
+  }
 
   bool IsDexFileFallbackEnabled() const {
     return allow_dex_file_fallback_;
@@ -542,11 +625,11 @@ class Runtime {
     return is_running_on_memory_tool_;
   }
 
-  void SetTargetSdkVersion(int32_t version) {
+  void SetTargetSdkVersion(uint32_t version) {
     target_sdk_version_ = version;
   }
 
-  int32_t GetTargetSdkVersion() const {
+  uint32_t GetTargetSdkVersion() const {
     return target_sdk_version_;
   }
 
@@ -557,6 +640,8 @@ class Runtime {
   bool AreExperimentalFlagsEnabled(ExperimentalFlags flags) {
     return (experimental_flags_ & flags) != ExperimentalFlags::kNone;
   }
+
+  void CreateJitCodeCache(bool rwx_memory_allowed);
 
   // Create the JIT and instrumentation and code cache.
   void CreateJit();
@@ -588,7 +673,7 @@ class Runtime {
   void SetJavaDebuggable(bool value);
 
   // Deoptimize the boot image, called for Java debuggable apps.
-  void DeoptimizeBootImage();
+  void DeoptimizeBootImage() REQUIRES(Locks::mutator_lock_);
 
   bool IsNativeDebuggable() const {
     return is_native_debuggable_;
@@ -598,6 +683,33 @@ class Runtime {
     is_native_debuggable_ = value;
   }
 
+  bool AreNonStandardExitsEnabled() const {
+    return non_standard_exits_enabled_;
+  }
+
+  void SetNonStandardExitsEnabled() {
+    DoAndMaybeSwitchInterpreter([=](){ non_standard_exits_enabled_ = true; });
+  }
+
+  bool AreAsyncExceptionsThrown() const {
+    return async_exceptions_thrown_;
+  }
+
+  void SetAsyncExceptionsThrown() {
+    DoAndMaybeSwitchInterpreter([=](){ async_exceptions_thrown_ = true; });
+  }
+
+  // Change state and re-check which interpreter should be used.
+  //
+  // This must be called whenever there is an event that forces
+  // us to use different interpreter (e.g. debugger is attached).
+  //
+  // Changing the state using the lamda gives us some multihreading safety.
+  // It ensures that two calls do not interfere with each other and
+  // it makes it possible to DCHECK that thread local flag is correct.
+  template<typename Action>
+  static void DoAndMaybeSwitchInterpreter(Action lamda);
+
   // Returns the build fingerprint, if set. Otherwise an empty string is returned.
   std::string GetFingerprint() {
     return fingerprint_;
@@ -605,6 +717,9 @@ class Runtime {
 
   // Called from class linker.
   void SetSentinel(mirror::Object* sentinel) REQUIRES_SHARED(Locks::mutator_lock_);
+  // For testing purpose only.
+  // TODO: Remove this when this is no longer needed (b/116087961).
+  GcRoot<mirror::Object> GetSentinel() REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Create a normal LinearAlloc or low 4gb version if we are 64 bit AOT compiler.
   LinearAlloc* CreateLinearAlloc();
@@ -616,6 +731,10 @@ class Runtime {
 
   double GetHashTableMinLoadFactor() const;
   double GetHashTableMaxLoadFactor() const;
+
+  bool IsSafeMode() const {
+    return safe_mode_;
+  }
 
   void SetSafeMode(bool mode) {
     safe_mode_ = mode;
@@ -663,25 +782,26 @@ class Runtime {
   void AddSystemWeakHolder(gc::AbstractSystemWeakHolder* holder);
   void RemoveSystemWeakHolder(gc::AbstractSystemWeakHolder* holder);
 
-  ClassHierarchyAnalysis* GetClassHierarchyAnalysis() {
-    return cha_;
-  }
+  void AttachAgent(JNIEnv* env, const std::string& agent_arg, jobject class_loader);
 
-  NO_RETURN
-  static void Aborter(const char* abort_message);
-
-  void AttachAgent(const std::string& agent_arg);
-
-  const std::list<ti::Agent>& GetAgents() const {
+  const std::list<std::unique_ptr<ti::Agent>>& GetAgents() const {
     return agents_;
   }
 
   RuntimeCallbacks* GetRuntimeCallbacks();
 
+  bool HasLoadedPlugins() const {
+    return !plugins_.empty();
+  }
+
   void InitThreadGroups(Thread* self);
 
   void SetDumpGCPerformanceOnShutdown(bool value) {
     dump_gc_performance_on_shutdown_ = value;
+  }
+
+  bool GetDumpGCPerformanceOnShutdown() const {
+    return dump_gc_performance_on_shutdown_;
   }
 
   void IncrementDeoptimizationCount(DeoptimizationKind kind) {
@@ -695,6 +815,65 @@ class Runtime {
       result += deoptimization_counts_[i];
     }
     return result;
+  }
+
+  // Whether or not we use MADV_RANDOM on files that are thought to have random access patterns.
+  // This is beneficial for low RAM devices since it reduces page cache thrashing.
+  bool MAdviseRandomAccess() const {
+    return madvise_random_access_;
+  }
+
+  const std::string& GetJdwpOptions() {
+    return jdwp_options_;
+  }
+
+  JdwpProvider GetJdwpProvider() const {
+    return jdwp_provider_;
+  }
+
+  uint32_t GetVerifierLoggingThresholdMs() const {
+    return verifier_logging_threshold_ms_;
+  }
+
+  // Atomically delete the thread pool if the reference count is 0.
+  bool DeleteThreadPool() REQUIRES(!Locks::runtime_thread_pool_lock_);
+
+  // Wait for all the thread workers to be attached.
+  void WaitForThreadPoolWorkersToStart() REQUIRES(!Locks::runtime_thread_pool_lock_);
+
+  // Scoped usage of the runtime thread pool. Prevents the pool from being
+  // deleted. Note that the thread pool is only for startup and gets deleted after.
+  class ScopedThreadPoolUsage {
+   public:
+    ScopedThreadPoolUsage();
+    ~ScopedThreadPoolUsage();
+
+    // Return the thread pool.
+    ThreadPool* GetThreadPool() const {
+      return thread_pool_;
+    }
+
+   private:
+    ThreadPool* const thread_pool_;
+  };
+
+  bool LoadAppImageStartupCache() const {
+    return load_app_image_startup_cache_;
+  }
+
+  void SetLoadAppImageStartupCacheEnabled(bool enabled) {
+    load_app_image_startup_cache_ = enabled;
+  }
+
+  // Notify the runtime that application startup is considered completed. Only has effect for the
+  // first call.
+  void NotifyStartupCompleted();
+
+  // Return true if startup is already completed.
+  bool GetStartupCompleted() const;
+
+  gc::space::ImageSpaceLoadingOrder GetImageSpaceLoadingOrder() const {
+    return image_space_loading_order_;
   }
 
  private:
@@ -727,6 +906,15 @@ class Runtime {
   void VisitConstantRoots(RootVisitor* visitor)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
+  // Note: To be lock-free, GetFaultMessage temporarily replaces the lock message with null.
+  //       As such, there is a window where a call will return an empty string. In general,
+  //       only aborting code should retrieve this data (via GetFaultMessageForAbortLogging
+  //       friend).
+  std::string GetFaultMessage();
+
+  ThreadPool* AcquireThreadPool() REQUIRES(!Locks::runtime_thread_pool_lock_);
+  void ReleaseThreadPool() REQUIRES(!Locks::runtime_thread_pool_lock_);
+
   // A pointer to the active runtime or null.
   static Runtime* instance_;
 
@@ -734,9 +922,14 @@ class Runtime {
   static constexpr int kProfileForground = 0;
   static constexpr int kProfileBackground = 1;
 
+  static constexpr uint32_t kCalleeSaveSize = 6u;
+
   // 64 bit so that we can share the same asm offsets for both 32 and 64 bits.
-  uint64_t callee_save_methods_[kLastCalleeSaveType];
-  GcRoot<mirror::Throwable> pre_allocated_OutOfMemoryError_;
+  uint64_t callee_save_methods_[kCalleeSaveSize];
+  // Pre-allocated exceptions (see Runtime::Init).
+  GcRoot<mirror::Throwable> pre_allocated_OutOfMemoryError_when_throwing_exception_;
+  GcRoot<mirror::Throwable> pre_allocated_OutOfMemoryError_when_throwing_oome_;
+  GcRoot<mirror::Throwable> pre_allocated_OutOfMemoryError_when_handling_stack_overflow_;
   GcRoot<mirror::Throwable> pre_allocated_NoClassDefFoundError_;
   ArtMethod* resolution_method_;
   ArtMethod* imt_conflict_method_;
@@ -749,31 +942,35 @@ class Runtime {
   GcRoot<mirror::Object> sentinel_;
 
   InstructionSet instruction_set_;
-  QuickMethodFrameInfo callee_save_method_frame_infos_[kLastCalleeSaveType];
 
   CompilerCallbacks* compiler_callbacks_;
   bool is_zygote_;
+  bool is_system_server_;
   bool must_relocate_;
   bool is_concurrent_gc_enabled_;
   bool is_explicit_gc_disabled_;
-  bool dex2oat_enabled_;
   bool image_dex2oat_enabled_;
 
   std::string compiler_executable_;
-  std::string patchoat_executable_;
   std::vector<std::string> compiler_options_;
   std::vector<std::string> image_compiler_options_;
   std::string image_location_;
+  bool is_using_apex_boot_image_location_;
 
-  std::string boot_class_path_string_;
+  std::vector<std::string> boot_class_path_;
+  std::vector<std::string> boot_class_path_locations_;
   std::string class_path_string_;
   std::vector<std::string> properties_;
 
-  std::list<ti::Agent> agents_;
+  std::list<ti::AgentSpec> agent_specs_;
+  std::list<std::unique_ptr<ti::Agent>> agents_;
   std::vector<Plugin> plugins_;
 
   // The default stack size for managed threads created by the runtime.
   size_t default_stack_size_;
+
+  // Finalizers running for longer than this many milliseconds abort the runtime.
+  unsigned int finalizer_timeout_ms_;
 
   gc::Heap* heap_;
 
@@ -799,16 +996,20 @@ class Runtime {
   ClassLinker* class_linker_;
 
   SignalCatcher* signal_catcher_;
-  std::string stack_trace_file_;
 
   std::unique_ptr<JavaVMExt> java_vm_;
 
   std::unique_ptr<jit::Jit> jit_;
+  std::unique_ptr<jit::JitCodeCache> jit_code_cache_;
   std::unique_ptr<jit::JitOptions> jit_options_;
 
-  // Fault message, printed when we get a SIGSEGV.
-  Mutex fault_message_lock_ DEFAULT_MUTEX_ACQUIRED_AFTER;
-  std::string fault_message_ GUARDED_BY(fault_message_lock_);
+  // Runtime thread pool. The pool is only for startup and gets deleted after.
+  std::unique_ptr<ThreadPool> thread_pool_ GUARDED_BY(Locks::runtime_thread_pool_lock_);
+  size_t thread_pool_ref_count_ GUARDED_BY(Locks::runtime_thread_pool_lock_);
+
+  // Fault message, printed when we get a SIGSEGV. Stored as a native-heap object and accessed
+  // lock-free, so needs to be atomic.
+  std::atomic<std::string*> fault_message_;
 
   // A non-zero value indicates that a thread has been created but not yet initialized. Guarded by
   // the shutdown lock so that threads aren't born while we're shutting down.
@@ -853,8 +1054,11 @@ class Runtime {
   // If true, then we dump the GC cumulative timings on shutdown.
   bool dump_gc_performance_on_shutdown_;
 
-  // Transaction used for pre-initializing classes at compilation time.
-  Transaction* preinitialization_transaction_;
+  // Transactions used for pre-initializing classes at compilation time.
+  // Support nested transactions, maintain a list containing all transactions. Transactions are
+  // handled under a stack discipline. Because GC needs to go over all transactions, we choose list
+  // as substantial data structure instead of stack.
+  std::list<std::unique_ptr<Transaction>> preinitialization_transactions_;
 
   // If kNone, verification is disabled. kEnable by default.
   verifier::VerifyMode verify_;
@@ -867,7 +1071,7 @@ class Runtime {
   std::vector<std::string> cpu_abilist_;
 
   // Specifies target SDK version to allow workarounds for certain API levels.
-  int32_t target_sdk_version_;
+  uint32_t target_sdk_version_;
 
   // Implicit checks flags.
   bool implicit_null_checks_;       // NullPointer checks are implicit.
@@ -875,7 +1079,7 @@ class Runtime {
   bool implicit_suspend_checks_;    // Thread suspension checks are implicit.
 
   // Whether or not the sig chain (and implicitly the fault handler) should be
-  // disabled. Tools like dex2oat or patchoat don't need them. This enables
+  // disabled. Tools like dex2oat don't need them. This enables
   // building a statically link version of dex2oat.
   bool no_sig_chain_;
 
@@ -895,6 +1099,14 @@ class Runtime {
 
   // Whether we are running under native debugger.
   bool is_native_debuggable_;
+
+  // whether or not any async exceptions have ever been thrown. This is used to speed up the
+  // MterpShouldSwitchInterpreters function.
+  bool async_exceptions_thrown_;
+
+  // Whether anything is going to be using the shadow-frame APIs to force a function to return
+  // early. Doing this requires that (1) we be debuggable and (2) that mterp is exited.
+  bool non_standard_exits_enabled_;
 
   // Whether Java code needs to be debuggable.
   bool is_java_debuggable_;
@@ -919,8 +1131,36 @@ class Runtime {
   // Whether or not we are on a low RAM device.
   bool is_low_memory_mode_;
 
+  // Whether or not we use MADV_RANDOM on files that are thought to have random access patterns.
+  // This is beneficial for low RAM devices since it reduces page cache thrashing.
+  bool madvise_random_access_;
+
   // Whether the application should run in safe mode, that is, interpreter only.
   bool safe_mode_;
+
+  // Whether access checks on hidden API should be performed.
+  hiddenapi::EnforcementPolicy hidden_api_policy_;
+
+  // Whether access checks on core platform API should be performed.
+  hiddenapi::EnforcementPolicy core_platform_api_policy_;
+
+  // List of signature prefixes of methods that have been removed from the blacklist, and treated
+  // as if whitelisted.
+  std::vector<std::string> hidden_api_exemptions_;
+
+  // Do not warn about the same hidden API access violation twice.
+  // This is only used for testing.
+  bool dedupe_hidden_api_warnings_;
+
+  // How often to log hidden API access to the event log. An integer between 0
+  // (never) and 0x10000 (always).
+  uint32_t hidden_api_access_event_log_rate_;
+
+  // The package of the app running in this process.
+  std::string process_package_name_;
+
+  // The data directory of the app running in this process.
+  std::string process_data_directory_;
 
   // Whether threads should dump their native stack on SIGQUIT.
   bool dump_native_stack_on_sig_quit_;
@@ -933,6 +1173,12 @@ class Runtime {
 
   // Whether zygote code is in a section that should not start threads.
   bool zygote_no_threads_;
+
+  // The string containing requested jdwp options
+  std::string jdwp_options_;
+
+  // The jdwp provider we were configured with.
+  JdwpProvider jdwp_provider_;
 
   // Saved environment.
   class EnvSnapshot {
@@ -951,16 +1197,30 @@ class Runtime {
   // Generic system-weak holders.
   std::vector<gc::AbstractSystemWeakHolder*> system_weak_holders_;
 
-  ClassHierarchyAnalysis* cha_;
-
   std::unique_ptr<RuntimeCallbacks> callbacks_;
 
   std::atomic<uint32_t> deoptimization_counts_[
       static_cast<uint32_t>(DeoptimizationKind::kLast) + 1];
 
+  MemMap protected_fault_page_;
+
+  uint32_t verifier_logging_threshold_ms_;
+
+  bool load_app_image_startup_cache_ = false;
+
+  // If startup has completed, must happen at most once.
+  std::atomic<bool> startup_completed_ = false;
+
+  gc::space::ImageSpaceLoadingOrder image_space_loading_order_ =
+      gc::space::ImageSpaceLoadingOrder::kSystemFirst;
+
+  // Note: See comments on GetFaultMessage.
+  friend std::string GetFaultMessageForAbortLogging();
+  friend class ScopedThreadPoolUsage;
+  friend class OatFileAssistantTest;
+
   DISALLOW_COPY_AND_ASSIGN(Runtime);
 };
-std::ostream& operator<<(std::ostream& os, const Runtime::CalleeSaveType& rhs);
 
 }  // namespace art
 

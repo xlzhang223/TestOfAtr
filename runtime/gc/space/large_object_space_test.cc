@@ -14,9 +14,10 @@
  * limitations under the License.
  */
 
+#include "large_object_space.h"
+
 #include "base/time_utils.h"
 #include "space_test.h"
-#include "large_object_space.h"
 
 namespace art {
 namespace gc {
@@ -37,11 +38,18 @@ void LargeObjectSpaceTest::LargeObjectTest() {
   Thread* const self = Thread::Current();
   for (size_t i = 0; i < 2; ++i) {
     LargeObjectSpace* los = nullptr;
+    const size_t capacity = 128 * MB;
     if (i == 0) {
       los = space::LargeObjectMapSpace::Create("large object space");
     } else {
-      los = space::FreeListSpace::Create("large object space", nullptr, 128 * MB);
+      los = space::FreeListSpace::Create("large object space", capacity);
     }
+
+    // Make sure the bitmap is not empty and actually covers at least how much we expect.
+    CHECK_LT(static_cast<uintptr_t>(los->GetLiveBitmap()->HeapBegin()),
+             static_cast<uintptr_t>(los->GetLiveBitmap()->HeapLimit()));
+    CHECK_LE(static_cast<uintptr_t>(los->GetLiveBitmap()->HeapBegin() + capacity),
+             static_cast<uintptr_t>(los->GetLiveBitmap()->HeapLimit()));
 
     static const size_t num_allocations = 64;
     static const size_t max_allocation_size = 0x100000;
@@ -120,7 +128,7 @@ class AllocRaceTask : public Task {
   AllocRaceTask(size_t id, size_t iterations, size_t size, LargeObjectSpace* los) :
     id_(id), iterations_(iterations), size_(size), los_(los) {}
 
-  void Run(Thread* self) {
+  void Run(Thread* self) override {
     for (size_t i = 0; i < iterations_ ; ++i) {
       size_t alloc_size, bytes_tl_bulk_allocated;
       mirror::Object* ptr = los_->Alloc(self, size_, &alloc_size, nullptr,
@@ -132,7 +140,7 @@ class AllocRaceTask : public Task {
     }
   }
 
-  virtual void Finalize() {
+  void Finalize() override {
     delete this;
   }
 
@@ -149,7 +157,7 @@ void LargeObjectSpaceTest::RaceTest() {
     if (los_type == 0) {
       los = space::LargeObjectMapSpace::Create("large object space");
     } else {
-      los = space::FreeListSpace::Create("large object space", nullptr, 128 * MB);
+      los = space::FreeListSpace::Create("large object space", 128 * MB);
     }
 
     Thread* self = Thread::Current();

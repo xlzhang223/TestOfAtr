@@ -22,9 +22,9 @@
 
 #include "arch/instruction_set.h"
 #include "compiled_method.h"
-#include "debug/dwarf/debug_info_entry_writer.h"
-#include "debug/dwarf/register.h"
 #include "debug/method_debug_info.h"
+#include "dwarf/debug_info_entry_writer.h"
+#include "dwarf/register.h"
 #include "stack_map.h"
 
 namespace art {
@@ -33,20 +33,20 @@ using Reg = dwarf::Reg;
 
 static Reg GetDwarfCoreReg(InstructionSet isa, int machine_reg) {
   switch (isa) {
-    case kArm:
-    case kThumb2:
+    case InstructionSet::kArm:
+    case InstructionSet::kThumb2:
       return Reg::ArmCore(machine_reg);
-    case kArm64:
+    case InstructionSet::kArm64:
       return Reg::Arm64Core(machine_reg);
-    case kX86:
+    case InstructionSet::kX86:
       return Reg::X86Core(machine_reg);
-    case kX86_64:
+    case InstructionSet::kX86_64:
       return Reg::X86_64Core(machine_reg);
-    case kMips:
+    case InstructionSet::kMips:
       return Reg::MipsCore(machine_reg);
-    case kMips64:
+    case InstructionSet::kMips64:
       return Reg::Mips64Core(machine_reg);
-    case kNone:
+    case InstructionSet::kNone:
       LOG(FATAL) << "No instruction set";
   }
   UNREACHABLE();
@@ -54,20 +54,20 @@ static Reg GetDwarfCoreReg(InstructionSet isa, int machine_reg) {
 
 static Reg GetDwarfFpReg(InstructionSet isa, int machine_reg) {
   switch (isa) {
-    case kArm:
-    case kThumb2:
+    case InstructionSet::kArm:
+    case InstructionSet::kThumb2:
       return Reg::ArmFp(machine_reg);
-    case kArm64:
+    case InstructionSet::kArm64:
       return Reg::Arm64Fp(machine_reg);
-    case kX86:
+    case InstructionSet::kX86:
       return Reg::X86Fp(machine_reg);
-    case kX86_64:
+    case InstructionSet::kX86_64:
       return Reg::X86_64Fp(machine_reg);
-    case kMips:
+    case InstructionSet::kMips:
       return Reg::MipsFp(machine_reg);
-    case kMips64:
+    case InstructionSet::kMips64:
       return Reg::Mips64Fp(machine_reg);
-    case kNone:
+    case InstructionSet::kNone:
       LOG(FATAL) << "No instruction set";
   }
   UNREACHABLE();
@@ -85,7 +85,7 @@ struct VariableLocation {
 // The result will cover all ranges where the variable is in scope.
 // PCs corresponding to stackmap with dex register map are accurate,
 // all other PCs are best-effort only.
-std::vector<VariableLocation> GetVariableLocations(
+static std::vector<VariableLocation> GetVariableLocations(
     const MethodDebugInfo* method_info,
     const std::vector<DexRegisterMap>& dex_register_maps,
     uint16_t vreg,
@@ -99,12 +99,11 @@ std::vector<VariableLocation> GetVariableLocations(
   // Get stack maps sorted by pc (they might not be sorted internally).
   // TODO(dsrbecky) Remove this once stackmaps get sorted by pc.
   const CodeInfo code_info(method_info->code_info);
-  const CodeInfoEncoding encoding = code_info.ExtractEncoding();
   std::map<uint32_t, uint32_t> stack_maps;  // low_pc -> stack_map_index.
-  for (uint32_t s = 0; s < code_info.GetNumberOfStackMaps(encoding); s++) {
-    StackMap stack_map = code_info.GetStackMapAt(s, encoding);
+  for (uint32_t s = 0; s < code_info.GetNumberOfStackMaps(); s++) {
+    StackMap stack_map = code_info.GetStackMapAt(s);
     DCHECK(stack_map.IsValid());
-    if (!stack_map.HasDexRegisterMap(encoding.stack_map.encoding)) {
+    if (!stack_map.HasDexRegisterMap()) {
       // The compiler creates stackmaps without register maps at the start of
       // basic blocks in order to keep instruction-accurate line number mapping.
       // However, we never stop at those (breakpoint locations always have map).
@@ -112,7 +111,7 @@ std::vector<VariableLocation> GetVariableLocations(
       // The main reason for this is to save space by avoiding undefined gaps.
       continue;
     }
-    const uint32_t pc_offset = stack_map.GetNativePcOffset(encoding.stack_map.encoding, isa);
+    const uint32_t pc_offset = stack_map.GetNativePcOffset(isa);
     DCHECK_LE(pc_offset, method_info->code_size);
     DCHECK_LE(compilation_unit_code_address, method_info->code_address);
     const uint32_t low_pc = dchecked_integral_cast<uint32_t>(
@@ -124,7 +123,7 @@ std::vector<VariableLocation> GetVariableLocations(
   for (auto it = stack_maps.begin(); it != stack_maps.end(); it++) {
     const uint32_t low_pc = it->first;
     const uint32_t stack_map_index = it->second;
-    const StackMap& stack_map = code_info.GetStackMapAt(stack_map_index, encoding);
+    const StackMap stack_map = code_info.GetStackMapAt(stack_map_index);
     auto next_it = it;
     next_it++;
     const uint32_t high_pc = next_it != stack_maps.end()
@@ -136,7 +135,7 @@ std::vector<VariableLocation> GetVariableLocations(
     }
 
     // Check that the stack map is in the requested range.
-    uint32_t dex_pc = stack_map.GetDexPc(encoding.stack_map.encoding);
+    uint32_t dex_pc = stack_map.GetDexPc();
     if (!(dex_pc_low <= dex_pc && dex_pc < dex_pc_high)) {
       // The variable is not in scope at this PC. Therefore omit the entry.
       // Note that this is different to None() entry which means in scope, but unknown location.
@@ -148,12 +147,11 @@ std::vector<VariableLocation> GetVariableLocations(
     DexRegisterLocation reg_hi = DexRegisterLocation::None();
     DCHECK_LT(stack_map_index, dex_register_maps.size());
     DexRegisterMap dex_register_map = dex_register_maps[stack_map_index];
-    DCHECK(dex_register_map.IsValid());
-    reg_lo = dex_register_map.GetDexRegisterLocation(
-        vreg, method_info->code_item->registers_size_, code_info, encoding);
+    DCHECK(!dex_register_map.empty());
+    CodeItemDataAccessor accessor(*method_info->dex_file, method_info->code_item);
+    reg_lo = dex_register_map[vreg];
     if (is64bitValue) {
-      reg_hi = dex_register_map.GetDexRegisterLocation(
-          vreg + 1, method_info->code_item->registers_size_, code_info, encoding);
+      reg_hi = dex_register_map[vreg + 1];
     }
 
     // Add location entry for this address range.
@@ -230,7 +228,7 @@ static void WriteDebugLocEntry(const MethodDebugInfo* method_info,
           break;  // the high word is correctly implied by the low word.
         }
       } else if (kind == Kind::kInFpuRegister) {
-        if ((isa == kArm || isa == kThumb2) &&
+        if ((isa == InstructionSet::kArm || isa == InstructionSet::kThumb2) &&
             piece == 0 && reg_hi.GetKind() == Kind::kInFpuRegister &&
             reg_hi.GetValue() == value + 1 && value % 2 == 0) {
           // Translate S register pair to D register (e.g. S4+S5 to D2).
@@ -251,7 +249,10 @@ static void WriteDebugLocEntry(const MethodDebugInfo* method_info,
         // kInStackLargeOffset and kConstantLargeValue are hidden by GetKind().
         // kInRegisterHigh and kInFpuRegisterHigh should be handled by
         // the special cases above and they should not occur alone.
-        LOG(ERROR) << "Unexpected register location kind: " << kind;
+        LOG(WARNING) << "Unexpected register location: " << kind
+                     << " (This can indicate either a bug in the dexer when generating"
+                     << " local variable information, or a bug in ART compiler."
+                     << " Please file a bug at go/art-bug)";
         break;
       }
       if (is64bitValue) {

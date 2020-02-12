@@ -19,41 +19,25 @@
 
 #include "thread.h"
 
-#ifdef ART_TARGET_ANDROID
-#include <bionic_tls.h>  // Access to our own TLS slot.
-#endif
-
-#include <pthread.h>
-
+#include "arch/instruction_set.h"
+#include "base/aborting.h"
 #include "base/casts.h"
 #include "base/mutex-inl.h"
-#include "gc/heap.h"
-#include "jni_env_ext.h"
+#include "base/time_utils.h"
+#include "jni/jni_env_ext.h"
+#include "managed_stack-inl.h"
 #include "obj_ptr.h"
-#include "runtime.h"
+#include "thread-current-inl.h"
 #include "thread_pool.h"
-
+//zhang
+#include "leakleak/leakleak.h"
+//end
 namespace art {
 
 // Quickly access the current thread from a JNIEnv.
 static inline Thread* ThreadForEnv(JNIEnv* env) {
   JNIEnvExt* full_env(down_cast<JNIEnvExt*>(env));
-  return full_env->self;
-}
-
-inline Thread* Thread::Current() {
-  // We rely on Thread::Current returning null for a detached thread, so it's not obvious
-  // that we can replace this with a direct %fs access on x86.
-  if (!is_started_) {
-    return nullptr;
-  } else {
-#ifdef ART_TARGET_ANDROID
-    void* thread = __get_tls()[TLS_SLOT_ART_THREAD_SELF];
-#else
-    void* thread = pthread_getspecific(Thread::pthread_key_self_);
-#endif
-    return reinterpret_cast<Thread*>(thread);
-  }
+  return full_env->GetSelf();
 }
 
 inline void Thread::AllowThreadSuspension() {
@@ -141,9 +125,19 @@ inline bool Thread::IsThreadSuspensionAllowable() const {
     return false;
   }
   for (int i = kLockLevelCount - 1; i >= 0; --i) {
-    if (i != kMutatorLock && GetHeldMutex(static_cast<LockLevel>(i)) != nullptr) {
+    if (i != kMutatorLock &&
+        i != kUserCodeSuspensionLock &&
+        GetHeldMutex(static_cast<LockLevel>(i)) != nullptr) {
       return false;
     }
+  }
+  // Thread autoanalysis isn't able to understand that the GetHeldMutex(...) or AssertHeld means we
+  // have the mutex meaning we need to do this hack.
+  auto is_suspending_for_user_code = [this]() NO_THREAD_SAFETY_ANALYSIS {
+    return tls32_.user_code_suspend_count != 0;
+  };
+  if (GetHeldMutex(kUserCodeSuspensionLock) != nullptr && is_suspending_for_user_code()) {
+    return false;
   }
   return true;
 }
@@ -156,8 +150,9 @@ inline void Thread::AssertThreadSuspensionIsAllowable(bool check_locks) const {
     if (check_locks) {
       bool bad_mutexes_held = false;
       for (int i = kLockLevelCount - 1; i >= 0; --i) {
-        // We expect no locks except the mutator_lock_ or thread list suspend thread lock.
-        if (i != kMutatorLock) {
+        // We expect no locks except the mutator_lock_. User code suspension lock is OK as long as
+        // we aren't going to be held suspended due to SuspendReason::kForUserCode.
+        if (i != kMutatorLock && i != kUserCodeSuspensionLock) {
           BaseMutex* held_mutex = GetHeldMutex(static_cast<LockLevel>(i));
           if (held_mutex != nullptr) {
             LOG(ERROR) << "holding \"" << held_mutex->GetName()
@@ -165,6 +160,19 @@ inline void Thread::AssertThreadSuspensionIsAllowable(bool check_locks) const {
             bad_mutexes_held = true;
           }
         }
+      }
+      // Make sure that if we hold the user_code_suspension_lock_ we aren't suspending due to
+      // user_code_suspend_count which would prevent the thread from ever waking up.  Thread
+      // autoanalysis isn't able to understand that the GetHeldMutex(...) or AssertHeld means we
+      // have the mutex meaning we need to do this hack.
+      auto is_suspending_for_user_code = [this]() NO_THREAD_SAFETY_ANALYSIS {
+        return tls32_.user_code_suspend_count != 0;
+      };
+      if (GetHeldMutex(kUserCodeSuspensionLock) != nullptr && is_suspending_for_user_code()) {
+        LOG(ERROR) << "suspending due to user-code while holding \""
+                   << Locks::user_code_suspension_lock_->GetName() << "\"! Thread would never "
+                   << "wake up.";
+        bad_mutexes_held = true;
       }
       if (gAborting == 0) {
         CHECK(!bad_mutexes_held);
@@ -196,7 +204,7 @@ inline void Thread::TransitionToSuspendedAndRunCheckpoints(ThreadState new_state
 
     // CAS the value with a memory ordering.
     bool done =
-        tls32_.state_and_flags.as_atomic_int.CompareExchangeWeakRelease(old_state_and_flags.as_int,
+        tls32_.state_and_flags.as_atomic_int.CompareAndSetWeakRelease(old_state_and_flags.as_int,
                                                                         new_state_and_flags.as_int);
     if (LIKELY(done)) {
       break;
@@ -246,8 +254,9 @@ inline ThreadState Thread::TransitionFromSuspendedToRunnable() {
       union StateAndFlags new_state_and_flags;
       new_state_and_flags.as_int = old_state_and_flags.as_int;
       new_state_and_flags.as_struct.state = kRunnable;
+
       // CAS the value with a memory barrier.
-      if (LIKELY(tls32_.state_and_flags.as_atomic_int.CompareExchangeWeakAcquire(
+      if (LIKELY(tls32_.state_and_flags.as_atomic_int.CompareAndSetWeakAcquire(
                                                  old_state_and_flags.as_int,
                                                  new_state_and_flags.as_int))) {
         // Mark the acquisition of a share of the mutator_lock_.
@@ -295,19 +304,17 @@ inline ThreadState Thread::TransitionFromSuspendedToRunnable() {
   return static_cast<ThreadState>(old_state);
 }
 
-inline void Thread::VerifyStack() {
-  if (kVerifyStack) {
-    if (Runtime::Current()->GetHeap()->IsObjectValidationEnabled()) {
-      VerifyStackImpl();
-    }
-  }
-}
-
 inline mirror::Object* Thread::AllocTlab(size_t bytes) {
   DCHECK_GE(TlabSize(), bytes);
   ++tlsPtr_.thread_local_objects;
   mirror::Object* ret = reinterpret_cast<mirror::Object*>(tlsPtr_.thread_local_pos);
   tlsPtr_.thread_local_pos += bytes;
+  //zhang
+  //zhangxianlong alloc new obj
+      // if(byte_count >= (unsigned long)leakleak::getInstance()->getTsize())
+        // leakleak::getInstance()->new_obj(ret,bytes);
+      //end
+  //end
   return ret;
 }
 
@@ -358,12 +365,12 @@ inline void Thread::PoisonObjectPointersIfDebug() {
 inline bool Thread::ModifySuspendCount(Thread* self,
                                        int delta,
                                        AtomicInteger* suspend_barrier,
-                                       bool for_debugger) {
+                                       SuspendReason reason) {
   if (delta > 0 && ((kUseReadBarrier && this != self) || suspend_barrier != nullptr)) {
     // When delta > 0 (requesting a suspend), ModifySuspendCountInternal() may fail either if
     // active_suspend_barriers is full or we are in the middle of a thread flip. Retry in a loop.
     while (true) {
-      if (LIKELY(ModifySuspendCountInternal(self, delta, suspend_barrier, for_debugger))) {
+      if (LIKELY(ModifySuspendCountInternal(self, delta, suspend_barrier, reason))) {
         return true;
       } else {
         // Failure means the list of active_suspend_barriers is full or we are in the middle of a
@@ -382,8 +389,37 @@ inline bool Thread::ModifySuspendCount(Thread* self,
       }
     }
   } else {
-    return ModifySuspendCountInternal(self, delta, suspend_barrier, for_debugger);
+    return ModifySuspendCountInternal(self, delta, suspend_barrier, reason);
   }
+}
+
+inline ShadowFrame* Thread::PushShadowFrame(ShadowFrame* new_top_frame) {
+  new_top_frame->CheckConsistentVRegs();
+  return tlsPtr_.managed_stack.PushShadowFrame(new_top_frame);
+}
+
+inline ShadowFrame* Thread::PopShadowFrame() {
+  return tlsPtr_.managed_stack.PopShadowFrame();
+}
+
+inline uint8_t* Thread::GetStackEndForInterpreter(bool implicit_overflow_check) const {
+  uint8_t* end = tlsPtr_.stack_end + (implicit_overflow_check
+      ? GetStackOverflowReservedBytes(kRuntimeISA)
+          : 0);
+  if (kIsDebugBuild) {
+    // In a debuggable build, but especially under ASAN, the access-checks interpreter has a
+    // potentially humongous stack size. We don't want to take too much of the stack regularly,
+    // so do not increase the regular reserved size (for compiled code etc) and only report the
+    // virtually smaller stack to the interpreter here.
+    end += GetStackOverflowReservedBytes(kRuntimeISA);
+  }
+  return end;
+}
+
+inline void Thread::ResetDefaultStackEnd() {
+  // Our stacks grow down, so we want stack_end_ to be near there, but reserving enough room
+  // to throw a StackOverflowError.
+  tlsPtr_.stack_end = tlsPtr_.stack_begin + GetStackOverflowReservedBytes(kRuntimeISA);
 }
 
 }  // namespace art

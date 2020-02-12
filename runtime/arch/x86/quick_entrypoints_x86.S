@@ -15,6 +15,7 @@
  */
 
 #include "asm_support_x86.S"
+#include "interpreter/cfi_asm_support.h"
 
 #include "arch/quick_alloc_entrypoints.S"
 
@@ -226,7 +227,7 @@ END_MACRO
      * Runtime::CreateCalleeSaveMethod(kSaveEverything)
      * when EDI and ESI are already saved.
      */
-MACRO2(SETUP_SAVE_EVERYTHING_FRAME_EDI_ESI_SAVED, got_reg, temp_reg)
+MACRO3(SETUP_SAVE_EVERYTHING_FRAME_EDI_ESI_SAVED, got_reg, temp_reg, runtime_method_offset = RUNTIME_SAVE_EVERYTHING_METHOD_OFFSET)
     // Save core registers from highest to lowest to agree with core spills bitmap.
     // EDI and ESI, or at least placeholders for them, are already on the stack.
     PUSH ebp
@@ -252,7 +253,7 @@ MACRO2(SETUP_SAVE_EVERYTHING_FRAME_EDI_ESI_SAVED, got_reg, temp_reg)
     movl SYMBOL(_ZN3art7Runtime9instance_E)@GOT(REG_VAR(got_reg)), REG_VAR(temp_reg)
     movl (REG_VAR(temp_reg)), REG_VAR(temp_reg)
     // Push save everything callee-save method.
-    pushl RUNTIME_SAVE_EVERYTHING_METHOD_OFFSET(REG_VAR(temp_reg))
+    pushl \runtime_method_offset(REG_VAR(temp_reg))
     CFI_ADJUST_CFA_OFFSET(4)
     // Store esp as the stop quick frame.
     movl %esp, %fs:THREAD_TOP_QUICK_FRAME_OFFSET
@@ -269,20 +270,20 @@ END_MACRO
      * Runtime::CreateCalleeSaveMethod(kSaveEverything)
      * when EDI is already saved.
      */
-MACRO2(SETUP_SAVE_EVERYTHING_FRAME_EDI_SAVED, got_reg, temp_reg)
+MACRO3(SETUP_SAVE_EVERYTHING_FRAME_EDI_SAVED, got_reg, temp_reg, runtime_method_offset = RUNTIME_SAVE_EVERYTHING_METHOD_OFFSET)
     // Save core registers from highest to lowest to agree with core spills bitmap.
     // EDI, or at least a placeholder for it, is already on the stack.
     PUSH esi
-    SETUP_SAVE_EVERYTHING_FRAME_EDI_ESI_SAVED RAW_VAR(got_reg), RAW_VAR(temp_reg)
+    SETUP_SAVE_EVERYTHING_FRAME_EDI_ESI_SAVED RAW_VAR(got_reg), RAW_VAR(temp_reg), \runtime_method_offset
 END_MACRO
 
     /*
      * Macro that sets up the callee save frame to conform with
      * Runtime::CreateCalleeSaveMethod(kSaveEverything)
      */
-MACRO2(SETUP_SAVE_EVERYTHING_FRAME, got_reg, temp_reg)
+MACRO3(SETUP_SAVE_EVERYTHING_FRAME, got_reg, temp_reg, runtime_method_offset = RUNTIME_SAVE_EVERYTHING_METHOD_OFFSET)
     PUSH edi
-    SETUP_SAVE_EVERYTHING_FRAME_EDI_SAVED RAW_VAR(got_reg), RAW_VAR(temp_reg)
+    SETUP_SAVE_EVERYTHING_FRAME_EDI_SAVED RAW_VAR(got_reg), RAW_VAR(temp_reg), \runtime_method_offset
 END_MACRO
 
 MACRO0(RESTORE_SAVE_EVERYTHING_FRAME_FRPS)
@@ -922,16 +923,19 @@ MACRO3(THREE_ARG_REF_DOWNCALL, c_name, cxx_name, return_macro)
     END_FUNCTION VAR(c_name)
 END_MACRO
 
-// Macro for string and type resolution and initialization.
-MACRO2(ONE_ARG_SAVE_EVERYTHING_DOWNCALL, c_name, cxx_name)
+    /*
+     * Macro for resolution and initialization of indexed DEX file
+     * constants such as classes and strings.
+     */
+MACRO3(ONE_ARG_SAVE_EVERYTHING_DOWNCALL, c_name, cxx_name, runtime_method_offset = RUNTIME_SAVE_EVERYTHING_METHOD_OFFSET)
     DEFINE_FUNCTION VAR(c_name)
-    SETUP_SAVE_EVERYTHING_FRAME ebx, ebx              // save ref containing registers for GC
+    SETUP_SAVE_EVERYTHING_FRAME ebx, ebx, \runtime_method_offset  // save ref containing registers for GC
     // Outgoing argument set up
     subl MACRO_LITERAL(8), %esp                       // push padding
     CFI_ADJUST_CFA_OFFSET(8)
     pushl %fs:THREAD_SELF_OFFSET                      // pass Thread::Current()
     CFI_ADJUST_CFA_OFFSET(4)
-    PUSH eax                                          // pass arg1
+    PUSH eax                                          // pass the index of the constant as arg1
     call CALLVAR(cxx_name)                            // cxx_name(arg1, Thread*)
     addl MACRO_LITERAL(16), %esp                      // pop arguments
     CFI_ADJUST_CFA_OFFSET(-16)
@@ -945,6 +949,10 @@ MACRO2(ONE_ARG_SAVE_EVERYTHING_DOWNCALL, c_name, cxx_name)
 1:
     DELIVER_PENDING_EXCEPTION_FRAME_READY
     END_FUNCTION VAR(c_name)
+END_MACRO
+
+MACRO2(ONE_ARG_SAVE_EVERYTHING_DOWNCALL_FOR_CLINIT, c_name, cxx_name)
+    ONE_ARG_SAVE_EVERYTHING_DOWNCALL \c_name, \cxx_name, RUNTIME_SAVE_EVERYTHING_FOR_CLINIT_METHOD_OFFSET
 END_MACRO
 
 MACRO0(RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER)
@@ -979,6 +987,7 @@ GENERATE_ALLOC_ENTRYPOINTS_FOR_NON_TLAB_ALLOCATORS
 // GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_RESOLVED(_region_tlab, RegionTLAB)
 // GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_INITIALIZED(_region_tlab, RegionTLAB)
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_WITH_ACCESS_CHECK(_region_tlab, RegionTLAB)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_OBJECT(_region_tlab, RegionTLAB)
 // GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED(_region_tlab, RegionTLAB)
 // GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED8(_region_tlab, RegionTLAB)
 // GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED16(_region_tlab, RegionTLAB)
@@ -991,6 +1000,7 @@ GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_STRING(_region_tlab, RegionTLAB)
 // GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_RESOLVED(_tlab, TLAB)
 // GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_INITIALIZED(_tlab, TLAB)
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_WITH_ACCESS_CHECK(_tlab, TLAB)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_OBJECT(_tlab, TLAB)
 // GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED(_tlab, TLAB)
 // GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED8(_tlab, TLAB)
 // GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED16(_tlab, TLAB)
@@ -1270,9 +1280,11 @@ GENERATE_ALLOC_ARRAY_TLAB art_quick_alloc_array_resolved16_tlab, artAllocArrayFr
 GENERATE_ALLOC_ARRAY_TLAB art_quick_alloc_array_resolved32_tlab, artAllocArrayFromCodeResolvedTLAB, COMPUTE_ARRAY_SIZE_32
 GENERATE_ALLOC_ARRAY_TLAB art_quick_alloc_array_resolved64_tlab, artAllocArrayFromCodeResolvedTLAB, COMPUTE_ARRAY_SIZE_64
 
-ONE_ARG_SAVE_EVERYTHING_DOWNCALL art_quick_initialize_static_storage, artInitializeStaticStorageFromCode
-ONE_ARG_SAVE_EVERYTHING_DOWNCALL art_quick_initialize_type, artInitializeTypeFromCode
-ONE_ARG_SAVE_EVERYTHING_DOWNCALL art_quick_initialize_type_and_verify_access, artInitializeTypeAndVerifyAccessFromCode
+ONE_ARG_SAVE_EVERYTHING_DOWNCALL_FOR_CLINIT art_quick_initialize_static_storage, artInitializeStaticStorageFromCode
+ONE_ARG_SAVE_EVERYTHING_DOWNCALL_FOR_CLINIT art_quick_resolve_type, artResolveTypeFromCode
+ONE_ARG_SAVE_EVERYTHING_DOWNCALL art_quick_resolve_type_and_verify_access, artResolveTypeAndVerifyAccessFromCode
+ONE_ARG_SAVE_EVERYTHING_DOWNCALL art_quick_resolve_method_handle, artResolveMethodHandleFromCode
+ONE_ARG_SAVE_EVERYTHING_DOWNCALL art_quick_resolve_method_type, artResolveMethodTypeFromCode
 ONE_ARG_SAVE_EVERYTHING_DOWNCALL art_quick_resolve_string, artResolveStringFromCode
 
 TWO_ARG_REF_DOWNCALL art_quick_handle_fill_data, artHandleFillArrayDataFromCode, RETURN_IF_EAX_ZERO
@@ -1282,7 +1294,7 @@ DEFINE_FUNCTION art_quick_lock_object
     jz   .Lslow_lock
 .Lretry_lock:
     movl MIRROR_OBJECT_LOCK_WORD_OFFSET(%eax), %ecx  // ecx := lock word
-    test LITERAL(LOCK_WORD_STATE_MASK), %ecx         // test the 2 high bits.
+    test LITERAL(LOCK_WORD_STATE_MASK_SHIFTED), %ecx  // test the 2 high bits.
     jne  .Lslow_lock                      // slow path if either of the two high bits are set.
     movl %ecx, %edx                       // save lock word (edx) to keep read barrier bits.
     andl LITERAL(LOCK_WORD_GC_STATE_MASK_SHIFTED_TOGGLED), %ecx  // zero the gc bits.
@@ -1352,7 +1364,7 @@ DEFINE_FUNCTION art_quick_unlock_object
 .Lretry_unlock:
     movl MIRROR_OBJECT_LOCK_WORD_OFFSET(%eax), %ecx  // ecx := lock word
     movl %fs:THREAD_ID_OFFSET, %edx       // edx := thread id
-    test LITERAL(LOCK_WORD_STATE_MASK), %ecx
+    test LITERAL(LOCK_WORD_STATE_MASK_SHIFTED), %ecx
     jnz  .Lslow_unlock                    // lock word contains a monitor
     cmpw %cx, %dx                         // does the thread id match?
     jne  .Lslow_unlock
@@ -1427,22 +1439,28 @@ DEFINE_FUNCTION art_quick_instance_of
 END_FUNCTION art_quick_instance_of
 
 DEFINE_FUNCTION art_quick_check_instance_of
+    // Type check using the bit string passes null as the target class. In that case just throw.
+    testl %ecx, %ecx
+    jz .Lthrow_class_cast_exception_for_bitstring_check
+
     PUSH eax                              // alignment padding
     PUSH ecx                              // pass arg2 - checked class
     PUSH eax                              // pass arg1 - obj
     call SYMBOL(artInstanceOfFromCode)    // (Object* obj, Class* ref_klass)
     testl %eax, %eax
-    jz 1f                                 // jump forward if not assignable
+    jz .Lthrow_class_cast_exception       // jump forward if not assignable
     addl LITERAL(12), %esp                // pop arguments
     CFI_ADJUST_CFA_OFFSET(-12)
     ret
-
     CFI_ADJUST_CFA_OFFSET(12)             // Reset unwind info so following code unwinds.
-1:
+
+.Lthrow_class_cast_exception:
     POP eax                               // pop arguments
     POP ecx
     addl LITERAL(4), %esp
     CFI_ADJUST_CFA_OFFSET(-4)
+
+.Lthrow_class_cast_exception_for_bitstring_check:
     SETUP_SAVE_ALL_CALLEE_SAVES_FRAME ebx, ebx // save all registers as basis for long jump context
     // Outgoing argument set up
     PUSH eax                              // alignment padding
@@ -1526,7 +1544,7 @@ DEFINE_FUNCTION art_quick_aput_obj
     POISON_HEAP_REF edx
     movl %edx, MIRROR_OBJECT_ARRAY_DATA_OFFSET(%eax, %ecx, 4)
     movl %fs:THREAD_CARD_TABLE_OFFSET, %edx
-    shrl LITERAL(7), %eax
+    shrl LITERAL(CARD_TABLE_CARD_SHIFT), %eax
     movb %dl, (%edx, %eax)
     ret
 .Ldo_aput_null:
@@ -1567,7 +1585,7 @@ DEFINE_FUNCTION art_quick_aput_obj
     POISON_HEAP_REF edx
     movl %edx, MIRROR_OBJECT_ARRAY_DATA_OFFSET(%eax, %ecx, 4)  // do the aput
     movl %fs:THREAD_CARD_TABLE_OFFSET, %edx
-    shrl LITERAL(7), %eax
+    shrl LITERAL(CARD_TABLE_CARD_SHIFT), %eax
     movb %dl, (%edx, %eax)
     ret
     CFI_ADJUST_CFA_OFFSET(12)     // 3 POP after the jz for unwinding.
@@ -1598,7 +1616,7 @@ DEFINE_FUNCTION art_quick_memcpy
 END_FUNCTION art_quick_memcpy
 
 DEFINE_FUNCTION art_quick_test_suspend
-    SETUP_SAVE_EVERYTHING_FRAME ebx, ebx              // save everything for GC
+    SETUP_SAVE_EVERYTHING_FRAME ebx, ebx, RUNTIME_SAVE_EVERYTHING_FOR_SUSPEND_CHECK_METHOD_OFFSET  // save everything for GC
     // Outgoing argument set up
     subl MACRO_LITERAL(12), %esp                      // push padding
     CFI_ADJUST_CFA_OFFSET(12)
@@ -1705,6 +1723,9 @@ DEFINE_FUNCTION art_quick_lushr
     ret
 END_FUNCTION art_quick_lushr
 
+// Note: Functions `art{Get,Set}<Kind>{Static,Instance}FromCompiledCode` are
+// defined with a macro in runtime/entrypoints/quick/quick_field_entrypoints.cc.
+
 ONE_ARG_REF_DOWNCALL art_quick_get_boolean_static, artGetBooleanStaticFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
 ONE_ARG_REF_DOWNCALL art_quick_get_byte_static, artGetByteStaticFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
 ONE_ARG_REF_DOWNCALL art_quick_get_char_static, artGetCharStaticFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
@@ -1780,35 +1801,97 @@ END_FUNCTION art_quick_proxy_invoke_handler
      */
 DEFINE_FUNCTION art_quick_imt_conflict_trampoline
     PUSH EDI
-    movl 8(%esp), %edi // Load referrer
-    movl ART_METHOD_DEX_CACHE_METHODS_OFFSET_32(%edi), %edi   // Load dex cache methods array
+    PUSH ESI
+    PUSH EDX
+    movl 16(%esp), %edi         // Load referrer.
+    movd %xmm7, %esi            // Get target method index stored in xmm7, remember it in ESI.
+    // If the method is obsolete, just go through the dex cache miss slow path.
+    // The obsolete flag is set with suspended threads, so we do not need an acquire operation here.
+    testl LITERAL(ACC_OBSOLETE_METHOD), ART_METHOD_ACCESS_FLAGS_OFFSET(%edi)
+    jnz .Limt_conflict_trampoline_dex_cache_miss
+    movl ART_METHOD_DECLARING_CLASS_OFFSET(%edi), %edi // Load declaring class (no read barrier).
+    movl MIRROR_CLASS_DEX_CACHE_OFFSET(%edi), %edi     // Load the DexCache (without read barrier).
+    UNPOISON_HEAP_REF edi
+    movl MIRROR_DEX_CACHE_RESOLVED_METHODS_OFFSET(%edi), %edi  // Load the resolved methods.
     pushl ART_METHOD_JNI_OFFSET_32(%eax)  // Push ImtConflictTable.
     CFI_ADJUST_CFA_OFFSET(4)
-    movd %xmm7, %eax              // get target method index stored in xmm7
-    movl 0(%edi, %eax, __SIZEOF_POINTER__), %edi  // Load interface method
-    popl %eax  // Pop ImtConflictTable.
+    movl %esi, %eax             // Copy the method index from ESI.
+    andl LITERAL(METHOD_DEX_CACHE_SIZE_MINUS_ONE), %eax  // Calculate DexCache method slot index.
+    leal 0(%edi, %eax, 2 * __SIZEOF_POINTER__), %edi  // Load DexCache method slot address.
+    mov %ecx, %edx              // Make EDX:EAX == ECX:EBX so that LOCK CMPXCHG8B makes no changes.
+    mov %ebx, %eax              // (The actual value does not matter.)
+    lock cmpxchg8b (%edi)       // Relaxed atomic load EDX:EAX from the dex cache slot.
+    popl %edi                   // Pop ImtConflictTable.
     CFI_ADJUST_CFA_OFFSET(-4)
+    cmp %edx, %esi              // Compare method index to see if we had a DexCache method hit.
+    jne .Limt_conflict_trampoline_dex_cache_miss
 .Limt_table_iterate:
-    cmpl %edi, 0(%eax)
+    cmpl %eax, 0(%edi)
     jne .Limt_table_next_entry
     // We successfully hit an entry in the table. Load the target method
     // and jump to it.
+    movl __SIZEOF_POINTER__(%edi), %eax
+    CFI_REMEMBER_STATE
+    POP EDX
+    POP ESI
     POP EDI
-    movl __SIZEOF_POINTER__(%eax), %eax
     jmp *ART_METHOD_QUICK_CODE_OFFSET_32(%eax)
+    CFI_RESTORE_STATE
 .Limt_table_next_entry:
     // If the entry is null, the interface method is not in the ImtConflictTable.
-    cmpl LITERAL(0), 0(%eax)
+    cmpl LITERAL(0), 0(%edi)
     jz .Lconflict_trampoline
     // Iterate over the entries of the ImtConflictTable.
-    addl LITERAL(2 * __SIZEOF_POINTER__), %eax
+    addl LITERAL(2 * __SIZEOF_POINTER__), %edi
     jmp .Limt_table_iterate
 .Lconflict_trampoline:
     // Call the runtime stub to populate the ImtConflictTable and jump to the
     // resolved method.
-    movl %edi, %eax  // Load interface method
+    CFI_REMEMBER_STATE
+    POP EDX
+    POP ESI
     POP EDI
     INVOKE_TRAMPOLINE_BODY artInvokeInterfaceTrampoline
+    CFI_RESTORE_STATE
+.Limt_conflict_trampoline_dex_cache_miss:
+    // We're not creating a proper runtime method frame here,
+    // artLookupResolvedMethod() is not allowed to walk the stack.
+
+    // Save core register args; EDX is already saved.
+    PUSH ebx
+    PUSH ecx
+
+    // Save FPR args.
+    subl MACRO_LITERAL(32), %esp
+    CFI_ADJUST_CFA_OFFSET(32)
+    movsd %xmm0, 0(%esp)
+    movsd %xmm1, 8(%esp)
+    movsd %xmm2, 16(%esp)
+    movsd %xmm3, 24(%esp)
+
+    pushl 32+8+16(%esp)         // Pass referrer.
+    CFI_ADJUST_CFA_OFFSET(4)
+    pushl %esi                  // Pass method index.
+    CFI_ADJUST_CFA_OFFSET(4)
+    call SYMBOL(artLookupResolvedMethod)  // (uint32_t method_index, ArtMethod* referrer)
+    addl LITERAL(8), %esp       // Pop arguments.
+    CFI_ADJUST_CFA_OFFSET(-8)
+
+    // Restore FPR args.
+    movsd 0(%esp), %xmm0
+    movsd 8(%esp), %xmm1
+    movsd 16(%esp), %xmm2
+    movsd 24(%esp), %xmm3
+    addl MACRO_LITERAL(32), %esp
+    CFI_ADJUST_CFA_OFFSET(-32)
+
+    // Restore core register args.
+    POP ecx
+    POP ebx
+
+    cmp LITERAL(0), %eax        // If the method wasn't resolved,
+    je .Lconflict_trampoline    //   skip the lookup and go to artInvokeInterfaceTrampoline().
+    jmp .Limt_table_iterate
 END_FUNCTION art_quick_imt_conflict_trampoline
 
 DEFINE_FUNCTION art_quick_resolution_trampoline
@@ -1903,7 +1986,9 @@ DEFINE_FUNCTION art_quick_generic_jni_trampoline
     punpckldq %xmm1, %xmm0
     ret
 .Lexception_in_native:
-    movl %fs:THREAD_TOP_QUICK_FRAME_OFFSET, %esp
+    pushl %fs:THREAD_TOP_QUICK_FRAME_OFFSET
+    addl LITERAL(-1), (%esp)  // Remove the GenericJNI tag.
+    movl (%esp), %esp
     // Do a call to push a new save-all frame required by the runtime.
     call .Lexception_call
 .Lexception_call:
@@ -1948,17 +2033,23 @@ ONE_ARG_RUNTIME_EXCEPTION art_invoke_obsolete_method_stub, artInvokeObsoleteMeth
 DEFINE_FUNCTION art_quick_instrumentation_entry
     SETUP_SAVE_REFS_AND_ARGS_FRAME ebx, edx
     PUSH eax                      // Save eax which will be clobbered by the callee-save method.
-    subl LITERAL(12), %esp        // Align stack.
-    CFI_ADJUST_CFA_OFFSET(12)
-    pushl FRAME_SIZE_SAVE_REFS_AND_ARGS-4+16(%esp)  // Pass LR.
-    CFI_ADJUST_CFA_OFFSET(4)
+    subl LITERAL(16), %esp        // Align stack (12 bytes) and reserve space for the SP argument
+    CFI_ADJUST_CFA_OFFSET(16)     // (4 bytes). We lack the scratch registers to calculate the SP
+                                  // right now, so we will just fill it in later.
     pushl %fs:THREAD_SELF_OFFSET  // Pass Thread::Current().
     CFI_ADJUST_CFA_OFFSET(4)
     PUSH ecx                      // Pass receiver.
     PUSH eax                      // Pass Method*.
-    call SYMBOL(artInstrumentationMethodEntryFromCode) // (Method*, Object*, Thread*, LR)
+    leal 32(%esp), %eax           // Put original SP into eax
+    movl %eax, 12(%esp)           // set SP
+    call SYMBOL(artInstrumentationMethodEntryFromCode) // (Method*, Object*, Thread*, SP)
+
     addl LITERAL(28), %esp        // Pop arguments upto saved Method*.
     CFI_ADJUST_CFA_OFFSET(-28)
+
+    testl %eax, %eax
+    jz 1f                         // Test for null return (indicating exception) and handle it.
+
     movl 60(%esp), %edi           // Restore edi.
     movl %eax, 60(%esp)           // Place code* over edi, just under return pc.
     movl SYMBOL(art_quick_instrumentation_exit)@GOT(%ebx), %ebx
@@ -1980,41 +2071,54 @@ DEFINE_FUNCTION art_quick_instrumentation_entry
     addl LITERAL(60), %esp        // Wind stack back upto code*.
     CFI_ADJUST_CFA_OFFSET(-60)
     ret                           // Call method (and pop).
+1:
+    // Make caller handle exception
+    addl LITERAL(4), %esp
+    CFI_ADJUST_CFA_OFFSET(-4)
+    RESTORE_SAVE_REFS_AND_ARGS_FRAME
+    DELIVER_PENDING_EXCEPTION
 END_FUNCTION art_quick_instrumentation_entry
 
-DEFINE_FUNCTION art_quick_instrumentation_exit
+DEFINE_FUNCTION_CUSTOM_CFA art_quick_instrumentation_exit, 0
     pushl LITERAL(0)              // Push a fake return PC as there will be none on the stack.
     CFI_ADJUST_CFA_OFFSET(4)
-    SETUP_SAVE_REFS_ONLY_FRAME ebx, ebx
-    mov  %esp, %ecx               // Remember SP
-    subl LITERAL(8), %esp         // Save float return value.
+    SETUP_SAVE_EVERYTHING_FRAME ebx, ebx
+
+    movl %esp, %ecx               // Remember SP
+    subl LITERAL(8), %esp         // Align stack.
     CFI_ADJUST_CFA_OFFSET(8)
-    movq %xmm0, (%esp)
-    PUSH edx                      // Save gpr return value.
+    PUSH edx                      // Save gpr return value. edx and eax need to be together,
+                                  // which isn't the case in kSaveEverything frame.
     PUSH eax
-    subl LITERAL(16), %esp        // Align stack
-    CFI_ADJUST_CFA_OFFSET(16)
-    movq %xmm0, (%esp)            // Pass float return value.
-    PUSH edx                      // Pass gpr return value.
-    PUSH eax
-    PUSH ecx                      // Pass SP.
+    leal 32(%esp), %eax           // Get pointer to fpr_result, in kSaveEverything frame
+    movl %esp, %edx               // Get pointer to gpr_result
+    PUSH eax                      // Pass fpr_result
+    PUSH edx                      // Pass gpr_result
+    PUSH ecx                      // Pass SP
     pushl %fs:THREAD_SELF_OFFSET  // Pass Thread::Current.
     CFI_ADJUST_CFA_OFFSET(4)
-    call SYMBOL(artInstrumentationMethodExitFromCode)  // (Thread*, SP, gpr_result, fpr_result)
-    mov   %eax, %ecx              // Move returned link register.
-    addl LITERAL(32), %esp        // Pop arguments.
+
+    call SYMBOL(artInstrumentationMethodExitFromCode)  // (Thread*, SP, gpr_result*, fpr_result*)
+    // Return result could have been changed if it's a reference.
+    movl 16(%esp), %ecx
+    movl %ecx, (80+32)(%esp)
+    addl LITERAL(32), %esp        // Pop arguments and grp_result.
     CFI_ADJUST_CFA_OFFSET(-32)
-    movl %edx, %ebx               // Move returned link register for deopt
-                                  // (ebx is pretending to be our LR).
-    POP eax                       // Restore gpr return value.
-    POP edx
-    movq (%esp), %xmm0            // Restore fpr return value.
-    addl LITERAL(8), %esp
-    CFI_ADJUST_CFA_OFFSET(-8)
-    RESTORE_SAVE_REFS_ONLY_FRAME
-    addl LITERAL(4), %esp         // Remove fake return pc.
-    CFI_ADJUST_CFA_OFFSET(-4)
-    jmp   *%ecx                   // Return.
+
+    testl %eax, %eax              // Check if we returned error.
+    jz .Ldo_deliver_instrumentation_exception
+    testl %edx, %edx
+    jnz .Ldeoptimize
+    // Normal return.
+    movl %eax, FRAME_SIZE_SAVE_EVERYTHING-4(%esp)   // Set return pc.
+    RESTORE_SAVE_EVERYTHING_FRAME
+    ret
+.Ldeoptimize:
+    mov %edx, (FRAME_SIZE_SAVE_EVERYTHING-4)(%esp)  // Set return pc.
+    RESTORE_SAVE_EVERYTHING_FRAME
+    jmp SYMBOL(art_quick_deoptimize)
+.Ldo_deliver_instrumentation_exception:
+    DELIVER_PENDING_EXCEPTION_FRAME_READY
 END_FUNCTION art_quick_instrumentation_exit
 
     /*
@@ -2022,8 +2126,7 @@ END_FUNCTION art_quick_instrumentation_exit
      * will long jump to the upcall with a special exception of -1.
      */
 DEFINE_FUNCTION art_quick_deoptimize
-    PUSH ebx                      // Entry point for a jump. Fake that we were called.
-    SETUP_SAVE_ALL_CALLEE_SAVES_FRAME ebx, ebx
+    SETUP_SAVE_EVERYTHING_FRAME ebx, ebx
     subl LITERAL(12), %esp        // Align stack.
     CFI_ADJUST_CFA_OFFSET(12)
     pushl %fs:THREAD_SELF_OFFSET  // Pass Thread::Current().
@@ -2279,20 +2382,28 @@ DEFINE_FUNCTION art_quick_osr_stub
     PUSH ebx
     PUSH esi
     PUSH edi
+    SAVE_SIZE=20                   // 4 registers and the return address
     mov 4+16(%esp), %esi           // ESI = argument array
     mov 8+16(%esp), %ecx           // ECX = size of args
     mov 12+16(%esp), %ebx          // EBX = pc to call
     mov %esp, %ebp                 // Save stack pointer
+    CFI_DEF_CFA(ebp, SAVE_SIZE)    // CFA = ebp + SAVE_SIZE
+    CFI_REMEMBER_STATE
     andl LITERAL(0xFFFFFFF0), %esp // Align stack
-    PUSH ebp                       // Save old stack pointer
+    pushl %ebp                     // Save old stack pointer
     subl LITERAL(12), %esp         // Align stack
     movl LITERAL(0), (%esp)        // Store null for ArtMethod* slot
+    // ebp isn't properly spilled in the osr method, so we need use DWARF expression.
+    // NB: the CFI must be before the call since this is the address gdb will lookup.
+    // NB: gdb expects that cfa_expression returns the CFA value (not address to it).
+    CFI_ESCAPE(                    /* cfa = [sp + 12] + SAVE_SIZE */ \
+      0x0f, 6,                     /* DW_CFA_def_cfa_expression(len) */ \
+      0x92, 4, 12,                 /* DW_OP_bregx(reg,offset) */ \
+      0x06,                        /* DW_OP_deref */ \
+      0x23, SAVE_SIZE)             /* DW_OP_plus_uconst(val) */
     call .Losr_entry
-
-    // Restore stack pointer.
-    addl LITERAL(12), %esp
-    POP ebp
-    mov %ebp, %esp
+    mov 12(%esp), %esp             // Restore stack pointer.
+    CFI_DEF_CFA(esp, SAVE_SIZE)    // CFA = esp + SAVE_SIZE
 
     // Restore callee saves.
     POP edi
@@ -2315,6 +2426,8 @@ DEFINE_FUNCTION art_quick_osr_stub
     movss %xmm0, (%ecx)           // Store the floating point result
     ret
 .Losr_entry:
+    CFI_RESTORE_STATE
+    CFI_DEF_CFA(ebp, SAVE_SIZE)   // CFA = ebp + SAVE_SIZE
     subl LITERAL(4), %ecx         // Given stack size contains pushed frame pointer, substract it.
     subl %ecx, %esp
     mov %esp, %edi                // EDI = beginning of stack
@@ -2323,98 +2436,71 @@ DEFINE_FUNCTION art_quick_osr_stub
 END_FUNCTION art_quick_osr_stub
 
 DEFINE_FUNCTION art_quick_invoke_polymorphic
-    SETUP_SAVE_REFS_AND_ARGS_FRAME  ebx, ebx       // Save frame.
-    mov %esp, %edx                                 // Remember SP.
-    subl LITERAL(16), %esp                         // Make space for JValue result.
-    CFI_ADJUST_CFA_OFFSET(16)
-    movl LITERAL(0), (%esp)                        // Initialize result to zero.
-    movl LITERAL(0), 4(%esp)
-    mov %esp, %eax                                 // Store pointer to JValue result in eax.
-    PUSH edx                                       // pass SP
-    pushl %fs:THREAD_SELF_OFFSET                   // pass Thread::Current()
+                                                   // On entry: EAX := unused, ECX := receiver
+    SETUP_SAVE_REFS_AND_ARGS_FRAME ebx, ebx        // Save frame.
+    mov %esp, %edx                                 // Remember SP
+    sub LITERAL(4), %esp                           // Alignment padding
     CFI_ADJUST_CFA_OFFSET(4)
-    PUSH ecx                                       // pass receiver (method handle)
-    PUSH eax                                       // pass JResult
-    call SYMBOL(artInvokePolymorphic)              // (result, receiver, Thread*, SP)
-    subl LITERAL('A'), %eax                        // Eliminate out of bounds options
-    cmpb LITERAL('Z' - 'A'), %al
-    ja .Lcleanup_and_return
-    movzbl %al, %eax
-    call .Lput_eip_in_ecx
-.Lbranch_start:
-    movl %ecx, %edx
-    add $(.Lhandler_table - .Lbranch_start), %edx  // Make EDX point to handler_table.
-    leal (%edx, %eax, 2), %eax                     // Calculate address of entry in table.
-    movzwl (%eax), %eax                            // Lookup relative branch in table.
-    addl %ecx, %eax                                // Add EIP relative offset.
-    jmp *%eax                                      // Branch to handler.
-
-    // Handlers for different return types.
-.Lstore_boolean_result:
-    movzbl 16(%esp), %eax                          // Copy boolean result to the accumulator.
-    jmp .Lcleanup_and_return
-.Lstore_char_result:
-    movzwl 16(%esp), %eax                          // Copy char result to the accumulator.
-    jmp .Lcleanup_and_return
-.Lstore_float_result:
-    movd 16(%esp), %xmm0                           // Copy float result to the context restored by
-    movd %xmm0, 36(%esp)                           // RESTORE_SAVE_REFS_ONLY_FRAME.
-    jmp .Lcleanup_and_return
-.Lstore_double_result:
-    movsd 16(%esp), %xmm0                          // Copy double result to the context restored by
-    movsd %xmm0, 36(%esp)                          // RESTORE_SAVE_REFS_ONLY_FRAME.
-    jmp .Lcleanup_and_return
-.Lstore_long_result:
-    movl 20(%esp), %edx                            // Copy upper-word of result to the context restored by
-    movl %edx, 72(%esp)                            // RESTORE_SAVE_REFS_ONLY_FRAME.
-    // Fall-through for lower bits.
-.Lstore_int_result:
-    movl 16(%esp), %eax                            // Copy int result to the accumulator.
-    // Fall-through to clean up and return.
-.Lcleanup_and_return:
-    addl LITERAL(32), %esp                         // Pop arguments and stack allocated JValue result.
-    CFI_ADJUST_CFA_OFFSET(-32)
+    push %edx                                      // Push SP
+    CFI_ADJUST_CFA_OFFSET(4)
+    pushl %fs:THREAD_SELF_OFFSET                   // Push Thread::Current()
+    CFI_ADJUST_CFA_OFFSET(4)
+    push %ecx                                      // Push receiver (method handle)
+    CFI_ADJUST_CFA_OFFSET(4)
+    call SYMBOL(artInvokePolymorphic)              // invoke with (receiver, thread, SP)
+    addl LITERAL(16), %esp                         // Pop arguments.
+    CFI_ADJUST_CFA_OFFSET(-16)
+    mov %eax, 4(%esp)                              // Result is in EAX:EDX. Copy to saved FP state.
+    mov %edx, 8(%esp)
+    mov %edx, 40(%esp)                             // Copy EDX to saved context
     RESTORE_SAVE_REFS_AND_ARGS_FRAME
     RETURN_OR_DELIVER_PENDING_EXCEPTION
-
-.Lput_eip_in_ecx:                                  // Internal function that puts address of
-    movl 0(%esp), %ecx                             // next instruction into ECX when CALL
-    ret
-
-    // Handler table to handlers for given type.
-.Lhandler_table:
-MACRO1(HANDLER_TABLE_ENTRY, handler_label)
-    // NB some tools require 16-bits for relocations. Shouldn't need adjusting.
-    .word RAW_VAR(handler_label) - .Lbranch_start
-END_MACRO
-    HANDLER_TABLE_ENTRY(.Lcleanup_and_return)      // A
-    HANDLER_TABLE_ENTRY(.Lstore_int_result)        // B (byte)
-    HANDLER_TABLE_ENTRY(.Lstore_char_result)       // C (char)
-    HANDLER_TABLE_ENTRY(.Lstore_double_result)     // D (double)
-    HANDLER_TABLE_ENTRY(.Lcleanup_and_return)      // E
-    HANDLER_TABLE_ENTRY(.Lstore_float_result)      // F (float)
-    HANDLER_TABLE_ENTRY(.Lcleanup_and_return)      // G
-    HANDLER_TABLE_ENTRY(.Lcleanup_and_return)      // H
-    HANDLER_TABLE_ENTRY(.Lstore_int_result)        // I (int)
-    HANDLER_TABLE_ENTRY(.Lstore_long_result)       // J (long)
-    HANDLER_TABLE_ENTRY(.Lcleanup_and_return)      // K
-    HANDLER_TABLE_ENTRY(.Lstore_int_result)        // L (object)
-    HANDLER_TABLE_ENTRY(.Lcleanup_and_return)      // M
-    HANDLER_TABLE_ENTRY(.Lcleanup_and_return)      // N
-    HANDLER_TABLE_ENTRY(.Lcleanup_and_return)      // O
-    HANDLER_TABLE_ENTRY(.Lcleanup_and_return)      // P
-    HANDLER_TABLE_ENTRY(.Lcleanup_and_return)      // Q
-    HANDLER_TABLE_ENTRY(.Lcleanup_and_return)      // R
-    HANDLER_TABLE_ENTRY(.Lstore_int_result)        // S (short)
-    HANDLER_TABLE_ENTRY(.Lcleanup_and_return)      // T
-    HANDLER_TABLE_ENTRY(.Lcleanup_and_return)      // U
-    HANDLER_TABLE_ENTRY(.Lcleanup_and_return)      // V (void)
-    HANDLER_TABLE_ENTRY(.Lcleanup_and_return)      // W
-    HANDLER_TABLE_ENTRY(.Lcleanup_and_return)      // X
-    HANDLER_TABLE_ENTRY(.Lcleanup_and_return)      // Y
-    HANDLER_TABLE_ENTRY(.Lstore_boolean_result)    // Z (boolean)
-
 END_FUNCTION art_quick_invoke_polymorphic
+
+DEFINE_FUNCTION art_quick_invoke_custom
+    SETUP_SAVE_REFS_AND_ARGS_FRAME ebx, ebx        // Save frame.
+                                                   // EAX := call_site_index
+    mov %esp, %ecx                                 // Remember SP.
+    subl LITERAL(4), %esp                          // Alignment padding.
+    CFI_ADJUST_CFA_OFFSET(4)
+    push %ecx                                      // pass SP
+    CFI_ADJUST_CFA_OFFSET(4)
+    pushl %fs:THREAD_SELF_OFFSET                   // pass Thread::Current()
+    CFI_ADJUST_CFA_OFFSET(4)
+    push %eax                                      // pass call_site_index
+    CFI_ADJUST_CFA_OFFSET(4)
+    call SYMBOL(artInvokeCustom)                   // artInvokeCustom(call_site_index, Thread*, SP)
+    addl LITERAL(16), %esp                         // Pop arguments.
+    CFI_ADJUST_CFA_OFFSET(-16)
+    mov %eax, 4(%esp)                              // Result is in EAX:EDX. Copy to saved FP state.
+    mov %edx, 8(%esp)
+    mov %edx, 40(%esp)                             // Copy EDX to saved context
+    RESTORE_SAVE_REFS_AND_ARGS_FRAME
+    RETURN_OR_DELIVER_PENDING_EXCEPTION
+END_FUNCTION art_quick_invoke_custom
+
+// Wrap ExecuteSwitchImpl in assembly method which specifies DEX PC for unwinding.
+//  Argument 0: ESP+4: The context pointer for ExecuteSwitchImpl.
+//  Argument 1: ESP+8: Pointer to the templated ExecuteSwitchImpl to call.
+//  Argument 2: ESP+12: The value of DEX PC (memory address of the methods bytecode).
+DEFINE_FUNCTION ExecuteSwitchImplAsm
+    PUSH ebx                 // Spill EBX; Increments ESP, so arg0 is at ESP+8 now.
+    mov 12(%esp), %eax       // EAX = C++ templated interpreter function
+    mov 16(%esp), %ebx       // EBX = DEX PC (callee save register)
+    mov 8(%esp), %ecx        // ECX = Context argument for the function
+    CFI_DEFINE_DEX_PC_WITH_OFFSET(0 /* EAX */, 3 /* EBX */, 0)
+
+    sub LITERAL(4), %esp     // Alignment padding
+    CFI_ADJUST_CFA_OFFSET(4)
+    push %ecx                // Push argument
+    CFI_ADJUST_CFA_OFFSET(4)
+    call *%eax               // Call the wrapped function
+    addl LITERAL(8), %esp
+    CFI_ADJUST_CFA_OFFSET(-8)
+
+    POP ebx                  // Restore EBX
+    ret
+END_FUNCTION ExecuteSwitchImplAsm
 
     // TODO: implement these!
 UNIMPLEMENTED art_quick_memcmp16

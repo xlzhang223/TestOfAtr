@@ -581,8 +581,64 @@ DISASSEMBLER_ENTRY(cmp,
               load = true;
               src_reg_file = dst_reg_file = SSE;
               break;
-            case 0x39:
+            case 0x37:
               opcode1 = "pcmpgtq";
+              prefix[2] = 0;
+              has_modrm = true;
+              load = true;
+              src_reg_file = dst_reg_file = SSE;
+              break;
+            case 0x38:
+              opcode1 = "pminsb";
+              prefix[2] = 0;
+              has_modrm = true;
+              load = true;
+              src_reg_file = dst_reg_file = SSE;
+              break;
+            case 0x39:
+              opcode1 = "pminsd";
+              prefix[2] = 0;
+              has_modrm = true;
+              load = true;
+              src_reg_file = dst_reg_file = SSE;
+              break;
+            case 0x3A:
+              opcode1 = "pminuw";
+              prefix[2] = 0;
+              has_modrm = true;
+              load = true;
+              src_reg_file = dst_reg_file = SSE;
+              break;
+            case 0x3B:
+              opcode1 = "pminud";
+              prefix[2] = 0;
+              has_modrm = true;
+              load = true;
+              src_reg_file = dst_reg_file = SSE;
+              break;
+            case 0x3C:
+              opcode1 = "pmaxsb";
+              prefix[2] = 0;
+              has_modrm = true;
+              load = true;
+              src_reg_file = dst_reg_file = SSE;
+              break;
+            case 0x3D:
+              opcode1 = "pmaxsd";
+              prefix[2] = 0;
+              has_modrm = true;
+              load = true;
+              src_reg_file = dst_reg_file = SSE;
+              break;
+            case 0x3E:
+              opcode1 = "pmaxuw";
+              prefix[2] = 0;
+              has_modrm = true;
+              load = true;
+              src_reg_file = dst_reg_file = SSE;
+              break;
+            case 0x3F:
+              opcode1 = "pmaxud";
               prefix[2] = 0;
               has_modrm = true;
               load = true;
@@ -736,6 +792,7 @@ DISASSEMBLER_ENTRY(cmp,
         src_reg_file = dst_reg_file = SSE;
         break;
       case 0x60: case 0x61: case 0x62: case 0x6C:
+      case 0x68: case 0x69: case 0x6A: case 0x6D:
         if (prefix[2] == 0x66) {
           src_reg_file = dst_reg_file = SSE;
           prefix[2] = 0;  // Clear prefix now. It has served its purpose as part of the opcode.
@@ -747,6 +804,10 @@ DISASSEMBLER_ENTRY(cmp,
           case 0x61: opcode1 = "punpcklwd"; break;
           case 0x62: opcode1 = "punpckldq"; break;
           case 0x6c: opcode1 = "punpcklqdq"; break;
+          case 0x68: opcode1 = "punpckhbw"; break;
+          case 0x69: opcode1 = "punpckhwd"; break;
+          case 0x6A: opcode1 = "punpckhdq"; break;
+          case 0x6D: opcode1 = "punpckhqdq"; break;
         }
         load = true;
         has_modrm = true;
@@ -1133,8 +1194,20 @@ DISASSEMBLER_ENTRY(cmp,
           opcode1 = opcode_tmp.c_str();
         }
         break;
+      case 0xD8:
+      case 0xD9:
+      case 0xDA:
+      case 0xDC:
+      case 0xDD:
+      case 0xDE:
       case 0xE0:
       case 0xE3:
+      case 0xE8:
+      case 0xE9:
+      case 0xEA:
+      case 0xEC:
+      case 0xED:
+      case 0xEE:
         if (prefix[2] == 0x66) {
           src_reg_file = dst_reg_file = SSE;
           prefix[2] = 0;  // clear prefix now it's served its purpose as part of the opcode
@@ -1142,8 +1215,20 @@ DISASSEMBLER_ENTRY(cmp,
           src_reg_file = dst_reg_file = MMX;
         }
         switch (*instr) {
+          case 0xD8: opcode1 = "psubusb"; break;
+          case 0xD9: opcode1 = "psubusw"; break;
+          case 0xDA: opcode1 = "pminub"; break;
+          case 0xDC: opcode1 = "paddusb"; break;
+          case 0xDD: opcode1 = "paddusw"; break;
+          case 0xDE: opcode1 = "pmaxub"; break;
           case 0xE0: opcode1 = "pavgb"; break;
           case 0xE3: opcode1 = "pavgw"; break;
+          case 0xE8: opcode1 = "psubsb"; break;
+          case 0xE9: opcode1 = "psubsw"; break;
+          case 0xEA: opcode1 = "pminsw"; break;
+          case 0xEC: opcode1 = "paddsb"; break;
+          case 0xED: opcode1 = "paddsw"; break;
+          case 0xEE: opcode1 = "pmaxsw"; break;
         }
         prefix[2] = 0;
         has_modrm = true;

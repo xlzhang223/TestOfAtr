@@ -36,12 +36,6 @@ std::ostream& operator<<(std::ostream& os, const Location& location);
  * A Location is an abstraction over the potential location
  * of an instruction. It could be in register or stack.
  */
-
-//zhang
-// i need some temp location ? how to get ?
-//end 
-
-
 class Location : public ValueObject {
  public:
   enum OutputOverlap {
@@ -501,10 +495,6 @@ static constexpr bool kIntrinsified = true;
  * The intent is to have the code for generating the instruction independent of
  * register allocation. A register allocator just has to provide a LocationSummary.
  */
-
-//zhang 
-//register pool
-//end
 class LocationSummary : public ArenaObject<kArenaAllocLocationSummary> {
  public:
   enum CallKind {
@@ -675,6 +665,11 @@ class LocationSummary : public ArenaObject<kArenaAllocLocationSummary> {
   }
 
  private:
+  LocationSummary(HInstruction* instruction,
+                  CallKind call_kind,
+                  bool intrinsified,
+                  ArenaAllocator* allocator);
+
   ArenaVector<Location> inputs_;
   ArenaVector<Location> temps_;
   const CallKind call_kind_;

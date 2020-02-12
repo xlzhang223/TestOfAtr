@@ -19,9 +19,7 @@
 
 #include <iosfwd>
 
-#include "base/logging.h"
 #include "base/macros.h"
-#include "globals.h"
 
 namespace art {
 namespace x86_64 {

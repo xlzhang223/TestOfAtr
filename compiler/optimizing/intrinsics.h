@@ -24,7 +24,6 @@
 
 namespace art {
 
-class CompilerDriver;
 class DexFile;
 
 // Positive floating-point infinities.
@@ -33,20 +32,6 @@ static constexpr uint64_t kPositiveInfinityDouble = UINT64_C(0x7ff0000000000000)
 
 static constexpr uint32_t kNanFloat = 0x7fc00000U;
 static constexpr uint64_t kNanDouble = 0x7ff8000000000000;
-
-// Recognize intrinsics from HInvoke nodes.
-class IntrinsicsRecognizer : public HOptimization {
- public:
-  IntrinsicsRecognizer(HGraph* graph, OptimizingCompilerStats* stats)
-      : HOptimization(graph, kIntrinsicsRecognizerPassName, stats) {}
-
-  void Run() OVERRIDE;
-
-  static constexpr const char* kIntrinsicsRecognizerPassName = "intrinsics_recognition";
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(IntrinsicsRecognizer);
-};
 
 class IntrinsicVisitor : public ValueObject {
  public:
@@ -63,7 +48,7 @@ class IntrinsicVisitor : public ValueObject {
         Visit ## Name(invoke);    \
         return;
 #include "intrinsics_list.h"
-INTRINSICS_LIST(OPTIMIZING_INTRINSICS)
+        INTRINSICS_LIST(OPTIMIZING_INTRINSICS)
 #undef INTRINSICS_LIST
 #undef OPTIMIZING_INTRINSICS
 
@@ -77,7 +62,7 @@ INTRINSICS_LIST(OPTIMIZING_INTRINSICS)
   virtual void Visit ## Name(HInvoke* invoke ATTRIBUTE_UNUSED) { \
   }
 #include "intrinsics_list.h"
-INTRINSICS_LIST(OPTIMIZING_INTRINSICS)
+  INTRINSICS_LIST(OPTIMIZING_INTRINSICS)
 #undef INTRINSICS_LIST
 #undef OPTIMIZING_INTRINSICS
 
@@ -100,7 +85,7 @@ INTRINSICS_LIST(OPTIMIZING_INTRINSICS)
 
     // We're moving potentially two or more locations to locations that could overlap, so we need
     // a parallel move resolver.
-    HParallelMove parallel_move(codegen->GetGraph()->GetArena());
+    HParallelMove parallel_move(codegen->GetGraph()->GetAllocator());
 
     for (size_t i = 0; i < invoke->GetNumberOfArguments(); i++) {
       HInstruction* input = invoke->InputAt(i);
@@ -118,36 +103,46 @@ INTRINSICS_LIST(OPTIMIZING_INTRINSICS)
                                              Location return_location,
                                              Location first_argument_location);
 
-  // Temporary data structure for holding Integer.valueOf useful data. We only
-  // use it if the mirror::Class* are in the boot image, so it is fine to keep raw
-  // mirror::Class pointers in this structure.
+  // Temporary data structure for holding Integer.valueOf data for generating code.
+  // We only use it if the boot image contains the IntegerCache objects.
   struct IntegerValueOfInfo {
-    IntegerValueOfInfo()
-        : integer_cache(nullptr),
-          integer(nullptr),
-          cache(nullptr),
-          low(0),
-          high(0),
-          value_offset(0) {}
+    static constexpr uint32_t kInvalidReference = static_cast<uint32_t>(-1);
 
-    // The java.lang.IntegerCache class.
-    mirror::Class* integer_cache;
-    // The java.lang.Integer class.
-    mirror::Class* integer;
-    // Value of java.lang.IntegerCache#cache.
-    mirror::ObjectArray<mirror::Object>* cache;
-    // Value of java.lang.IntegerCache#low.
+    IntegerValueOfInfo();
+
+    // Offset of the Integer.value field for initializing a newly allocated instance.
+    uint32_t value_offset;
+    // The low value in the cache.
     int32_t low;
-    // Value of java.lang.IntegerCache#high.
-    int32_t high;
-    // The offset of java.lang.Integer.value.
-    int32_t value_offset;
+    // The length of the cache array.
+    uint32_t length;
+
+    // Boot image offset of java.lang.Integer for allocating an instance.
+    uint32_t integer_boot_image_offset;  // Set to kInvalidReference when compiling the boot image.
+
+    // This union contains references to the boot image. For app AOT or JIT compilation,
+    // these are the boot image offsets of the target. For boot image compilation, the
+    // location shall be known only at link time, so we encode a symbolic reference using
+    // IntrinsicObjects::EncodePatch().
+    union {
+      // The target value for a constant input in the cache range. If the constant input
+      // is out of range (use `low` and `length` to check), this value is bogus (set to
+      // kInvalidReference) and the code must allocate a new Integer.
+      uint32_t value_boot_image_reference;
+
+      // The cache array data used for a non-constant input in the cache range.
+      // If the input is out of range, the code must allocate a new Integer.
+      uint32_t array_data_boot_image_reference;
+    };
   };
 
-  static IntegerValueOfInfo ComputeIntegerValueOfInfo();
+  static IntegerValueOfInfo ComputeIntegerValueOfInfo(
+      HInvoke* invoke, const CompilerOptions& compiler_options);
 
  protected:
   IntrinsicVisitor() {}
+
+  static void AssertNonMovableStringClass();
 
  private:
   DISALLOW_COPY_AND_ASSIGN(IntrinsicVisitor);
@@ -246,35 +241,89 @@ void IntrinsicCodeGenerator ## Arch::Visit ## Name(HInvoke* invoke ATTRIBUTE_UNU
 
 // Defines a list of unreached intrinsics: that is, method calls that are recognized as
 // an intrinsic, and then always converted into HIR instructions before they reach any
-// architecture-specific intrinsics code generator.
+// architecture-specific intrinsics code generator. This only applies to non-baseline
+// compilation.
 #define UNREACHABLE_INTRINSIC(Arch, Name)                                \
 void IntrinsicLocationsBuilder ## Arch::Visit ## Name(HInvoke* invoke) { \
-  LOG(FATAL) << "Unreachable: intrinsic " << invoke->GetIntrinsic()      \
-             << " should have been converted to HIR";                    \
+  if (Runtime::Current()->IsAotCompiler() &&                             \
+      !codegen_->GetCompilerOptions().IsBaseline()) {                    \
+    LOG(FATAL) << "Unreachable: intrinsic " << invoke->GetIntrinsic()    \
+               << " should have been converted to HIR";                  \
+  }                                                                      \
 }                                                                        \
 void IntrinsicCodeGenerator ## Arch::Visit ## Name(HInvoke* invoke) {    \
   LOG(FATAL) << "Unreachable: intrinsic " << invoke->GetIntrinsic()      \
              << " should have been converted to HIR";                    \
 }
-#define UNREACHABLE_INTRINSICS(Arch)                \
-UNREACHABLE_INTRINSIC(Arch, FloatFloatToIntBits)    \
-UNREACHABLE_INTRINSIC(Arch, DoubleDoubleToLongBits) \
-UNREACHABLE_INTRINSIC(Arch, FloatIsNaN)             \
-UNREACHABLE_INTRINSIC(Arch, DoubleIsNaN)            \
-UNREACHABLE_INTRINSIC(Arch, IntegerRotateLeft)      \
-UNREACHABLE_INTRINSIC(Arch, LongRotateLeft)         \
-UNREACHABLE_INTRINSIC(Arch, IntegerRotateRight)     \
-UNREACHABLE_INTRINSIC(Arch, LongRotateRight)        \
-UNREACHABLE_INTRINSIC(Arch, IntegerCompare)         \
-UNREACHABLE_INTRINSIC(Arch, LongCompare)            \
-UNREACHABLE_INTRINSIC(Arch, IntegerSignum)          \
-UNREACHABLE_INTRINSIC(Arch, LongSignum)             \
-UNREACHABLE_INTRINSIC(Arch, StringCharAt)           \
-UNREACHABLE_INTRINSIC(Arch, StringIsEmpty)          \
-UNREACHABLE_INTRINSIC(Arch, StringLength)           \
-UNREACHABLE_INTRINSIC(Arch, UnsafeLoadFence)        \
-UNREACHABLE_INTRINSIC(Arch, UnsafeStoreFence)       \
-UNREACHABLE_INTRINSIC(Arch, UnsafeFullFence)
+#define UNREACHABLE_INTRINSICS(Arch)                            \
+UNREACHABLE_INTRINSIC(Arch, MathMinIntInt)                      \
+UNREACHABLE_INTRINSIC(Arch, MathMinLongLong)                    \
+UNREACHABLE_INTRINSIC(Arch, MathMinFloatFloat)                  \
+UNREACHABLE_INTRINSIC(Arch, MathMinDoubleDouble)                \
+UNREACHABLE_INTRINSIC(Arch, MathMaxIntInt)                      \
+UNREACHABLE_INTRINSIC(Arch, MathMaxLongLong)                    \
+UNREACHABLE_INTRINSIC(Arch, MathMaxFloatFloat)                  \
+UNREACHABLE_INTRINSIC(Arch, MathMaxDoubleDouble)                \
+UNREACHABLE_INTRINSIC(Arch, MathAbsInt)                         \
+UNREACHABLE_INTRINSIC(Arch, MathAbsLong)                        \
+UNREACHABLE_INTRINSIC(Arch, MathAbsFloat)                       \
+UNREACHABLE_INTRINSIC(Arch, MathAbsDouble)                      \
+UNREACHABLE_INTRINSIC(Arch, FloatFloatToIntBits)                \
+UNREACHABLE_INTRINSIC(Arch, DoubleDoubleToLongBits)             \
+UNREACHABLE_INTRINSIC(Arch, FloatIsNaN)                         \
+UNREACHABLE_INTRINSIC(Arch, DoubleIsNaN)                        \
+UNREACHABLE_INTRINSIC(Arch, IntegerRotateLeft)                  \
+UNREACHABLE_INTRINSIC(Arch, LongRotateLeft)                     \
+UNREACHABLE_INTRINSIC(Arch, IntegerRotateRight)                 \
+UNREACHABLE_INTRINSIC(Arch, LongRotateRight)                    \
+UNREACHABLE_INTRINSIC(Arch, IntegerCompare)                     \
+UNREACHABLE_INTRINSIC(Arch, LongCompare)                        \
+UNREACHABLE_INTRINSIC(Arch, IntegerSignum)                      \
+UNREACHABLE_INTRINSIC(Arch, LongSignum)                         \
+UNREACHABLE_INTRINSIC(Arch, StringCharAt)                       \
+UNREACHABLE_INTRINSIC(Arch, StringIsEmpty)                      \
+UNREACHABLE_INTRINSIC(Arch, StringLength)                       \
+UNREACHABLE_INTRINSIC(Arch, UnsafeLoadFence)                    \
+UNREACHABLE_INTRINSIC(Arch, UnsafeStoreFence)                   \
+UNREACHABLE_INTRINSIC(Arch, UnsafeFullFence)                    \
+UNREACHABLE_INTRINSIC(Arch, VarHandleFullFence)                 \
+UNREACHABLE_INTRINSIC(Arch, VarHandleAcquireFence)              \
+UNREACHABLE_INTRINSIC(Arch, VarHandleReleaseFence)              \
+UNREACHABLE_INTRINSIC(Arch, VarHandleLoadLoadFence)             \
+UNREACHABLE_INTRINSIC(Arch, VarHandleStoreStoreFence)           \
+UNREACHABLE_INTRINSIC(Arch, MethodHandleInvokeExact)            \
+UNREACHABLE_INTRINSIC(Arch, MethodHandleInvoke)                 \
+UNREACHABLE_INTRINSIC(Arch, VarHandleCompareAndExchange)        \
+UNREACHABLE_INTRINSIC(Arch, VarHandleCompareAndExchangeAcquire) \
+UNREACHABLE_INTRINSIC(Arch, VarHandleCompareAndExchangeRelease) \
+UNREACHABLE_INTRINSIC(Arch, VarHandleCompareAndSet)             \
+UNREACHABLE_INTRINSIC(Arch, VarHandleGet)                       \
+UNREACHABLE_INTRINSIC(Arch, VarHandleGetAcquire)                \
+UNREACHABLE_INTRINSIC(Arch, VarHandleGetAndAdd)                 \
+UNREACHABLE_INTRINSIC(Arch, VarHandleGetAndAddAcquire)          \
+UNREACHABLE_INTRINSIC(Arch, VarHandleGetAndAddRelease)          \
+UNREACHABLE_INTRINSIC(Arch, VarHandleGetAndBitwiseAnd)          \
+UNREACHABLE_INTRINSIC(Arch, VarHandleGetAndBitwiseAndAcquire)   \
+UNREACHABLE_INTRINSIC(Arch, VarHandleGetAndBitwiseAndRelease)   \
+UNREACHABLE_INTRINSIC(Arch, VarHandleGetAndBitwiseOr)           \
+UNREACHABLE_INTRINSIC(Arch, VarHandleGetAndBitwiseOrAcquire)    \
+UNREACHABLE_INTRINSIC(Arch, VarHandleGetAndBitwiseOrRelease)    \
+UNREACHABLE_INTRINSIC(Arch, VarHandleGetAndBitwiseXor)          \
+UNREACHABLE_INTRINSIC(Arch, VarHandleGetAndBitwiseXorAcquire)   \
+UNREACHABLE_INTRINSIC(Arch, VarHandleGetAndBitwiseXorRelease)   \
+UNREACHABLE_INTRINSIC(Arch, VarHandleGetAndSet)                 \
+UNREACHABLE_INTRINSIC(Arch, VarHandleGetAndSetAcquire)          \
+UNREACHABLE_INTRINSIC(Arch, VarHandleGetAndSetRelease)          \
+UNREACHABLE_INTRINSIC(Arch, VarHandleGetOpaque)                 \
+UNREACHABLE_INTRINSIC(Arch, VarHandleGetVolatile)               \
+UNREACHABLE_INTRINSIC(Arch, VarHandleSet)                       \
+UNREACHABLE_INTRINSIC(Arch, VarHandleSetOpaque)                 \
+UNREACHABLE_INTRINSIC(Arch, VarHandleSetRelease)                \
+UNREACHABLE_INTRINSIC(Arch, VarHandleSetVolatile)               \
+UNREACHABLE_INTRINSIC(Arch, VarHandleWeakCompareAndSet)         \
+UNREACHABLE_INTRINSIC(Arch, VarHandleWeakCompareAndSetAcquire)  \
+UNREACHABLE_INTRINSIC(Arch, VarHandleWeakCompareAndSetPlain)    \
+UNREACHABLE_INTRINSIC(Arch, VarHandleWeakCompareAndSetRelease)
 
 template <typename IntrinsicLocationsBuilder, typename Codegenerator>
 bool IsCallFreeIntrinsic(HInvoke* invoke, Codegenerator* codegen) {

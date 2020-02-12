@@ -31,15 +31,12 @@ cc_defaults {
         "libbase",
     ],
     target: {
-        android: {
-            shared_libs: ["libcutils"],
-        },
         host: {
             shared_libs: ["libziparchive"],
         },
     },
-    include_dirs: [
-        "art/cmdline",
+    header_libs: [
+        "art_cmdlineparser_headers",
     ],
     multilib: {
         lib32: {
@@ -57,6 +54,7 @@ art_cc_binary {
     defaults: ["imgdiag-defaults"],
     shared_libs: [
         "libart",
+        "libartbase",
         "libart-compiler",
     ],
 }
@@ -64,11 +62,12 @@ art_cc_binary {
 art_cc_binary {
     name: "imgdiagd",
     defaults: [
-        "imgdiag-defaults",
         "art_debug_defaults",
+        "imgdiag-defaults",
     ],
     shared_libs: [
         "libartd",
+        "libartbased",
         "libartd-compiler",
     ],
 }

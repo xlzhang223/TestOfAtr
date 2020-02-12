@@ -36,7 +36,7 @@ class CHAGuardVisitor : HGraphVisitor {
       : HGraphVisitor(graph),
         block_has_cha_guard_(GetGraph()->GetBlocks().size(),
                              0,
-                             graph->GetArena()->Adapter(kArenaAllocCHA)),
+                             graph->GetAllocator()->Adapter(kArenaAllocCHA)),
         instruction_iterator_(nullptr) {
     number_of_guards_to_visit_ = GetGraph()->GetNumberOfCHAGuards();
     DCHECK_NE(number_of_guards_to_visit_, 0u);
@@ -44,9 +44,9 @@ class CHAGuardVisitor : HGraphVisitor {
     GetGraph()->SetNumberOfCHAGuards(0);
   }
 
-  void VisitShouldDeoptimizeFlag(HShouldDeoptimizeFlag* flag) OVERRIDE;
+  void VisitShouldDeoptimizeFlag(HShouldDeoptimizeFlag* flag) override;
 
-  void VisitBasicBlock(HBasicBlock* block) OVERRIDE;
+  void VisitBasicBlock(HBasicBlock* block) override;
 
  private:
   void RemoveGuard(HShouldDeoptimizeFlag* flag);
@@ -202,8 +202,8 @@ bool CHAGuardVisitor::HoistGuard(HShouldDeoptimizeFlag* flag,
     HInstruction* suspend = loop_info->GetSuspendCheck();
     // Need a new deoptimize instruction that copies the environment
     // of the suspend instruction for the loop.
-    HDeoptimize* deoptimize = new (GetGraph()->GetArena()) HDeoptimize(
-        GetGraph()->GetArena(), compare, DeoptimizationKind::kCHA, suspend->GetDexPc());
+    HDeoptimize* deoptimize = new (GetGraph()->GetAllocator()) HDeoptimize(
+        GetGraph()->GetAllocator(), compare, DeoptimizationKind::kCHA, suspend->GetDexPc());
     pre_header->InsertInstructionBefore(deoptimize, pre_header->GetLastInstruction());
     deoptimize->CopyEnvironmentFromWithLoopPhiAdjustment(
         suspend->GetEnvironment(), loop_info->GetHeader());
@@ -241,14 +241,15 @@ void CHAGuardVisitor::VisitShouldDeoptimizeFlag(HShouldDeoptimizeFlag* flag) {
   GetGraph()->IncrementNumberOfCHAGuards();
 }
 
-void CHAGuardOptimization::Run() {
+bool CHAGuardOptimization::Run() {
   if (graph_->GetNumberOfCHAGuards() == 0) {
-    return;
+    return false;
   }
   CHAGuardVisitor visitor(graph_);
   for (HBasicBlock* block : graph_->GetReversePostOrder()) {
     visitor.VisitBasicBlock(block);
   }
+  return true;
 }
 
 }  // namespace art

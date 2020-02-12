@@ -155,11 +155,11 @@ public class Main {
         } catch (BadError e) {
             System.out.println(e);
         } catch (Throwable t) {
-            t.printStackTrace();
+            t.printStackTrace(System.out);
         }
         try {
-            // Before splitting mirror::Class::kStatusError into
-            // kStatusErrorUnresolved and kStatusErrorResolved,
+            // Before splitting ClassStatus::kError into
+            // ClassStatus::kErrorUnresolved and ClassStatus::kErrorResolved,
             // this would trigger a
             //     CHECK(super_class->IsResolved())
             // failure in
@@ -171,11 +171,11 @@ public class Main {
             throw new IllegalStateException("Should not reach here.");
         } catch (NoClassDefFoundError ncdfe) {
             if (!(ncdfe.getCause() instanceof BadError)) {
-                ncdfe.getCause().printStackTrace();
+                ncdfe.getCause().printStackTrace(System.out);
             }
         } catch (VerifyError e) {
         } catch (Throwable t) {
-            t.printStackTrace();
+            t.printStackTrace(System.out);
         }
     }
 
@@ -186,10 +186,10 @@ public class Main {
         } catch (Error e) {
             System.out.println(e);
         } catch (Throwable t) {
-            t.printStackTrace();
+            t.printStackTrace(System.out);
         }
-        // Before splitting mirror::Class::kStatusError into
-        // kStatusErrorUnresolved and kStatusErrorResolved,
+        // Before splitting ClassStatus::kError into
+        // ClassStatus::kErrorUnresolved and ClassStatus::kErrorResolved,
         // the exception from wrapper 1 would have been
         // wrapped in NoClassDefFoundError but the exception
         // from wrapper 2 would have been unwrapped.
@@ -200,7 +200,7 @@ public class Main {
             System.out.println(ncdfe);
             System.out.println("  cause: " + ncdfe.getCause());
         } catch (Throwable t) {
-            t.printStackTrace();
+            t.printStackTrace(System.out);
         }
         try {
             MultiDexBadInitWrapper2.setDummy(1);
@@ -209,7 +209,7 @@ public class Main {
             System.out.println(ncdfe);
             System.out.println("  cause: " + ncdfe.getCause());
         } catch (Throwable t) {
-            t.printStackTrace();
+            t.printStackTrace(System.out);
         }
     }
 }

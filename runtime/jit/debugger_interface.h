@@ -18,31 +18,46 @@
 #define ART_RUNTIME_JIT_DEBUGGER_INTERFACE_H_
 
 #include <inttypes.h>
-#include <memory>
 #include <vector>
+
+#include "arch/instruction_set_features.h"
+#include "base/array_ref.h"
+#include "base/locks.h"
 
 namespace art {
 
-extern "C" {
-  struct JITCodeEntry;
-}
+class DexFile;
+class Thread;
 
-// Notify native debugger about new JITed code by passing in-memory ELF.
-// It takes ownership of the in-memory ELF file.
-JITCodeEntry* CreateJITCodeEntry(std::vector<uint8_t> symfile);
+// This method is declared in the compiler library.
+// We need to pass it by pointer to be able to call it from runtime.
+typedef std::vector<uint8_t> PackElfFileForJITFunction(
+    InstructionSet isa,
+    const InstructionSetFeatures* features,
+    std::vector<ArrayRef<const uint8_t>>& added_elf_files,
+    std::vector<const void*>& removed_symbols,
+    /*out*/ size_t* num_symbols);
 
-// Notify native debugger that JITed code has been removed.
-// It also releases the associated in-memory ELF file.
-void DeleteJITCodeEntry(JITCodeEntry* entry);
+// Notify native tools (e.g. libunwind) that DEX file has been opened.
+void AddNativeDebugInfoForDex(Thread* self, const DexFile* dexfile);
 
-// Notify native debugger about new JITed code by passing in-memory ELF.
-// The address is used only to uniquely identify the entry.
-// It takes ownership of the in-memory ELF file.
-void CreateJITCodeEntryForAddress(uintptr_t address, std::vector<uint8_t> symfile);
+// Notify native tools (e.g. libunwind) that DEX file has been closed.
+void RemoveNativeDebugInfoForDex(Thread* self, const DexFile* dexfile);
 
-// Notify native debugger that JITed code has been removed.
-// Returns false if entry for the given address was not found.
-bool DeleteJITCodeEntryForAddress(uintptr_t address);
+// Notify native tools (e.g. libunwind) that JIT has compiled a new method.
+// The method will make copy of the passed ELF file (to shrink it to the minimum size).
+void AddNativeDebugInfoForJit(Thread* self,
+                              const void* code_ptr,
+                              const std::vector<uint8_t>& symfile,
+                              PackElfFileForJITFunction pack,
+                              InstructionSet isa,
+                              const InstructionSetFeatures* features);
+
+// Notify native tools (e.g. libunwind) that JIT code has been garbage collected.
+void RemoveNativeDebugInfoForJit(Thread* self, const void* code_ptr);
+
+// Returns approximate memory used by debug info for JIT code.
+size_t GetJitMiniDebugInfoMemUsage();
 
 }  // namespace art
 

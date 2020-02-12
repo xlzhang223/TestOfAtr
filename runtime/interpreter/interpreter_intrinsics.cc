@@ -16,8 +16,8 @@
 
 #include "interpreter/interpreter_intrinsics.h"
 
-#include "compiler/intrinsics_enum.h"
-#include "dex_instruction.h"
+#include "dex/dex_instruction.h"
+#include "intrinsics_enum.h"
 #include "interpreter/interpreter_common.h"
 
 namespace art {
@@ -91,7 +91,7 @@ BINARY_II_INTRINSIC(MterpIntegerRotateLeft, (Rot<int32_t, true>), SetI);
 // java.lang.Integer.signum(I)I
 UNARY_INTRINSIC(MterpIntegerSignum, Signum, GetVReg, SetI);
 
-// java.lang.Long.reverse(I)I
+// java.lang.Long.reverse(J)J
 UNARY_INTRINSIC(MterpLongReverse, ReverseBits64, GetVRegLong, SetJ);
 
 // java.lang.Long.reverseBytes(J)J
@@ -116,10 +116,10 @@ UNARY_INTRINSIC(MterpLongNumberOfLeadingZeros, JAVASTYLE_CLZ, GetVRegLong, SetJ)
 UNARY_INTRINSIC(MterpLongNumberOfTrailingZeros, JAVASTYLE_CTZ, GetVRegLong, SetJ);
 
 // java.lang.Long.rotateRight(JI)J
-BINARY_JJ_INTRINSIC(MterpLongRotateRight, (Rot<int64_t, false>), SetJ);
+BINARY_JI_INTRINSIC(MterpLongRotateRight, (Rot<int64_t, false>), SetJ);
 
 // java.lang.Long.rotateLeft(JI)J
-BINARY_JJ_INTRINSIC(MterpLongRotateLeft, (Rot<int64_t, true>), SetJ);
+BINARY_JI_INTRINSIC(MterpLongRotateLeft, (Rot<int64_t, true>), SetJ);
 
 // java.lang.Long.signum(J)I
 UNARY_INTRINSIC(MterpLongSignum, Signum, GetVRegLong, SetI);
@@ -186,7 +186,7 @@ static ALWAYS_INLINE bool MterpStringCharAt(ShadowFrame* shadow_frame,
     REQUIRES_SHARED(Locks::mutator_lock_) {
   uint32_t arg[Instruction::kMaxVarArgRegs] = {};
   inst->GetVarArgs(arg, inst_data);
-  mirror::String* str = shadow_frame->GetVRegReference(arg[0])->AsString();
+  ObjPtr<mirror::String> str = shadow_frame->GetVRegReference(arg[0])->AsString();
   int length = str->GetLength();
   int index = shadow_frame->GetVReg(arg[1]);
   uint16_t res;
@@ -210,8 +210,8 @@ static ALWAYS_INLINE bool MterpStringCompareTo(ShadowFrame* shadow_frame,
     REQUIRES_SHARED(Locks::mutator_lock_) {
   uint32_t arg[Instruction::kMaxVarArgRegs] = {};
   inst->GetVarArgs(arg, inst_data);
-  mirror::String* str = shadow_frame->GetVRegReference(arg[0])->AsString();
-  mirror::Object* arg1 = shadow_frame->GetVRegReference(arg[1]);
+  ObjPtr<mirror::String> str = shadow_frame->GetVRegReference(arg[0])->AsString();
+  ObjPtr<mirror::Object> arg1 = shadow_frame->GetVRegReference(arg[1]);
   if (arg1 == nullptr) {
     return false;
   }
@@ -227,7 +227,7 @@ static ALWAYS_INLINE bool Mterp##name(ShadowFrame* shadow_frame, \
     REQUIRES_SHARED(Locks::mutator_lock_) {                      \
   uint32_t arg[Instruction::kMaxVarArgRegs] = {};                \
   inst->GetVarArgs(arg, inst_data);                              \
-  mirror::String* str = shadow_frame->GetVRegReference(arg[0])->AsString(); \
+  ObjPtr<mirror::String> str = shadow_frame->GetVRegReference(arg[0])->AsString(); \
   int ch = shadow_frame->GetVReg(arg[1]);                        \
   if (ch >= 0x10000) {                                           \
     /* Punt if supplementary char. */                            \
@@ -251,7 +251,7 @@ static ALWAYS_INLINE bool Mterp##name(ShadowFrame* shadow_frame, \
     REQUIRES_SHARED(Locks::mutator_lock_) {                      \
   uint32_t arg[Instruction::kMaxVarArgRegs] = {};                \
   inst->GetVarArgs(arg, inst_data);                              \
-  mirror::String* str = shadow_frame->GetVRegReference(arg[0])->AsString(); \
+  ObjPtr<mirror::String> str = shadow_frame->GetVRegReference(arg[0])->AsString(); \
   result_register->operation;                                    \
   return true;                                                   \
 }
@@ -271,11 +271,11 @@ static ALWAYS_INLINE bool MterpStringGetCharsNoCheck(ShadowFrame* shadow_frame,
   // Start, end & index already checked by caller - won't throw.  Destination is uncompressed.
   uint32_t arg[Instruction::kMaxVarArgRegs] = {};
   inst->GetVarArgs(arg, inst_data);
-  mirror::String* str = shadow_frame->GetVRegReference(arg[0])->AsString();
+  ObjPtr<mirror::String> str = shadow_frame->GetVRegReference(arg[0])->AsString();
   int32_t start = shadow_frame->GetVReg(arg[1]);
   int32_t end = shadow_frame->GetVReg(arg[2]);
   int32_t index = shadow_frame->GetVReg(arg[4]);
-  mirror::CharArray* array = shadow_frame->GetVRegReference(arg[3])->AsCharArray();
+  ObjPtr<mirror::CharArray> array = shadow_frame->GetVRegReference(arg[3])->AsCharArray();
   uint16_t* dst = array->GetData() + index;
   int32_t len = (end - start);
   if (str->IsCompressed()) {
@@ -298,11 +298,11 @@ static ALWAYS_INLINE bool MterpStringEquals(ShadowFrame* shadow_frame,
     REQUIRES_SHARED(Locks::mutator_lock_) {
   uint32_t arg[Instruction::kMaxVarArgRegs] = {};
   inst->GetVarArgs(arg, inst_data);
-  mirror::String* str = shadow_frame->GetVRegReference(arg[0])->AsString();
-  mirror::Object* obj = shadow_frame->GetVRegReference(arg[1]);
+  ObjPtr<mirror::String> str = shadow_frame->GetVRegReference(arg[0])->AsString();
+  ObjPtr<mirror::Object> obj = shadow_frame->GetVRegReference(arg[1]);
   bool res = false;  // Assume not equal.
   if ((obj != nullptr) && obj->IsString()) {
-    mirror::String* str2 = obj->AsString();
+    ObjPtr<mirror::String> str2 = obj->AsString();
     if (str->GetCount() == str2->GetCount()) {
       // Length & compression status are same.  Can use block compare.
       void* bytes1;
@@ -320,6 +320,92 @@ static ALWAYS_INLINE bool MterpStringEquals(ShadowFrame* shadow_frame,
     }
   }
   result_register->SetZ(res);
+  return true;
+}
+
+#define VARHANDLE_FENCE_INTRINSIC(name, std_memory_operation)              \
+static ALWAYS_INLINE bool name(ShadowFrame* shadow_frame ATTRIBUTE_UNUSED, \
+                               const Instruction* inst ATTRIBUTE_UNUSED,   \
+                               uint16_t inst_data ATTRIBUTE_UNUSED,        \
+                               JValue* result_register ATTRIBUTE_UNUSED)   \
+    REQUIRES_SHARED(Locks::mutator_lock_) {                                \
+  std::atomic_thread_fence(std_memory_operation);                          \
+  return true;                                                             \
+}
+
+// The VarHandle fence methods are static (unlike sun.misc.Unsafe versions).
+// The fences for the LoadLoadFence and StoreStoreFence are stronger
+// than strictly required, but the impact should be marginal.
+VARHANDLE_FENCE_INTRINSIC(MterpVarHandleFullFence, std::memory_order_seq_cst)
+VARHANDLE_FENCE_INTRINSIC(MterpVarHandleAcquireFence, std::memory_order_acquire)
+VARHANDLE_FENCE_INTRINSIC(MterpVarHandleReleaseFence, std::memory_order_release)
+VARHANDLE_FENCE_INTRINSIC(MterpVarHandleLoadLoadFence, std::memory_order_acquire)
+VARHANDLE_FENCE_INTRINSIC(MterpVarHandleStoreStoreFence, std::memory_order_release)
+
+#define METHOD_HANDLE_INVOKE_INTRINSIC(name)                                                      \
+static ALWAYS_INLINE bool Mterp##name(ShadowFrame* shadow_frame,                                  \
+                               const Instruction* inst,                                           \
+                               uint16_t inst_data,                                                \
+                               JValue* result)                                                    \
+    REQUIRES_SHARED(Locks::mutator_lock_) {                                                       \
+  if (inst->Opcode() == Instruction::INVOKE_POLYMORPHIC) {                                        \
+    return DoInvokePolymorphic<false>(Thread::Current(), *shadow_frame, inst, inst_data, result); \
+  } else {                                                                                        \
+    return DoInvokePolymorphic<true>(Thread::Current(), *shadow_frame, inst, inst_data, result);  \
+  }                                                                                               \
+}
+
+METHOD_HANDLE_INVOKE_INTRINSIC(MethodHandleInvokeExact)
+METHOD_HANDLE_INVOKE_INTRINSIC(MethodHandleInvoke)
+
+#define VAR_HANDLE_ACCESSOR_INTRINSIC(name)                                   \
+static ALWAYS_INLINE bool Mterp##name(ShadowFrame* shadow_frame,              \
+                               const Instruction* inst,                       \
+                               uint16_t inst_data,                            \
+                               JValue* result)                                \
+    REQUIRES_SHARED(Locks::mutator_lock_) {                                   \
+  return Do##name(Thread::Current(), *shadow_frame, inst, inst_data, result); \
+}
+
+VAR_HANDLE_ACCESSOR_INTRINSIC(VarHandleCompareAndExchange)
+VAR_HANDLE_ACCESSOR_INTRINSIC(VarHandleCompareAndExchangeAcquire)
+VAR_HANDLE_ACCESSOR_INTRINSIC(VarHandleCompareAndExchangeRelease)
+VAR_HANDLE_ACCESSOR_INTRINSIC(VarHandleCompareAndSet)
+VAR_HANDLE_ACCESSOR_INTRINSIC(VarHandleGet);
+VAR_HANDLE_ACCESSOR_INTRINSIC(VarHandleGetAcquire)
+VAR_HANDLE_ACCESSOR_INTRINSIC(VarHandleGetAndAdd)
+VAR_HANDLE_ACCESSOR_INTRINSIC(VarHandleGetAndAddAcquire)
+VAR_HANDLE_ACCESSOR_INTRINSIC(VarHandleGetAndAddRelease)
+VAR_HANDLE_ACCESSOR_INTRINSIC(VarHandleGetAndBitwiseAnd)
+VAR_HANDLE_ACCESSOR_INTRINSIC(VarHandleGetAndBitwiseAndAcquire)
+VAR_HANDLE_ACCESSOR_INTRINSIC(VarHandleGetAndBitwiseAndRelease)
+VAR_HANDLE_ACCESSOR_INTRINSIC(VarHandleGetAndBitwiseOr)
+VAR_HANDLE_ACCESSOR_INTRINSIC(VarHandleGetAndBitwiseOrAcquire)
+VAR_HANDLE_ACCESSOR_INTRINSIC(VarHandleGetAndBitwiseOrRelease)
+VAR_HANDLE_ACCESSOR_INTRINSIC(VarHandleGetAndBitwiseXor)
+VAR_HANDLE_ACCESSOR_INTRINSIC(VarHandleGetAndBitwiseXorAcquire)
+VAR_HANDLE_ACCESSOR_INTRINSIC(VarHandleGetAndBitwiseXorRelease)
+VAR_HANDLE_ACCESSOR_INTRINSIC(VarHandleGetAndSet)
+VAR_HANDLE_ACCESSOR_INTRINSIC(VarHandleGetAndSetAcquire)
+VAR_HANDLE_ACCESSOR_INTRINSIC(VarHandleGetAndSetRelease)
+VAR_HANDLE_ACCESSOR_INTRINSIC(VarHandleGetOpaque)
+VAR_HANDLE_ACCESSOR_INTRINSIC(VarHandleGetVolatile)
+VAR_HANDLE_ACCESSOR_INTRINSIC(VarHandleSet)
+VAR_HANDLE_ACCESSOR_INTRINSIC(VarHandleSetOpaque)
+VAR_HANDLE_ACCESSOR_INTRINSIC(VarHandleSetRelease)
+VAR_HANDLE_ACCESSOR_INTRINSIC(VarHandleSetVolatile)
+VAR_HANDLE_ACCESSOR_INTRINSIC(VarHandleWeakCompareAndSet)
+VAR_HANDLE_ACCESSOR_INTRINSIC(VarHandleWeakCompareAndSetAcquire)
+VAR_HANDLE_ACCESSOR_INTRINSIC(VarHandleWeakCompareAndSetPlain)
+VAR_HANDLE_ACCESSOR_INTRINSIC(VarHandleWeakCompareAndSetRelease)
+
+static ALWAYS_INLINE bool MterpReachabilityFence(ShadowFrame* shadow_frame ATTRIBUTE_UNUSED,
+                                                 const Instruction* inst ATTRIBUTE_UNUSED,
+                                                 uint16_t inst_data ATTRIBUTE_UNUSED,
+                                                 JValue* result_register ATTRIBUTE_UNUSED)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  // Do nothing; Its only purpose is to keep the argument reference live
+  // at preceding suspend points. That's automatic in the interpreter.
   return true;
 }
 
@@ -402,6 +488,7 @@ bool MterpHandleIntrinsic(ShadowFrame* shadow_frame,
     UNIMPLEMENTED_CASE(MathLog /* (D)D */)
     UNIMPLEMENTED_CASE(MathLog10 /* (D)D */)
     UNIMPLEMENTED_CASE(MathNextAfter /* (DD)D */)
+    UNIMPLEMENTED_CASE(MathPow /* (DD)D */)
     UNIMPLEMENTED_CASE(MathSinh /* (D)D */)
     INTRINSIC_CASE(MathTan)
     UNIMPLEMENTED_CASE(MathTanh /* (D)D */)
@@ -422,6 +509,7 @@ bool MterpHandleIntrinsic(ShadowFrame* shadow_frame,
     UNIMPLEMENTED_CASE(MemoryPokeIntNative /* (JI)V */)
     UNIMPLEMENTED_CASE(MemoryPokeLongNative /* (JJ)V */)
     UNIMPLEMENTED_CASE(MemoryPokeShortNative /* (JS)V */)
+    INTRINSIC_CASE(ReachabilityFence /* (Ljava/lang/Object;)V */)
     INTRINSIC_CASE(StringCharAt)
     INTRINSIC_CASE(StringCompareTo)
     INTRINSIC_CASE(StringEquals)
@@ -469,6 +557,48 @@ bool MterpHandleIntrinsic(ShadowFrame* shadow_frame,
     UNIMPLEMENTED_CASE(UnsafeFullFence /* ()V */)
     UNIMPLEMENTED_CASE(ReferenceGetReferent /* ()Ljava/lang/Object; */)
     UNIMPLEMENTED_CASE(IntegerValueOf /* (I)Ljava/lang/Integer; */)
+    UNIMPLEMENTED_CASE(ThreadInterrupted /* ()Z */)
+    UNIMPLEMENTED_CASE(CRC32Update /* (II)I */)
+    UNIMPLEMENTED_CASE(CRC32UpdateBytes /* (I[BII)I */)
+    UNIMPLEMENTED_CASE(CRC32UpdateByteBuffer /* (IJII)I */)
+    INTRINSIC_CASE(VarHandleFullFence)
+    INTRINSIC_CASE(VarHandleAcquireFence)
+    INTRINSIC_CASE(VarHandleReleaseFence)
+    INTRINSIC_CASE(VarHandleLoadLoadFence)
+    INTRINSIC_CASE(VarHandleStoreStoreFence)
+    INTRINSIC_CASE(MethodHandleInvokeExact)
+    INTRINSIC_CASE(MethodHandleInvoke)
+    INTRINSIC_CASE(VarHandleCompareAndExchange)
+    INTRINSIC_CASE(VarHandleCompareAndExchangeAcquire)
+    INTRINSIC_CASE(VarHandleCompareAndExchangeRelease)
+    INTRINSIC_CASE(VarHandleCompareAndSet)
+    INTRINSIC_CASE(VarHandleGet)
+    INTRINSIC_CASE(VarHandleGetAcquire)
+    INTRINSIC_CASE(VarHandleGetAndAdd)
+    INTRINSIC_CASE(VarHandleGetAndAddAcquire)
+    INTRINSIC_CASE(VarHandleGetAndAddRelease)
+    INTRINSIC_CASE(VarHandleGetAndBitwiseAnd)
+    INTRINSIC_CASE(VarHandleGetAndBitwiseAndAcquire)
+    INTRINSIC_CASE(VarHandleGetAndBitwiseAndRelease)
+    INTRINSIC_CASE(VarHandleGetAndBitwiseOr)
+    INTRINSIC_CASE(VarHandleGetAndBitwiseOrAcquire)
+    INTRINSIC_CASE(VarHandleGetAndBitwiseOrRelease)
+    INTRINSIC_CASE(VarHandleGetAndBitwiseXor)
+    INTRINSIC_CASE(VarHandleGetAndBitwiseXorAcquire)
+    INTRINSIC_CASE(VarHandleGetAndBitwiseXorRelease)
+    INTRINSIC_CASE(VarHandleGetAndSet)
+    INTRINSIC_CASE(VarHandleGetAndSetAcquire)
+    INTRINSIC_CASE(VarHandleGetAndSetRelease)
+    INTRINSIC_CASE(VarHandleGetOpaque)
+    INTRINSIC_CASE(VarHandleGetVolatile)
+    INTRINSIC_CASE(VarHandleSet)
+    INTRINSIC_CASE(VarHandleSetOpaque)
+    INTRINSIC_CASE(VarHandleSetRelease)
+    INTRINSIC_CASE(VarHandleSetVolatile)
+    INTRINSIC_CASE(VarHandleWeakCompareAndSet)
+    INTRINSIC_CASE(VarHandleWeakCompareAndSetAcquire)
+    INTRINSIC_CASE(VarHandleWeakCompareAndSetPlain)
+    INTRINSIC_CASE(VarHandleWeakCompareAndSetRelease)
     case Intrinsics::kNone:
       res = false;
       break;

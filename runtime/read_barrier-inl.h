@@ -19,20 +19,21 @@
 
 #include "read_barrier.h"
 
+#include "gc/accounting/read_barrier_table.h"
 #include "gc/collector/concurrent_copying-inl.h"
 #include "gc/heap.h"
-#include "mirror/object_reference.h"
 #include "mirror/object-readbarrier-inl.h"
+#include "mirror/object_reference.h"
 #include "mirror/reference.h"
 #include "runtime.h"
-#include "utils.h"
 
 namespace art {
 
 // Disabled for performance reasons.
 static constexpr bool kCheckDebugDisallowReadBarrierCount = false;
 
-template <typename MirrorType, ReadBarrierOption kReadBarrierOption, bool kAlwaysUpdateField>
+template <typename MirrorType, bool kIsVolatile, ReadBarrierOption kReadBarrierOption,
+          bool kAlwaysUpdateField>
 inline MirrorType* ReadBarrier::Barrier(
     mirror::Object* obj, MemberOffset offset, mirror::HeapReference<MirrorType>* ref_addr) {
   constexpr bool with_read_barrier = kReadBarrierOption == kWithReadBarrier;
@@ -54,7 +55,7 @@ inline MirrorType* ReadBarrier::Barrier(
       }
       ref_addr = reinterpret_cast<mirror::HeapReference<MirrorType>*>(
           fake_address_dependency | reinterpret_cast<uintptr_t>(ref_addr));
-      MirrorType* ref = ref_addr->AsMirrorPtr();
+      MirrorType* ref = ref_addr->template AsMirrorPtr<kIsVolatile>();
       MirrorType* old_ref = ref;
       if (is_gray) {
         // Slow-path.
@@ -62,17 +63,20 @@ inline MirrorType* ReadBarrier::Barrier(
         // If kAlwaysUpdateField is true, update the field atomically. This may fail if mutator
         // updates before us, but it's OK.
         if (kAlwaysUpdateField && ref != old_ref) {
-          obj->CasFieldStrongReleaseObjectWithoutWriteBarrier<false, false>(
-              offset, old_ref, ref);
+          obj->CasFieldObjectWithoutWriteBarrier<false, false>(offset,
+                                                               old_ref,
+                                                               ref,
+                                                               CASMode::kStrong,
+                                                               std::memory_order_release);
         }
       }
       AssertToSpaceInvariant(obj, offset, ref);
       return ref;
     } else if (kUseBrooksReadBarrier) {
       // To be implemented.
-      return ref_addr->AsMirrorPtr();
+      return ref_addr->template AsMirrorPtr<kIsVolatile>();
     } else if (kUseTableLookupReadBarrier) {
-      MirrorType* ref = ref_addr->AsMirrorPtr();
+      MirrorType* ref = ref_addr->template AsMirrorPtr<kIsVolatile>();
       MirrorType* old_ref = ref;
       // The heap or the collector can be null at startup. TODO: avoid the need for this null check.
       gc::Heap* heap = Runtime::Current()->GetHeap();
@@ -80,8 +84,11 @@ inline MirrorType* ReadBarrier::Barrier(
         ref = reinterpret_cast<MirrorType*>(Mark(old_ref));
         // Update the field atomically. This may fail if mutator updates before us, but it's ok.
         if (ref != old_ref) {
-          obj->CasFieldStrongReleaseObjectWithoutWriteBarrier<false, false>(
-              offset, old_ref, ref);
+          obj->CasFieldObjectWithoutWriteBarrier<false, false>(offset,
+                                                               old_ref,
+                                                               ref,
+                                                               CASMode::kStrong,
+                                                               std::memory_order_release);
         }
       }
       AssertToSpaceInvariant(obj, offset, ref);
@@ -92,7 +99,7 @@ inline MirrorType* ReadBarrier::Barrier(
     }
   } else {
     // No read barrier.
-    return ref_addr->AsMirrorPtr();
+    return ref_addr->template AsMirrorPtr<kIsVolatile>();
   }
 }
 
@@ -128,8 +135,8 @@ inline MirrorType* ReadBarrier::BarrierForRoot(MirrorType** root,
         ref = reinterpret_cast<MirrorType*>(Mark(old_ref));
         // Update the field atomically. This may fail if mutator updates before us, but it's ok.
         if (ref != old_ref) {
-          Atomic<mirror::Object*>* atomic_root = reinterpret_cast<Atomic<mirror::Object*>*>(root);
-          atomic_root->CompareExchangeStrongRelaxed(old_ref, ref);
+          Atomic<MirrorType*>* atomic_root = reinterpret_cast<Atomic<MirrorType*>*>(root);
+          atomic_root->CompareAndSetStrongRelaxed(old_ref, ref);
         }
       }
       AssertToSpaceInvariant(gc_root_source, ref);
@@ -172,7 +179,7 @@ inline MirrorType* ReadBarrier::BarrierForRoot(mirror::CompressedReference<Mirro
       if (new_ref.AsMirrorPtr() != old_ref.AsMirrorPtr()) {
         auto* atomic_root =
             reinterpret_cast<Atomic<mirror::CompressedReference<MirrorType>>*>(root);
-        atomic_root->CompareExchangeStrongRelaxed(old_ref, new_ref);
+        atomic_root->CompareAndSetStrongRelaxed(old_ref, new_ref);
       }
     }
     AssertToSpaceInvariant(gc_root_source, ref);
@@ -247,13 +254,13 @@ inline mirror::Object* ReadBarrier::Mark(mirror::Object* obj) {
 }
 
 inline bool ReadBarrier::IsGray(mirror::Object* obj, uintptr_t* fake_address_dependency) {
-  return obj->GetReadBarrierState(fake_address_dependency) == gray_state_;
+  return obj->GetReadBarrierState(fake_address_dependency) == kGrayState;
 }
 
 inline bool ReadBarrier::IsGray(mirror::Object* obj) {
   // Use a load-acquire to load the read barrier bit to avoid reordering with the subsequent load.
   // GetReadBarrierStateAcquire() has load-acquire semantics.
-  return obj->GetReadBarrierStateAcquire() == gray_state_;
+  return obj->GetReadBarrierStateAcquire() == kGrayState;
 }
 
 }  // namespace art

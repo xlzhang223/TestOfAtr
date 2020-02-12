@@ -17,8 +17,9 @@
 #ifndef ART_RUNTIME_GC_SPACE_BUMP_POINTER_SPACE_INL_H_
 #define ART_RUNTIME_GC_SPACE_BUMP_POINTER_SPACE_INL_H_
 
-#include "base/bit_utils.h"
 #include "bump_pointer_space.h"
+
+#include "base/bit_utils.h"
 
 namespace art {
 namespace gc {
@@ -45,16 +46,18 @@ inline mirror::Object* BumpPointerSpace::AllocThreadUnsafe(Thread* self, size_t 
                                                            size_t* bytes_tl_bulk_allocated) {
   Locks::mutator_lock_->AssertExclusiveHeld(self);
   num_bytes = RoundUp(num_bytes, kAlignment);
-  uint8_t* end = end_.LoadRelaxed();
+  uint8_t* end = end_.load(std::memory_order_relaxed);
   if (end + num_bytes > growth_end_) {
     return nullptr;
   }
   mirror::Object* obj = reinterpret_cast<mirror::Object*>(end);
-  end_.StoreRelaxed(end + num_bytes);
+  end_.store(end + num_bytes, std::memory_order_relaxed);
   *bytes_allocated = num_bytes;
   // Use the CAS free versions as an optimization.
-  objects_allocated_.StoreRelaxed(objects_allocated_.LoadRelaxed() + 1);
-  bytes_allocated_.StoreRelaxed(bytes_allocated_.LoadRelaxed() + num_bytes);
+  objects_allocated_.store(objects_allocated_.load(std::memory_order_relaxed) + 1,
+                           std::memory_order_relaxed);
+  bytes_allocated_.store(bytes_allocated_.load(std::memory_order_relaxed) + num_bytes,
+                         std::memory_order_relaxed);
   if (UNLIKELY(usable_size != nullptr)) {
     *usable_size = num_bytes;
   }
@@ -67,32 +70,23 @@ inline mirror::Object* BumpPointerSpace::AllocNonvirtualWithoutAccounting(size_t
   uint8_t* old_end;
   uint8_t* new_end;
   do {
-    old_end = end_.LoadRelaxed();
+    old_end = end_.load(std::memory_order_relaxed);
     new_end = old_end + num_bytes;
     // If there is no more room in the region, we are out of memory.
     if (UNLIKELY(new_end > growth_end_)) {
       return nullptr;
     }
-  } while (!end_.CompareExchangeWeakSequentiallyConsistent(old_end, new_end));
+  } while (!end_.CompareAndSetWeakSequentiallyConsistent(old_end, new_end));
   return reinterpret_cast<mirror::Object*>(old_end);
 }
 
 inline mirror::Object* BumpPointerSpace::AllocNonvirtual(size_t num_bytes) {
   mirror::Object* ret = AllocNonvirtualWithoutAccounting(num_bytes);
   if (ret != nullptr) {
-    objects_allocated_.FetchAndAddSequentiallyConsistent(1);
-    bytes_allocated_.FetchAndAddSequentiallyConsistent(num_bytes);
+    objects_allocated_.fetch_add(1, std::memory_order_relaxed);
+    bytes_allocated_.fetch_add(num_bytes, std::memory_order_relaxed);
   }
   return ret;
-}
-
-inline size_t BumpPointerSpace::AllocationSizeNonvirtual(mirror::Object* obj, size_t* usable_size)
-    REQUIRES_SHARED(Locks::mutator_lock_) {
-  size_t num_bytes = obj->SizeOf();
-  if (usable_size != nullptr) {
-    *usable_size = RoundUp(num_bytes, kAlignment);
-  }
-  return num_bytes;
 }
 
 }  // namespace space

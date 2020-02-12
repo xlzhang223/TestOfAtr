@@ -20,7 +20,7 @@
 
 #include "jit/jit.h"
 #include "runtime.h"
-#include "thread-inl.h"
+#include "thread-current-inl.h"
 
 namespace art {
 namespace {
@@ -29,20 +29,6 @@ extern "C" JNIEXPORT void JNICALL Java_IntHolder_waitForCompilation(JNIEnv*, jcl
   jit::Jit* jit = Runtime::Current()->GetJit();
   if (jit != nullptr) {
     jit->WaitForCompilationToFinish(Thread::Current());
-  }
-}
-
-extern "C" JNIEXPORT void JNICALL Java_Main_stopJit(JNIEnv*, jclass) {
-  jit::Jit* jit = Runtime::Current()->GetJit();
-  if (jit != nullptr) {
-    jit->Stop();
-  }
-}
-
-extern "C" JNIEXPORT void JNICALL Java_Main_startJit(JNIEnv*, jclass) {
-  jit::Jit* jit = Runtime::Current()->GetJit();
-  if (jit != nullptr) {
-    jit->Start();
   }
 }
 

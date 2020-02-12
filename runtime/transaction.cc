@@ -16,11 +16,15 @@
 
 #include "transaction.h"
 
+#include <android-base/logging.h>
+
+#include "base/mutex-inl.h"
 #include "base/stl_util.h"
-#include "base/logging.h"
 #include "gc/accounting/card_table-inl.h"
+#include "gc_root-inl.h"
 #include "intern_table.h"
 #include "mirror/class-inl.h"
+#include "mirror/dex_cache-inl.h"
 #include "mirror/object-inl.h"
 #include "mirror/object_array-inl.h"
 
@@ -32,8 +36,16 @@ namespace art {
 static constexpr bool kEnableTransactionStats = false;
 
 Transaction::Transaction()
-  : log_lock_("transaction log lock", kTransactionLogLock), aborted_(false) {
+  : log_lock_("transaction log lock", kTransactionLogLock),
+    aborted_(false),
+    rolling_back_(false),
+    strict_(false) {
   CHECK(Runtime::Current()->IsAotCompiler());
+}
+
+Transaction::Transaction(bool strict, mirror::Class* root) : Transaction() {
+  strict_ = strict;
+  root_ = root;
 }
 
 Transaction::~Transaction() {
@@ -95,9 +107,39 @@ bool Transaction::IsAborted() {
   return aborted_;
 }
 
+bool Transaction::IsRollingBack() {
+  return rolling_back_;
+}
+
+bool Transaction::IsStrict() {
+  MutexLock mu(Thread::Current(), log_lock_);
+  return strict_;
+}
+
 const std::string& Transaction::GetAbortMessage() {
   MutexLock mu(Thread::Current(), log_lock_);
   return abort_message_;
+}
+
+bool Transaction::WriteConstraint(mirror::Object* obj, ArtField* field) {
+  MutexLock mu(Thread::Current(), log_lock_);
+  if (strict_  // no constraint for boot image
+      && field->IsStatic()  // no constraint instance updating
+      && obj != root_) {  // modifying other classes' static field, fail
+    return true;
+  }
+  return false;
+}
+
+bool Transaction::ReadConstraint(mirror::Object* obj, ArtField* field) {
+  DCHECK(field->IsStatic());
+  DCHECK(obj->IsClass());
+  MutexLock mu(Thread::Current(), log_lock_);
+  if (!strict_ ||   // no constraint for boot image
+      obj == root_) {  // self-updating, pass
+    return false;
+  }
+  return true;
 }
 
 void Transaction::RecordWriteFieldBoolean(mirror::Object* obj,
@@ -220,15 +262,17 @@ void Transaction::LogInternedString(InternStringLog&& log) {
 }
 
 void Transaction::Rollback() {
-  CHECK(!Runtime::Current()->IsActiveTransaction());
   Thread* self = Thread::Current();
   self->AssertNoPendingException();
   MutexLock mu1(self, *Locks::intern_table_lock_);
   MutexLock mu2(self, log_lock_);
+  rolling_back_ = true;
+  CHECK(!Runtime::Current()->IsActiveTransaction());
   UndoObjectModifications();
   UndoArrayModifications();
   UndoInternStringTableModifications();
   UndoResolveStringModifications();
+  rolling_back_ = false;
 }
 
 void Transaction::UndoObjectModifications() {
@@ -268,6 +312,7 @@ void Transaction::UndoResolveStringModifications() {
 
 void Transaction::VisitRoots(RootVisitor* visitor) {
   MutexLock mu(Thread::Current(), log_lock_);
+  visitor->VisitRoot(reinterpret_cast<mirror::Object**>(&root_), RootInfo(kRootUnknown));
   VisitObjectLogs(visitor);
   VisitArrayLogs(visitor);
   VisitInternStringLogs(visitor);
@@ -276,7 +321,7 @@ void Transaction::VisitRoots(RootVisitor* visitor) {
 
 void Transaction::VisitObjectLogs(RootVisitor* visitor) {
   // List of moving roots.
-  typedef std::pair<mirror::Object*, mirror::Object*> ObjectPair;
+  using ObjectPair = std::pair<mirror::Object*, mirror::Object*>;
   std::list<ObjectPair> moving_roots;
 
   // Visit roots.
@@ -304,7 +349,7 @@ void Transaction::VisitObjectLogs(RootVisitor* visitor) {
 
 void Transaction::VisitArrayLogs(RootVisitor* visitor) {
   // List of moving roots.
-  typedef std::pair<mirror::Array*, mirror::Array*> ArrayPair;
+  using ArrayPair = std::pair<mirror::Array*, mirror::Array*>;
   std::list<ArrayPair> moving_roots;
 
   for (auto& it : array_logs_) {
@@ -409,7 +454,7 @@ void Transaction::ObjectLog::UndoFieldWrite(mirror::Object* obj,
                                             const FieldValue& field_value) const {
   // TODO We may want to abort a transaction while still being in transaction mode. In this case,
   // we'd need to disable the check.
-  constexpr bool kCheckTransaction = true;
+  constexpr bool kCheckTransaction = false;
   switch (field_value.kind) {
     case kBoolean:
       if (UNLIKELY(field_value.is_volatile)) {
@@ -486,7 +531,7 @@ void Transaction::ObjectLog::UndoFieldWrite(mirror::Object* obj,
       break;
     default:
       LOG(FATAL) << "Unknown value kind " << static_cast<int>(field_value.kind);
-      break;
+      UNREACHABLE();
   }
 }
 
@@ -513,7 +558,7 @@ void Transaction::InternStringLog::Undo(InternTable* intern_table) const {
           break;
         default:
           LOG(FATAL) << "Unknown interned string kind";
-          break;
+          UNREACHABLE();
       }
       break;
     }
@@ -527,13 +572,13 @@ void Transaction::InternStringLog::Undo(InternTable* intern_table) const {
           break;
         default:
           LOG(FATAL) << "Unknown interned string kind";
-          break;
+          UNREACHABLE();
       }
       break;
     }
     default:
       LOG(FATAL) << "Unknown interned string op";
-      break;
+      UNREACHABLE();
   }
 }
 
@@ -588,36 +633,46 @@ void Transaction::ArrayLog::UndoArrayWrite(mirror::Array* array,
                                            uint64_t value) const {
   // TODO We may want to abort a transaction while still being in transaction mode. In this case,
   // we'd need to disable the check.
+  constexpr bool kCheckTransaction = false;
   switch (array_type) {
     case Primitive::kPrimBoolean:
-      array->AsBooleanArray()->SetWithoutChecks<false>(index, static_cast<uint8_t>(value));
+      array->AsBooleanArray()->SetWithoutChecks<false, kCheckTransaction>(
+          index, static_cast<uint8_t>(value));
       break;
     case Primitive::kPrimByte:
-      array->AsByteArray()->SetWithoutChecks<false>(index, static_cast<int8_t>(value));
+      array->AsByteArray()->SetWithoutChecks<false, kCheckTransaction>(
+          index, static_cast<int8_t>(value));
       break;
     case Primitive::kPrimChar:
-      array->AsCharArray()->SetWithoutChecks<false>(index, static_cast<uint16_t>(value));
+      array->AsCharArray()->SetWithoutChecks<false, kCheckTransaction>(
+          index, static_cast<uint16_t>(value));
       break;
     case Primitive::kPrimShort:
-      array->AsShortArray()->SetWithoutChecks<false>(index, static_cast<int16_t>(value));
+      array->AsShortArray()->SetWithoutChecks<false, kCheckTransaction>(
+          index, static_cast<int16_t>(value));
       break;
     case Primitive::kPrimInt:
-      array->AsIntArray()->SetWithoutChecks<false>(index, static_cast<int32_t>(value));
+      array->AsIntArray()->SetWithoutChecks<false, kCheckTransaction>(
+          index, static_cast<int32_t>(value));
       break;
     case Primitive::kPrimFloat:
-      array->AsFloatArray()->SetWithoutChecks<false>(index, static_cast<float>(value));
+      array->AsFloatArray()->SetWithoutChecks<false, kCheckTransaction>(
+          index, static_cast<float>(value));
       break;
     case Primitive::kPrimLong:
-      array->AsLongArray()->SetWithoutChecks<false>(index, static_cast<int64_t>(value));
+      array->AsLongArray()->SetWithoutChecks<false, kCheckTransaction>(
+          index, static_cast<int64_t>(value));
       break;
     case Primitive::kPrimDouble:
-      array->AsDoubleArray()->SetWithoutChecks<false>(index, static_cast<double>(value));
+      array->AsDoubleArray()->SetWithoutChecks<false, kCheckTransaction>(
+          index, static_cast<double>(value));
       break;
     case Primitive::kPrimNot:
       LOG(FATAL) << "ObjectArray should be treated as Object";
-      break;
+      UNREACHABLE();
     default:
       LOG(FATAL) << "Unsupported type " << array_type;
+      UNREACHABLE();
   }
 }
 

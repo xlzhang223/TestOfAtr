@@ -17,17 +17,17 @@
 #ifndef ART_COMPILER_UTILS_ASSEMBLER_TEST_BASE_H_
 #define ART_COMPILER_UTILS_ASSEMBLER_TEST_BASE_H_
 
+#include <sys/stat.h>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
-#include <sys/stat.h>
 
 #include "android-base/strings.h"
 
+#include "base/utils.h"
 #include "common_runtime_test.h"  // For ScratchFile
 #include "exec_utils.h"
-#include "utils.h"
 
 namespace art {
 
@@ -37,7 +37,7 @@ static constexpr bool kKeepDisassembledFiles = false;
 
 // Use a glocal static variable to keep the same name for all test data. Else we'll just spam the
 // temp directory.
-static std::string tmpnam_;
+static std::string tmpnam_;  // NOLINT [runtime/string] [4]
 
 // We put this into a class as gtests are self-contained, so this helper needs to be in an h-file.
 class AssemblerTestInfrastructure {
@@ -59,12 +59,12 @@ class AssemblerTestInfrastructure {
       disassembler_cmd_name_(disasm),
       disassembler_parameters_(disasm_params) {
     // Fake a runtime test for ScratchFile
-    CommonRuntimeTest::SetUpAndroidData(android_data_);
+    CommonRuntimeTest::SetUpAndroidDataDir(android_data_);
   }
 
   virtual ~AssemblerTestInfrastructure() {
     // We leave temporaries in case this failed so we can debug issues.
-    CommonRuntimeTest::TearDownAndroidData(android_data_, false);
+    CommonRuntimeTest::TearDownAndroidDataDir(android_data_, false);
     tmpnam_ = "";
   }
 

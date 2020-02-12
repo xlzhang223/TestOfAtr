@@ -23,12 +23,14 @@
 #include <limits>
 #include <string>
 
+#include <android-base/logging.h>
+
 #include "base/bit_utils.h"
-#include "base/logging.h"
-#include "base/mutex.h"
+#include "base/locks.h"
+#include "base/macros.h"
+#include "base/mem_map.h"
 #include "gc_root.h"
 #include "obj_ptr.h"
-#include "object_callbacks.h"
 #include "offsets.h"
 #include "read_barrier_option.h"
 
@@ -39,8 +41,6 @@ class RootInfo;
 namespace mirror {
 class Object;
 }  // namespace mirror
-
-class MemMap;
 
 // Maintain a table of indirect references.  Used for local/global JNI references.
 //
@@ -186,6 +186,8 @@ class IrtIterator {
  public:
   IrtIterator(IrtEntry* table, size_t i, size_t capacity) REQUIRES_SHARED(Locks::mutator_lock_)
       : table_(table), i_(i), capacity_(capacity) {
+    // capacity_ is used in some target; has warning with unused attribute.
+    UNUSED(capacity_);
   }
 
   IrtIterator& operator++() REQUIRES_SHARED(Locks::mutator_lock_) {
@@ -245,8 +247,10 @@ class IndirectReferenceTable {
   bool IsValid() const;
 
   // Add a new entry. "obj" must be a valid non-null object reference. This function will
-  // abort if the table is full (max entries reached, or expansion failed).
-  IndirectRef Add(IRTSegmentState previous_state, ObjPtr<mirror::Object> obj)
+  // return null if an error happened (with an appropriate error message set).
+  IndirectRef Add(IRTSegmentState previous_state,
+                  ObjPtr<mirror::Object> obj,
+                  std::string* error_msg)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Given an IndirectRef in the table, return the Object it refers to.
@@ -277,13 +281,22 @@ class IndirectReferenceTable {
 
   void AssertEmpty() REQUIRES_SHARED(Locks::mutator_lock_);
 
-  void Dump(std::ostream& os) const REQUIRES_SHARED(Locks::mutator_lock_);
+  void Dump(std::ostream& os) const
+      REQUIRES_SHARED(Locks::mutator_lock_)
+      REQUIRES(!Locks::alloc_tracker_lock_);
 
   // Return the #of entries in the entire table.  This includes holes, and
   // so may be larger than the actual number of "live" entries.
   size_t Capacity() const {
     return segment_state_.top_index;
   }
+
+  // Ensure that at least free_capacity elements are available, or return false.
+  bool EnsureFreeCapacity(size_t free_capacity, std::string* error_msg)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+  // See implementation of EnsureFreeCapacity. We'll only state here how much is trivially free,
+  // without recovering holes. Thus this is a conservative estimate.
+  size_t FreeCapacity() const;
 
   // Note IrtIterator does not have a read barrier as it's used to visit roots.
   IrtIterator begin() {
@@ -384,7 +397,7 @@ class IndirectReferenceTable {
   IRTSegmentState segment_state_;
 
   // Mem map where we store the indirect refs.
-  std::unique_ptr<MemMap> table_mem_map_;
+  MemMap table_mem_map_;
   // bottom of the stack. Do not directly access the object references
   // in this as they are roots. Use Get() that has a read barrier.
   IrtEntry* table_;

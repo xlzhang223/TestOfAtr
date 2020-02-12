@@ -16,16 +16,25 @@
 
 #include "org_apache_harmony_dalvik_ddmc_DdmVmInternal.h"
 
-#include "base/logging.h"
+#include <android-base/logging.h>
+
+#include "base/file_utils.h"
 #include "base/mutex.h"
 #include "debugger.h"
-#include "jni_internal.h"
+#include "gc/heap.h"
+#include "jni/jni_internal.h"
+#include "native_util.h"
+#include "nativehelper/jni_macros.h"
+#include "nativehelper/scoped_local_ref.h"
+#include "nativehelper/scoped_primitive_array.h"
 #include "scoped_fast_native_object_access-inl.h"
-#include "ScopedLocalRef.h"
-#include "ScopedPrimitiveArray.h"
 #include "thread_list.h"
 
 namespace art {
+
+static Thread* GetSelf(JNIEnv* env) {
+  return static_cast<JNIEnvExt*>(env)->GetSelf();
+}
 
 static void DdmVmInternal_enableRecentAllocations(JNIEnv*, jclass, jboolean enable) {
   Dbg::SetAllocTrackingEnabled(enable);
@@ -46,7 +55,7 @@ static jboolean DdmVmInternal_getRecentAllocationStatus(JNIEnv*, jclass) {
  */
 static jobjectArray DdmVmInternal_getStackTraceById(JNIEnv* env, jclass, jint thin_lock_id) {
   jobjectArray trace = nullptr;
-  Thread* const self = Thread::Current();
+  Thread* const self = GetSelf(env);
   if (static_cast<uint32_t>(thin_lock_id) == self->GetThreadId()) {
     // No need to suspend ourself to build stacktrace.
     ScopedObjectAccess soa(env);
@@ -62,7 +71,9 @@ static jobjectArray DdmVmInternal_getStackTraceById(JNIEnv* env, jclass, jint th
     }
 
     // Suspend thread to build stack trace.
-    Thread* thread = thread_list->SuspendThreadByThreadId(thin_lock_id, false, &timed_out);
+    Thread* thread = thread_list->SuspendThreadByThreadId(thin_lock_id,
+                                                          SuspendReason::kInternal,
+                                                          &timed_out);
     if (thread != nullptr) {
       {
         ScopedObjectAccess soa(env);
@@ -70,7 +81,8 @@ static jobjectArray DdmVmInternal_getStackTraceById(JNIEnv* env, jclass, jint th
         trace = Thread::InternalStackTraceToStackTraceElementArray(soa, internal_trace);
       }
       // Restart suspended thread.
-      thread_list->Resume(thread, false);
+      bool resumed = thread_list->Resume(thread, SuspendReason::kInternal);
+      DCHECK(resumed);
     } else {
       if (timed_out) {
         LOG(ERROR) << "Trying to get thread's stack by id failed as the thread failed to suspend "
@@ -128,7 +140,7 @@ static void ThreadStatsGetterCallback(Thread* t, void* context) {
 
 static jbyteArray DdmVmInternal_getThreadStats(JNIEnv* env, jclass) {
   std::vector<uint8_t> bytes;
-  Thread* self = static_cast<JNIEnvExt*>(env)->self;
+  Thread* self = GetSelf(env);
   {
     MutexLock mu(self, *Locks::thread_list_lock_);
     ThreadList* thread_list = Runtime::Current()->GetThreadList();
@@ -150,7 +162,7 @@ static jbyteArray DdmVmInternal_getThreadStats(JNIEnv* env, jclass) {
   return result;
 }
 
-static jint DdmVmInternal_heapInfoNotify(JNIEnv* env, jclass, jint when) {
+static jboolean DdmVmInternal_heapInfoNotify(JNIEnv* env, jclass, jint when) {
   ScopedFastNativeObjectAccess soa(env);
   return Dbg::DdmHandleHpifChunk(static_cast<Dbg::HpifWhen>(when));
 }

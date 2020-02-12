@@ -30,16 +30,16 @@ namespace mips {
 class CodeGeneratorMIPS;
 class MipsAssembler;
 
-class IntrinsicLocationsBuilderMIPS FINAL : public IntrinsicVisitor {
+class IntrinsicLocationsBuilderMIPS final : public IntrinsicVisitor {
  public:
   explicit IntrinsicLocationsBuilderMIPS(CodeGeneratorMIPS* codegen);
 
   // Define visitor methods.
 
 #define OPTIMIZING_INTRINSICS(Name, IsStatic, NeedsEnvironmentOrCache, SideEffects, Exceptions, ...) \
-  void Visit ## Name(HInvoke* invoke) OVERRIDE;
+  void Visit ## Name(HInvoke* invoke) override;
 #include "intrinsics_list.h"
-INTRINSICS_LIST(OPTIMIZING_INTRINSICS)
+  INTRINSICS_LIST(OPTIMIZING_INTRINSICS)
 #undef INTRINSICS_LIST
 #undef OPTIMIZING_INTRINSICS
 
@@ -49,34 +49,36 @@ INTRINSICS_LIST(OPTIMIZING_INTRINSICS)
   bool TryDispatch(HInvoke* invoke);
 
  private:
-  ArenaAllocator* arena_;
+  CodeGeneratorMIPS* const codegen_;
+  ArenaAllocator* const allocator_;
 
   DISALLOW_COPY_AND_ASSIGN(IntrinsicLocationsBuilderMIPS);
 };
 
-class IntrinsicCodeGeneratorMIPS FINAL : public IntrinsicVisitor {
+class IntrinsicCodeGeneratorMIPS final : public IntrinsicVisitor {
  public:
   explicit IntrinsicCodeGeneratorMIPS(CodeGeneratorMIPS* codegen) : codegen_(codegen) {}
 
   // Define visitor methods.
 
 #define OPTIMIZING_INTRINSICS(Name, IsStatic, NeedsEnvironmentOrCache, SideEffects, Exceptions, ...) \
-  void Visit ## Name(HInvoke* invoke) OVERRIDE;
+  void Visit ## Name(HInvoke* invoke) override;
 #include "intrinsics_list.h"
-INTRINSICS_LIST(OPTIMIZING_INTRINSICS)
+  INTRINSICS_LIST(OPTIMIZING_INTRINSICS)
 #undef INTRINSICS_LIST
 #undef OPTIMIZING_INTRINSICS
 
   bool IsR2OrNewer() const;
   bool IsR6() const;
   bool Is32BitFPU() const;
+  bool HasMsa() const;
 
  private:
   MipsAssembler* GetAssembler();
 
   ArenaAllocator* GetAllocator();
 
-  CodeGeneratorMIPS* codegen_;
+  CodeGeneratorMIPS* const codegen_;
 
   DISALLOW_COPY_AND_ASSIGN(IntrinsicCodeGeneratorMIPS);
 };

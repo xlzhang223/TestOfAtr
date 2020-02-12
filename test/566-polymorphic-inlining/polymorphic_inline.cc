@@ -19,6 +19,7 @@
 #include "jit/jit.h"
 #include "jit/jit_code_cache.h"
 #include "jit/profiling_info.h"
+#include "mirror/class.h"
 #include "oat_quick_method_header.h"
 #include "scoped_thread_state_change-inl.h"
 #include "stack_map.h"
@@ -40,16 +41,16 @@ static void do_checks(jclass cls, const char* method_name) {
       header = OatQuickMethodHeader::FromEntryPoint(pc);
       break;
     } else {
+      ScopedThreadSuspension sts(soa.Self(), kSuspended);
       // Sleep to yield to the compiler thread.
       usleep(1000);
-      // Will either ensure it's compiled or do the compilation itself.
-      jit->CompileMethod(method, soa.Self(), /* osr */ false);
     }
+    // Will either ensure it's compiled or do the compilation itself.
+    jit->CompileMethod(method, soa.Self(), /*baseline=*/ false, /*osr=*/ false);
   }
 
-  CodeInfo info = header->GetOptimizedCodeInfo();
-  CodeInfoEncoding encoding = info.ExtractEncoding();
-  CHECK(info.HasInlineInfo(encoding));
+  CodeInfo info(header);
+  CHECK(info.HasInlineInfo());
 }
 
 static void allocate_profiling_info(jclass cls, const char* method_name) {

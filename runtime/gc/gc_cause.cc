@@ -15,8 +15,11 @@
  */
 
 #include "gc_cause.h"
-#include "globals.h"
-#include "base/logging.h"
+
+#include <android-base/logging.h>
+
+#include "base/macros.h"
+#include "runtime_globals.h"
 
 #include <ostream>
 
@@ -25,11 +28,11 @@ namespace gc {
 
 const char* PrettyCause(GcCause cause) {
   switch (cause) {
+    case kGcCauseNone: return "None";
     case kGcCauseForAlloc: return "Alloc";
     case kGcCauseBackground: return "Background";
     case kGcCauseExplicit: return "Explicit";
     case kGcCauseForNativeAlloc: return "NativeAlloc";
-    case kGcCauseForNativeAllocBackground: return "NativeAllocBackground";
     case kGcCauseCollectorTransition: return "CollectorTransition";
     case kGcCauseDisableMovingGc: return "DisableMovingGc";
     case kGcCauseHomogeneousSpaceCompact: return "HomogeneousSpaceCompact";

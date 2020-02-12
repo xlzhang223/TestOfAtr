@@ -16,12 +16,15 @@
 
 #include "java_lang_invoke_MethodHandleImpl.h"
 
+#include "nativehelper/jni_macros.h"
+
 #include "art_method.h"
 #include "handle_scope-inl.h"
-#include "jni_internal.h"
+#include "jni/jni_internal.h"
 #include "mirror/field.h"
 #include "mirror/method.h"
 #include "mirror/method_handle_impl.h"
+#include "native_util.h"
 #include "runtime.h"
 #include "scoped_thread_state_change-inl.h"
 
@@ -45,7 +48,7 @@ static jobject MethodHandleImpl_getMemberInternal(JNIEnv* env, jobject thiz) {
   if (handle_kind >= mirror::MethodHandle::kFirstAccessorKind) {
     ArtField* const field = handle->GetTargetField();
     h_object.Assign(mirror::Field::CreateFromArtField<kRuntimePointerSize, false>(
-        soa.Self(), field, false /* force_resolve */));
+        soa.Self(), field, /* force_resolve= */ false));
   } else {
     ArtMethod* const method = handle->GetTargetMethod();
     if (method->IsConstructor()) {

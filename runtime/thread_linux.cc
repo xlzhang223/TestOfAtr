@@ -14,20 +14,14 @@
  * limitations under the License.
  */
 
+#include "thread.h"
+
 #include <signal.h>
 
-#include "thread.h"
-#include "utils.h"
+#include "base/logging.h"  // For VLOG.
+#include "base/utils.h"
 
 namespace art {
-
-void Thread::SetNativePriority(int) {
-  // Do nothing.
-}
-
-int Thread::GetNativePriority() {
-  return kNormThreadPriority;
-}
 
 static void SigAltStack(stack_t* new_stack, stack_t* old_stack) {
   if (sigaltstack(new_stack, old_stack) == -1) {

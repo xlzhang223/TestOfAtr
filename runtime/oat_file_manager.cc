@@ -19,38 +19,57 @@
 #include <memory>
 #include <queue>
 #include <vector>
+#include <sys/stat.h>
 
 #include "android-base/stringprintf.h"
+#include "android-base/strings.h"
 
 #include "art_field-inl.h"
 #include "base/bit_vector-inl.h"
-#include "base/logging.h"
+#include "base/file_utils.h"
+#include "base/logging.h"  // For VLOG.
+#include "base/mutex-inl.h"
+#include "base/sdk_version.h"
 #include "base/stl_util.h"
 #include "base/systrace.h"
 #include "class_linker.h"
-#include "dex_file-inl.h"
+#include "class_loader_context.h"
+#include "dex/art_dex_file_loader.h"
+#include "dex/dex_file-inl.h"
+#include "dex/dex_file_loader.h"
+#include "dex/dex_file_tracking_registrar.h"
 #include "gc/scoped_gc_critical_section.h"
 #include "gc/space/image_space.h"
 #include "handle_scope-inl.h"
-#include "jni_internal.h"
+#include "jit/jit.h"
+#include "jni/java_vm_ext.h"
+#include "jni/jni_internal.h"
 #include "mirror/class_loader.h"
 #include "mirror/object-inl.h"
+#include "oat_file.h"
 #include "oat_file_assistant.h"
 #include "obj_ptr-inl.h"
 #include "scoped_thread_state_change-inl.h"
-#include "thread-inl.h"
+#include "thread-current-inl.h"
 #include "thread_list.h"
+#include "thread_pool.h"
+#include "vdex_file.h"
+#include "verifier/verifier_deps.h"
 #include "well_known_classes.h"
 
 namespace art {
 
 using android::base::StringPrintf;
 
-// If true, then we attempt to load the application image if it exists.
+// If true, we attempt to load the application image if it exists.
 static constexpr bool kEnableAppImage = true;
 
 const OatFile* OatFileManager::RegisterOatFile(std::unique_ptr<const OatFile> oat_file) {
   WriterMutexLock mu(Thread::Current(), *Locks::oat_file_manager_lock_);
+  CHECK(!only_use_system_oat_files_ ||
+        LocationIsOnSystem(oat_file->GetLocation().c_str()) ||
+        !oat_file->IsExecutable())
+      << "Registering a non /system oat file: " << oat_file->GetLocation();
   DCHECK(oat_file != nullptr);
   if (kIsDebugBuild) {
     CHECK(oat_files_.find(oat_file) == oat_files_.end());
@@ -61,7 +80,6 @@ const OatFile* OatFileManager::RegisterOatFile(std::unique_ptr<const OatFile> oa
       CHECK_NE(oat_file->Begin(), existing->Begin()) << "Oat file already mapped at that location";
     }
   }
-  have_non_pic_oat_file_ = have_non_pic_oat_file_ || !oat_file->IsPic();
   const OatFile* ret = oat_file.get();
   oat_files_.insert(std::move(oat_file));
   return ret;
@@ -74,7 +92,7 @@ void OatFileManager::UnRegisterAndDeleteOatFile(const OatFile* oat_file) {
   auto it = oat_files_.find(compare);
   CHECK(it != oat_files_.end());
   oat_files_.erase(it);
-  compare.release();
+  compare.release();  // NOLINT b/117926937
 }
 
 const OatFile* OatFileManager::FindOpenedOatFileFromDexLocation(
@@ -83,7 +101,7 @@ const OatFile* OatFileManager::FindOpenedOatFileFromDexLocation(
   for (const std::unique_ptr<const OatFile>& oat_file : oat_files_) {
     const std::vector<const OatDexFile*>& oat_dex_files = oat_file->GetOatDexFiles();
     for (const OatDexFile* oat_dex_file : oat_dex_files) {
-      if (DexFile::GetBaseLocation(oat_dex_file->GetDexFileLocation()) == dex_base_location) {
+      if (DexFileLoader::GetBaseLocation(oat_dex_file->GetDexFileLocation()) == dex_base_location) {
         return oat_file.get();
       }
     }
@@ -108,9 +126,10 @@ const OatFile* OatFileManager::FindOpenedOatFileFromOatLocationLocked(
 }
 
 std::vector<const OatFile*> OatFileManager::GetBootOatFiles() const {
-  std::vector<const OatFile*> oat_files;
   std::vector<gc::space::ImageSpace*> image_spaces =
       Runtime::Current()->GetHeap()->GetBootImageSpaces();
+  std::vector<const OatFile*> oat_files;
+  oat_files.reserve(image_spaces.size());
   for (gc::space::ImageSpace* image_space : image_spaces) {
     oat_files.push_back(image_space->GetOatFile());
   }
@@ -131,6 +150,9 @@ const OatFile* OatFileManager::GetPrimaryOatFile() const {
   return nullptr;
 }
 
+OatFileManager::OatFileManager()
+    : only_use_system_oat_files_(false) {}
+
 OatFileManager::~OatFileManager() {
   // Explicitly clear oat_files_ since the OatFile destructor calls back into OatFileManager for
   // UnRegisterOatFileLocation.
@@ -138,8 +160,9 @@ OatFileManager::~OatFileManager() {
 }
 
 std::vector<const OatFile*> OatFileManager::RegisterImageOatFiles(
-    std::vector<gc::space::ImageSpace*> spaces) {
+    const std::vector<gc::space::ImageSpace*>& spaces) {
   std::vector<const OatFile*> oat_files;
+  oat_files.reserve(spaces.size());
   for (gc::space::ImageSpace* space : spaces) {
     oat_files.push_back(RegisterOatFile(space->ReleaseOatFile()));
   }
@@ -168,9 +191,9 @@ class TypeIndexInfo {
 
  private:
   static BitVector GenerateTypeIndexes(const DexFile* dex_file) {
-    BitVector type_indexes(/*start_bits*/0, /*expandable*/true, Allocator::GetMallocAllocator());
+    BitVector type_indexes(/*start_bits=*/0, /*expandable=*/true, Allocator::GetMallocAllocator());
     for (uint16_t i = 0; i < dex_file->NumClassDefs(); ++i) {
-      const DexFile::ClassDef& class_def = dex_file->GetClassDef(i);
+      const dex::ClassDef& class_def = dex_file->GetClassDef(i);
       uint16_t type_idx = class_def.class_idx_.index_;
       type_indexes.SetBit(type_idx);
     }
@@ -262,212 +285,27 @@ static void AddNext(/*inout*/DexFileAndClassPair& original,
   }
 }
 
-template <typename T>
-static void IterateOverJavaDexFile(ObjPtr<mirror::Object> dex_file,
-                                   ArtField* const cookie_field,
-                                   const T& fn)
-    REQUIRES_SHARED(Locks::mutator_lock_) {
-  if (dex_file != nullptr) {
-    mirror::LongArray* long_array = cookie_field->GetObject(dex_file)->AsLongArray();
-    if (long_array == nullptr) {
-      // This should never happen so log a warning.
-      LOG(WARNING) << "Null DexFile::mCookie";
-      return;
-    }
-    int32_t long_array_size = long_array->GetLength();
-    // Start from 1 to skip the oat file.
-    for (int32_t j = 1; j < long_array_size; ++j) {
-      const DexFile* cp_dex_file = reinterpret_cast<const DexFile*>(static_cast<uintptr_t>(
-          long_array->GetWithoutChecks(j)));
-      if (!fn(cp_dex_file)) {
-        return;
-      }
-    }
-  }
-}
+static bool CheckClassCollision(const OatFile* oat_file,
+    const ClassLoaderContext* context,
+    std::string* error_msg /*out*/) {
+  std::vector<const DexFile*> dex_files_loaded = context->FlattenOpenedDexFiles();
 
-template <typename T>
-static void IterateOverPathClassLoader(
-    Handle<mirror::ClassLoader> class_loader,
-    MutableHandle<mirror::ObjectArray<mirror::Object>> dex_elements,
-    const T& fn) REQUIRES_SHARED(Locks::mutator_lock_) {
-  // Handle this step.
-  // Handle as if this is the child PathClassLoader.
-  // The class loader is a PathClassLoader which inherits from BaseDexClassLoader.
-  // We need to get the DexPathList and loop through it.
-  ArtField* const cookie_field =
-      jni::DecodeArtField(WellKnownClasses::dalvik_system_DexFile_cookie);
-  ArtField* const dex_file_field =
-      jni::DecodeArtField(WellKnownClasses::dalvik_system_DexPathList__Element_dexFile);
-  ObjPtr<mirror::Object> dex_path_list =
-      jni::DecodeArtField(WellKnownClasses::dalvik_system_BaseDexClassLoader_pathList)->
-          GetObject(class_loader.Get());
-  if (dex_path_list != nullptr && dex_file_field != nullptr && cookie_field != nullptr) {
-    // DexPathList has an array dexElements of Elements[] which each contain a dex file.
-    ObjPtr<mirror::Object> dex_elements_obj =
-        jni::DecodeArtField(WellKnownClasses::dalvik_system_DexPathList_dexElements)->
-            GetObject(dex_path_list);
-    // Loop through each dalvik.system.DexPathList$Element's dalvik.system.DexFile and look
-    // at the mCookie which is a DexFile vector.
-    if (dex_elements_obj != nullptr) {
-      dex_elements.Assign(dex_elements_obj->AsObjectArray<mirror::Object>());
-      for (int32_t i = 0; i < dex_elements->GetLength(); ++i) {
-        mirror::Object* element = dex_elements->GetWithoutChecks(i);
-        if (element == nullptr) {
-          // Should never happen, fall back to java code to throw a NPE.
-          break;
-        }
-        ObjPtr<mirror::Object> dex_file = dex_file_field->GetObject(element);
-        IterateOverJavaDexFile(dex_file, cookie_field, fn);
-      }
-    }
-  }
-}
+  // Vector that holds the newly opened dex files live, this is done to prevent leaks.
+  std::vector<std::unique_ptr<const DexFile>> opened_dex_files;
 
-static bool GetDexFilesFromClassLoader(
-    ScopedObjectAccessAlreadyRunnable& soa,
-    mirror::ClassLoader* class_loader,
-    std::vector<const DexFile*>* dex_files)
-    REQUIRES_SHARED(Locks::mutator_lock_) {
-  if (ClassLinker::IsBootClassLoader(soa, class_loader)) {
-    // The boot class loader. We don't load any of these files, as we know we compiled against
-    // them correctly.
-    return true;
-  }
+  ScopedTrace st("Collision check");
+  // Add dex files from the oat file to check.
+  std::vector<const DexFile*> dex_files_unloaded;
+  AddDexFilesFromOat(oat_file, &dex_files_unloaded, &opened_dex_files);
 
-  // Unsupported class-loader?
-  if (soa.Decode<mirror::Class>(WellKnownClasses::dalvik_system_PathClassLoader) !=
-      class_loader->GetClass()) {
-    VLOG(class_linker) << "Unsupported class-loader "
-                       << mirror::Class::PrettyClass(class_loader->GetClass());
-    return false;
-  }
-
-  bool recursive_result = GetDexFilesFromClassLoader(soa, class_loader->GetParent(), dex_files);
-  if (!recursive_result) {
-    // Something wrong up the chain.
-    return false;
-  }
-
-  // Collect all the dex files.
-  auto GetDexFilesFn = [&] (const DexFile* cp_dex_file)
-            REQUIRES_SHARED(Locks::mutator_lock_) {
-    if (cp_dex_file->NumClassDefs() > 0) {
-      dex_files->push_back(cp_dex_file);
-    }
-    return true;  // Continue looking.
-  };
-
-  // Handle for dex-cache-element.
-  StackHandleScope<3> hs(soa.Self());
-  MutableHandle<mirror::ObjectArray<mirror::Object>> dex_elements(
-      hs.NewHandle<mirror::ObjectArray<mirror::Object>>(nullptr));
-  Handle<mirror::ClassLoader> h_class_loader(hs.NewHandle(class_loader));
-
-  IterateOverPathClassLoader(h_class_loader, dex_elements, GetDexFilesFn);
-
-  return true;
-}
-
-static void GetDexFilesFromDexElementsArray(
-    ScopedObjectAccessAlreadyRunnable& soa,
-    Handle<mirror::ObjectArray<mirror::Object>> dex_elements,
-    std::vector<const DexFile*>* dex_files)
-    REQUIRES_SHARED(Locks::mutator_lock_) {
-  if (dex_elements == nullptr) {
-    // Nothing to do.
-    return;
-  }
-
-  ArtField* const cookie_field =
-      jni::DecodeArtField(WellKnownClasses::dalvik_system_DexFile_cookie);
-  ArtField* const dex_file_field =
-      jni::DecodeArtField(WellKnownClasses::dalvik_system_DexPathList__Element_dexFile);
-  ObjPtr<mirror::Class> const element_class = soa.Decode<mirror::Class>(
-      WellKnownClasses::dalvik_system_DexPathList__Element);
-  ObjPtr<mirror::Class> const dexfile_class = soa.Decode<mirror::Class>(
-      WellKnownClasses::dalvik_system_DexFile);
-
-  // Collect all the dex files.
-  auto GetDexFilesFn = [&] (const DexFile* cp_dex_file)
-      REQUIRES_SHARED(Locks::mutator_lock_) {
-    if (cp_dex_file != nullptr && cp_dex_file->NumClassDefs() > 0) {
-      dex_files->push_back(cp_dex_file);
-    }
-    return true;  // Continue looking.
-  };
-
-  for (int32_t i = 0; i < dex_elements->GetLength(); ++i) {
-    mirror::Object* element = dex_elements->GetWithoutChecks(i);
-    if (element == nullptr) {
-      continue;
-    }
-
-    // We support this being dalvik.system.DexPathList$Element and dalvik.system.DexFile.
-
-    ObjPtr<mirror::Object> dex_file;
-    if (element_class == element->GetClass()) {
-      dex_file = dex_file_field->GetObject(element);
-    } else if (dexfile_class == element->GetClass()) {
-      dex_file = element;
-    } else {
-      LOG(WARNING) << "Unsupported element in dex_elements: "
-                   << mirror::Class::PrettyClass(element->GetClass());
-      continue;
-    }
-
-    IterateOverJavaDexFile(dex_file, cookie_field, GetDexFilesFn);
-  }
-}
-
-static bool AreSharedLibrariesOk(const std::string& shared_libraries,
-                                 std::vector<const DexFile*>& dex_files) {
-  // If no shared libraries, we expect no dex files.
-  if (shared_libraries.empty()) {
-    return dex_files.empty();
-  }
-  // If we find the special shared library, skip the shared libraries check.
-  if (shared_libraries.compare(OatFile::kSpecialSharedLibrary) == 0) {
-    return true;
-  }
-  // Shared libraries is a series of dex file paths and their checksums, each separated by '*'.
-  std::vector<std::string> shared_libraries_split;
-  Split(shared_libraries, '*', &shared_libraries_split);
-
-  // Sanity check size of dex files and split shared libraries. Should be 2x as many entries in
-  // the split shared libraries since it contains pairs of filename/checksum.
-  if (dex_files.size() * 2 != shared_libraries_split.size()) {
-    return false;
-  }
-
-  // Check that the loaded dex files have the same order and checksums as the shared libraries.
-  for (size_t i = 0; i < dex_files.size(); ++i) {
-    std::string absolute_library_path =
-        OatFile::ResolveRelativeEncodedDexLocation(dex_files[i]->GetLocation().c_str(),
-                                                   shared_libraries_split[i * 2]);
-    if (dex_files[i]->GetLocation() != absolute_library_path) {
-      return false;
-    }
-    char* end;
-    size_t shared_lib_checksum = strtoul(shared_libraries_split[i * 2 + 1].c_str(), &end, 10);
-    uint32_t dex_checksum = dex_files[i]->GetLocationChecksum();
-    if (*end != '\0' || dex_checksum != shared_lib_checksum) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
-static bool CollisionCheck(std::vector<const DexFile*>& dex_files_loaded,
-                           std::vector<const DexFile*>& dex_files_unloaded,
-                           std::string* error_msg /*out*/) {
   // Generate type index information for each dex file.
   std::vector<TypeIndexInfo> loaded_types;
+  loaded_types.reserve(dex_files_loaded.size());
   for (const DexFile* dex_file : dex_files_loaded) {
     loaded_types.push_back(TypeIndexInfo(dex_file));
   }
   std::vector<TypeIndexInfo> unloaded_types;
+  unloaded_types.reserve(dex_files_unloaded.size());
   for (const DexFile* dex_file : dex_files_unloaded) {
     unloaded_types.push_back(TypeIndexInfo(dex_file));
   }
@@ -476,12 +314,12 @@ static bool CollisionCheck(std::vector<const DexFile*>& dex_files_loaded,
   std::priority_queue<DexFileAndClassPair> queue;
   for (size_t i = 0; i < dex_files_loaded.size(); ++i) {
     if (loaded_types[i].GetIterator() != loaded_types[i].GetIteratorEnd()) {
-      queue.emplace(dex_files_loaded[i], &loaded_types[i], /*from_loaded_oat*/true);
+      queue.emplace(dex_files_loaded[i], &loaded_types[i], /*from_loaded_oat=*/true);
     }
   }
   for (size_t i = 0; i < dex_files_unloaded.size(); ++i) {
     if (unloaded_types[i].GetIterator() != unloaded_types[i].GetIteratorEnd()) {
-      queue.emplace(dex_files_unloaded[i], &unloaded_types[i], /*from_loaded_oat*/false);
+      queue.emplace(dex_files_unloaded[i], &unloaded_types[i], /*from_loaded_oat=*/false);
     }
   }
 
@@ -524,79 +362,86 @@ static bool CollisionCheck(std::vector<const DexFile*>& dex_files_loaded,
 
 // Check for class-def collisions in dex files.
 //
-// This first walks the class loader chain, getting all the dex files from the class loader. If
-// the class loader is null or one of the class loaders in the chain is unsupported, we collect
-// dex files from all open non-boot oat files to be safe.
+// This first walks the class loader chain present in the given context, getting all the dex files
+// from the class loader.
 //
-// This first checks whether the shared libraries are in the expected order and the oat files
-// have the expected checksums. If so, we exit early. Otherwise, we do the collision check.
+// If the context is null (which means the initial class loader was null or unsupported)
+// this returns false. b/37777332.
+//
+// This first checks whether all class loaders in the context have the same type and
+// classpath. If so, we exit early. Otherwise, we do the collision check.
 //
 // The collision check works by maintaining a heap with one class from each dex file, sorted by the
 // class descriptor. Then a dex-file/class pair is continually removed from the heap and compared
 // against the following top element. If the descriptor is the same, it is now checked whether
 // the two elements agree on whether their dex file was from an already-loaded oat-file or the
 // new oat file. Any disagreement indicates a collision.
-bool OatFileManager::HasCollisions(const OatFile* oat_file,
-                                   jobject class_loader,
-                                   jobjectArray dex_elements,
-                                   std::string* error_msg /*out*/) const {
+OatFileManager::CheckCollisionResult OatFileManager::CheckCollision(
+    const OatFile* oat_file,
+    const ClassLoaderContext* context,
+    /*out*/ std::string* error_msg) const {
   DCHECK(oat_file != nullptr);
   DCHECK(error_msg != nullptr);
 
-  std::vector<const DexFile*> dex_files_loaded;
+  // The context might be null if there are unrecognized class loaders in the chain or they
+  // don't meet sensible sanity conditions. In this case we assume that the app knows what it's
+  // doing and accept the oat file.
+  // Note that this has correctness implications as we cannot guarantee that the class resolution
+  // used during compilation is OK (b/37777332).
+  if (context == nullptr) {
+    LOG(WARNING) << "Skipping duplicate class check due to unsupported classloader";
+    return CheckCollisionResult::kSkippedUnsupportedClassLoader;
+  }
 
-  // Try to get dex files from the given class loader. If the class loader is null, or we do
-  // not support one of the class loaders in the chain, we do nothing and assume the collision
-  // check has succeeded.
-  bool class_loader_ok = false;
-  {
-    ScopedObjectAccess soa(Thread::Current());
-    StackHandleScope<2> hs(Thread::Current());
-    Handle<mirror::ClassLoader> h_class_loader =
-        hs.NewHandle(soa.Decode<mirror::ClassLoader>(class_loader));
-    Handle<mirror::ObjectArray<mirror::Object>> h_dex_elements =
-        hs.NewHandle(soa.Decode<mirror::ObjectArray<mirror::Object>>(dex_elements));
-    if (h_class_loader != nullptr &&
-        GetDexFilesFromClassLoader(soa, h_class_loader.Get(), &dex_files_loaded)) {
-      class_loader_ok = true;
+  // If the oat file loading context matches the context used during compilation then we accept
+  // the oat file without addition checks
+  ClassLoaderContext::VerificationResult result = context->VerifyClassLoaderContextMatch(
+      oat_file->GetClassLoaderContext(),
+      /*verify_names=*/ true,
+      /*verify_checksums=*/ true);
+  switch (result) {
+    case ClassLoaderContext::VerificationResult::kForcedToSkipChecks:
+      return CheckCollisionResult::kSkippedClassLoaderContextSharedLibrary;
+    case ClassLoaderContext::VerificationResult::kMismatch:
+      // Mismatched context, do the actual collision check.
+      break;
+    case ClassLoaderContext::VerificationResult::kVerifies:
+      return CheckCollisionResult::kNoCollisions;
+  }
 
-      // In this case, also take into account the dex_elements array, if given. We don't need to
-      // read it otherwise, as we'll compare against all open oat files anyways.
-      GetDexFilesFromDexElementsArray(soa, h_dex_elements, &dex_files_loaded);
-    } else if (h_class_loader != nullptr) {
-      VLOG(class_linker) << "Something unsupported with "
-                         << mirror::Class::PrettyClass(h_class_loader->GetClass());
+  // The class loader context does not match. Perform a full duplicate classes check.
+  return CheckClassCollision(oat_file, context, error_msg)
+      ? CheckCollisionResult::kPerformedHasCollisions : CheckCollisionResult::kNoCollisions;
+}
 
-      // This is a class loader we don't recognize. Our earlier strategy would
-      // be to perform a global duplicate class check (with all loaded oat files)
-      // but that seems overly conservative - we have no way of knowing that
-      // those files are present in the same loader hierarchy. Among other
-      // things, it hurt GMS core and its filtering class loader.
+bool OatFileManager::AcceptOatFile(CheckCollisionResult result) const {
+  // Take the file only if it has no collisions, or we must take it because of preopting.
+  // Also accept oat files for shared libraries and unsupported class loaders.
+  return result != CheckCollisionResult::kPerformedHasCollisions;
+}
+
+bool OatFileManager::ShouldLoadAppImage(CheckCollisionResult check_collision_result,
+                                        const OatFile* source_oat_file,
+                                        ClassLoaderContext* context,
+                                        std::string* error_msg) {
+  Runtime* const runtime = Runtime::Current();
+  if (kEnableAppImage && (!runtime->IsJavaDebuggable() || source_oat_file->IsDebuggable())) {
+    // If we verified the class loader context (skipping due to the special marker doesn't
+    // count), then also avoid the collision check.
+    bool load_image = check_collision_result == CheckCollisionResult::kNoCollisions;
+    // If we skipped the collision check, we need to reverify to be sure its OK to load the
+    // image.
+    if (!load_image &&
+        check_collision_result ==
+            CheckCollisionResult::kSkippedClassLoaderContextSharedLibrary) {
+      // We can load the app image only if there are no collisions. If we know the
+      // class loader but didn't do the full collision check in HasCollisions(),
+      // do it now. b/77342775
+      load_image = !CheckClassCollision(source_oat_file, context, error_msg);
     }
+    return load_image;
   }
-
-  // Exit if we find a class loader we don't recognize. Proceed to check shared
-  // libraries and do a full class loader check otherwise.
-  if (!class_loader_ok) {
-      LOG(WARNING) << "Skipping duplicate class check due to unrecognized classloader";
-      return false;
-  }
-
-  // Exit if shared libraries are ok. Do a full duplicate classes check otherwise.
-  const std::string
-      shared_libraries(oat_file->GetOatHeader().GetStoreValueByKey(OatHeader::kClassPathKey));
-  if (AreSharedLibrariesOk(shared_libraries, dex_files_loaded)) {
-    return false;
-  }
-
-  // Vector that holds the newly opened dex files live, this is done to prevent leaks.
-  std::vector<std::unique_ptr<const DexFile>> opened_dex_files;
-
-  ScopedTrace st("Collision check");
-  // Add dex files from the oat file to check.
-  std::vector<const DexFile*> dex_files_unloaded;
-  AddDexFilesFromOat(oat_file, &dex_files_unloaded, &opened_dex_files);
-  return CollisionCheck(dex_files_loaded, dex_files_unloaded, error_msg);
+  return false;
 }
 
 std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
@@ -615,52 +460,41 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
   Locks::mutator_lock_->AssertNotHeld(self);
   Runtime* const runtime = Runtime::Current();
 
+  std::unique_ptr<ClassLoaderContext> context;
+  // If the class_loader is null there's not much we can do. This happens if a dex files is loaded
+  // directly with DexFile APIs instead of using class loaders.
+  if (class_loader == nullptr) {
+    LOG(WARNING) << "Opening an oat file without a class loader. "
+                 << "Are you using the deprecated DexFile APIs?";
+    context = nullptr;
+  } else {
+    context = ClassLoaderContext::CreateContextForClassLoader(class_loader, dex_elements);
+  }
+
   OatFileAssistant oat_file_assistant(dex_location,
                                       kRuntimeISA,
-                                      !runtime->IsAotCompiler());
-
-  // Lock the target oat location to avoid races generating and loading the
-  // oat file.
-  std::string error_msg;
-  if (!oat_file_assistant.Lock(/*out*/&error_msg)) {
-    // Don't worry too much if this fails. If it does fail, it's unlikely we
-    // can generate an oat file anyway.
-    VLOG(class_linker) << "OatFileAssistant::Lock: " << error_msg;
-  }
-
-  const OatFile* source_oat_file = nullptr;
-
-  if (!oat_file_assistant.IsUpToDate()) {
-    // Update the oat file on disk if we can, based on the --compiler-filter
-    // option derived from the current runtime options.
-    // This may fail, but that's okay. Best effort is all that matters here.
-    switch (oat_file_assistant.MakeUpToDate(/*profile_changed*/false, /*out*/ &error_msg)) {
-      case OatFileAssistant::kUpdateFailed:
-        LOG(WARNING) << error_msg;
-        break;
-
-      case OatFileAssistant::kUpdateNotAttempted:
-        // Avoid spamming the logs if we decided not to attempt making the oat
-        // file up to date.
-        VLOG(oat) << error_msg;
-        break;
-
-      case OatFileAssistant::kUpdateSucceeded:
-        // Nothing to do.
-        break;
-    }
-  }
+                                      !runtime->IsAotCompiler(),
+                                      only_use_system_oat_files_);
 
   // Get the oat file on disk.
   std::unique_ptr<const OatFile> oat_file(oat_file_assistant.GetBestOatFile().release());
+  VLOG(oat) << "OatFileAssistant(" << dex_location << ").GetBestOatFile()="
+            << reinterpret_cast<uintptr_t>(oat_file.get())
+            << " (executable=" << (oat_file != nullptr ? oat_file->IsExecutable() : false) << ")";
 
-  if (oat_file != nullptr) {
+  const OatFile* source_oat_file = nullptr;
+  CheckCollisionResult check_collision_result = CheckCollisionResult::kPerformedHasCollisions;
+  std::string error_msg;
+  if ((class_loader != nullptr || dex_elements != nullptr) && oat_file != nullptr) {
+    // Prevent oat files from being loaded if no class_loader or dex_elements are provided.
+    // This can happen when the deprecated DexFile.<init>(String) is called directly, and it
+    // could load oat files without checking the classpath, which would be incorrect.
     // Take the file only if it has no collisions, or we must take it because of preopting.
-    bool accept_oat_file =
-        !HasCollisions(oat_file.get(), class_loader, dex_elements, /*out*/ &error_msg);
+    check_collision_result = CheckCollision(oat_file.get(), context.get(), /*out*/ &error_msg);
+    bool accept_oat_file = AcceptOatFile(check_collision_result);
     if (!accept_oat_file) {
       // Failed the collision check. Print warning.
-      if (Runtime::Current()->IsDexFileFallbackEnabled()) {
+      if (runtime->IsDexFileFallbackEnabled()) {
         if (!oat_file_assistant.HasOriginalDexFiles()) {
           // We need to fallback but don't have original dex files. We have to
           // fallback to opening the existing oat file. This is potentially
@@ -704,8 +538,17 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
   if (source_oat_file != nullptr) {
     bool added_image_space = false;
     if (source_oat_file->IsExecutable()) {
-      std::unique_ptr<gc::space::ImageSpace> image_space =
-          kEnableAppImage ? oat_file_assistant.OpenImageSpace(source_oat_file) : nullptr;
+      ScopedTrace app_image_timing("AppImage:Loading");
+
+      // We need to throw away the image space if we are debuggable but the oat-file source of the
+      // image is not otherwise we might get classes with inlined methods or other such things.
+      std::unique_ptr<gc::space::ImageSpace> image_space;
+      if (ShouldLoadAppImage(check_collision_result,
+                             source_oat_file,
+                             context.get(),
+                             &error_msg)) {
+        image_space = oat_file_assistant.OpenImageSpace(source_oat_file);
+      }
       if (image_space != nullptr) {
         ScopedObjectAccess soa(self);
         StackHandleScope<1> hs(self);
@@ -736,7 +579,12 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
           if (added_image_space) {
             // Successfully added image space to heap, release the map so that it does not get
             // freed.
-            image_space.release();
+            image_space.release();  // NOLINT b/117926937
+
+            // Register for tracking.
+            for (const auto& dex_file : dex_files) {
+              dex::tracking::RegisterDexFile(dex_file.get());
+            }
           } else {
             LOG(INFO) << "Failed to add image file " << temp_error_msg;
             dex_files.clear();
@@ -756,9 +604,19 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
     if (!added_image_space) {
       DCHECK(dex_files.empty());
       dex_files = oat_file_assistant.LoadDexFiles(*source_oat_file, dex_location);
+
+      // Register for tracking.
+      for (const auto& dex_file : dex_files) {
+        dex::tracking::RegisterDexFile(dex_file.get());
+      }
     }
     if (dex_files.empty()) {
       error_msgs->push_back("Failed to open dex files from " + source_oat_file->GetLocation());
+    } else {
+      // Opened dex files from an oat file, madvise them to their loaded state.
+       for (const std::unique_ptr<const DexFile>& dex_file : dex_files) {
+         OatDexFile::MadviseDexFile(*dex_file, MadviseState::kMadviseStateAtLoad);
+       }
     }
   }
 
@@ -768,8 +626,13 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
     if (oat_file_assistant.HasOriginalDexFiles()) {
       if (Runtime::Current()->IsDexFileFallbackEnabled()) {
         static constexpr bool kVerifyChecksum = true;
-        if (!DexFile::Open(
-            dex_location, dex_location, kVerifyChecksum, /*out*/ &error_msg, &dex_files)) {
+        const ArtDexFileLoader dex_file_loader;
+        if (!dex_file_loader.Open(dex_location,
+                                  dex_location,
+                                  Runtime::Current()->IsVerificationEnabled(),
+                                  kVerifyChecksum,
+                                  /*out*/ &error_msg,
+                                  &dex_files)) {
           LOG(WARNING) << error_msg;
           error_msgs->push_back("Failed to open dex files from " + std::string(dex_location)
                                 + " because: " + error_msg);
@@ -783,7 +646,409 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
     }
   }
 
+  if (Runtime::Current()->GetJit() != nullptr) {
+    ScopedObjectAccess soa(self);
+    Runtime::Current()->GetJit()->RegisterDexFiles(
+        dex_files, soa.Decode<mirror::ClassLoader>(class_loader));
+  }
+
   return dex_files;
+}
+
+static std::vector<const DexFile::Header*> GetDexFileHeaders(const std::vector<MemMap>& maps) {
+  std::vector<const DexFile::Header*> headers;
+  headers.reserve(maps.size());
+  for (const MemMap& map : maps) {
+    DCHECK(map.IsValid());
+    headers.push_back(reinterpret_cast<const DexFile::Header*>(map.Begin()));
+  }
+  return headers;
+}
+
+static std::vector<const DexFile::Header*> GetDexFileHeaders(
+    const std::vector<const DexFile*>& dex_files) {
+  std::vector<const DexFile::Header*> headers;
+  headers.reserve(dex_files.size());
+  for (const DexFile* dex_file : dex_files) {
+    headers.push_back(&dex_file->GetHeader());
+  }
+  return headers;
+}
+
+std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
+    std::vector<MemMap>&& dex_mem_maps,
+    jobject class_loader,
+    jobjectArray dex_elements,
+    const OatFile** out_oat_file,
+    std::vector<std::string>* error_msgs) {
+  std::vector<std::unique_ptr<const DexFile>> dex_files = OpenDexFilesFromOat_Impl(
+      std::move(dex_mem_maps),
+      class_loader,
+      dex_elements,
+      out_oat_file,
+      error_msgs);
+
+  if (error_msgs->empty()) {
+    // Remove write permission from DexFile pages. We do this at the end because
+    // OatFile assigns OatDexFile pointer in the DexFile objects.
+    for (std::unique_ptr<const DexFile>& dex_file : dex_files) {
+      if (!dex_file->DisableWrite()) {
+        error_msgs->push_back("Failed to make dex file " + dex_file->GetLocation() + " read-only");
+      }
+    }
+  }
+
+  if (!error_msgs->empty()) {
+    return std::vector<std::unique_ptr<const DexFile>>();
+  }
+
+  return dex_files;
+}
+
+std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat_Impl(
+    std::vector<MemMap>&& dex_mem_maps,
+    jobject class_loader,
+    jobjectArray dex_elements,
+    const OatFile** out_oat_file,
+    std::vector<std::string>* error_msgs) {
+  ScopedTrace trace(__FUNCTION__);
+  std::string error_msg;
+  DCHECK(error_msgs != nullptr);
+
+  // Extract dex file headers from `dex_mem_maps`.
+  const std::vector<const DexFile::Header*> dex_headers = GetDexFileHeaders(dex_mem_maps);
+
+  // Determine dex/vdex locations and the combined location checksum.
+  uint32_t location_checksum;
+  std::string dex_location;
+  std::string vdex_path;
+  bool has_vdex = OatFileAssistant::AnonymousDexVdexLocation(dex_headers,
+                                                             kRuntimeISA,
+                                                             &location_checksum,
+                                                             &dex_location,
+                                                             &vdex_path);
+
+  // Attempt to open an existing vdex and check dex file checksums match.
+  std::unique_ptr<VdexFile> vdex_file = nullptr;
+  if (has_vdex && OS::FileExists(vdex_path.c_str())) {
+    vdex_file = VdexFile::Open(vdex_path,
+                               /* writable= */ false,
+                               /* low_4gb= */ false,
+                               /* unquicken= */ false,
+                               &error_msg);
+    if (vdex_file == nullptr) {
+      LOG(WARNING) << "Failed to open vdex " << vdex_path << ": " << error_msg;
+    } else if (!vdex_file->MatchesDexFileChecksums(dex_headers)) {
+      LOG(WARNING) << "Failed to open vdex " << vdex_path << ": dex file checksum mismatch";
+      vdex_file.reset(nullptr);
+    }
+  }
+
+  // Load dex files. Skip structural dex file verification if vdex was found
+  // and dex checksums matched.
+  std::vector<std::unique_ptr<const DexFile>> dex_files;
+  for (size_t i = 0; i < dex_mem_maps.size(); ++i) {
+    static constexpr bool kVerifyChecksum = true;
+    const ArtDexFileLoader dex_file_loader;
+    std::unique_ptr<const DexFile> dex_file(dex_file_loader.Open(
+        DexFileLoader::GetMultiDexLocation(i, dex_location.c_str()),
+        location_checksum,
+        std::move(dex_mem_maps[i]),
+        /* verify= */ (vdex_file == nullptr) && Runtime::Current()->IsVerificationEnabled(),
+        kVerifyChecksum,
+        &error_msg));
+    if (dex_file != nullptr) {
+      dex::tracking::RegisterDexFile(dex_file.get());  // Register for tracking.
+      dex_files.push_back(std::move(dex_file));
+    } else {
+      error_msgs->push_back("Failed to open dex files from memory: " + error_msg);
+    }
+  }
+
+  // Check if we should proceed to creating an OatFile instance backed by the vdex.
+  // We need: (a) an existing vdex, (b) class loader (can be null if invoked via reflection),
+  // and (c) no errors during dex file loading.
+  if (vdex_file == nullptr || class_loader == nullptr || !error_msgs->empty()) {
+    return dex_files;
+  }
+
+  // Attempt to create a class loader context, check OpenDexFiles succeeds (prerequisite
+  // for using the context later).
+  std::unique_ptr<ClassLoaderContext> context = ClassLoaderContext::CreateContextForClassLoader(
+      class_loader,
+      dex_elements);
+  if (context == nullptr) {
+    LOG(ERROR) << "Could not create class loader context for " << vdex_path;
+    return dex_files;
+  }
+  DCHECK(context->OpenDexFiles(kRuntimeISA, ""))
+      << "Context created from already opened dex files should not attempt to open again";
+
+  // Check that we can use the vdex against this boot class path and in this class loader context.
+  // Note 1: We do not need a class loader collision check because there is no compiled code.
+  // Note 2: If these checks fail, we cannot fast-verify because the vdex does not contain
+  //         full VerifierDeps.
+  if (!vdex_file->MatchesBootClassPathChecksums() ||
+      !vdex_file->MatchesClassLoaderContext(*context.get())) {
+    return dex_files;
+  }
+
+  // Initialize an OatFile instance backed by the loaded vdex.
+  std::unique_ptr<OatFile> oat_file(OatFile::OpenFromVdex(MakeNonOwningPointerVector(dex_files),
+                                                          std::move(vdex_file),
+                                                          dex_location));
+  DCHECK(oat_file != nullptr);
+  VLOG(class_linker) << "Registering " << oat_file->GetLocation();
+  *out_oat_file = RegisterOatFile(std::move(oat_file));
+  return dex_files;
+}
+
+// Check how many vdex files exist in the same directory as the vdex file we are about
+// to write. If more than or equal to kAnonymousVdexCacheSize, unlink the least
+// recently used one(s) (according to stat-reported atime).
+static bool UnlinkLeastRecentlyUsedVdexIfNeeded(const std::string& vdex_path_to_add,
+                                                std::string* error_msg) {
+  if (OS::FileExists(vdex_path_to_add.c_str())) {
+    // File already exists and will be overwritten.
+    // This will not change the number of entries in the cache.
+    return true;
+  }
+
+  auto last_slash = vdex_path_to_add.rfind('/');
+  CHECK(last_slash != std::string::npos);
+  std::string vdex_dir = vdex_path_to_add.substr(0, last_slash + 1);
+
+  if (!OS::DirectoryExists(vdex_dir.c_str())) {
+    // Folder does not exist yet. Cache has zero entries.
+    return true;
+  }
+
+  std::vector<std::pair<time_t, std::string>> cache;
+
+  DIR* c_dir = opendir(vdex_dir.c_str());
+  if (c_dir == nullptr) {
+    *error_msg = "Unable to open " + vdex_dir + " to delete unused vdex files";
+    return false;
+  }
+  for (struct dirent* de = readdir(c_dir); de != nullptr; de = readdir(c_dir)) {
+    if (de->d_type != DT_REG) {
+      continue;
+    }
+    std::string basename = de->d_name;
+    if (!OatFileAssistant::IsAnonymousVdexBasename(basename)) {
+      continue;
+    }
+    std::string fullname = vdex_dir + basename;
+
+    struct stat s;
+    int rc = TEMP_FAILURE_RETRY(stat(fullname.c_str(), &s));
+    if (rc == -1) {
+      *error_msg = "Failed to stat() anonymous vdex file " + fullname;
+      return false;
+    }
+
+    cache.push_back(std::make_pair(s.st_atime, fullname));
+  }
+  CHECK_EQ(0, closedir(c_dir)) << "Unable to close directory.";
+
+  if (cache.size() < OatFileManager::kAnonymousVdexCacheSize) {
+    return true;
+  }
+
+  std::sort(cache.begin(),
+            cache.end(),
+            [](const auto& a, const auto& b) { return a.first < b.first; });
+  for (size_t i = OatFileManager::kAnonymousVdexCacheSize - 1; i < cache.size(); ++i) {
+    if (unlink(cache[i].second.c_str()) != 0) {
+      *error_msg = "Could not unlink anonymous vdex file " + cache[i].second;
+      return false;
+    }
+  }
+
+  return true;
+}
+
+class BackgroundVerificationTask final : public Task {
+ public:
+  BackgroundVerificationTask(const std::vector<const DexFile*>& dex_files,
+                             jobject class_loader,
+                             const char* class_loader_context,
+                             const std::string& vdex_path)
+      : dex_files_(dex_files),
+        class_loader_context_(class_loader_context),
+        vdex_path_(vdex_path) {
+    Thread* const self = Thread::Current();
+    ScopedObjectAccess soa(self);
+    // Create a global ref for `class_loader` because it will be accessed from a different thread.
+    class_loader_ = soa.Vm()->AddGlobalRef(self, soa.Decode<mirror::ClassLoader>(class_loader));
+    CHECK(class_loader_ != nullptr);
+  }
+
+  ~BackgroundVerificationTask() {
+    Thread* const self = Thread::Current();
+    ScopedObjectAccess soa(self);
+    soa.Vm()->DeleteGlobalRef(self, class_loader_);
+  }
+
+  void Run(Thread* self) override {
+    std::string error_msg;
+    ClassLinker* const class_linker = Runtime::Current()->GetClassLinker();
+    verifier::VerifierDeps verifier_deps(dex_files_);
+
+    // Iterate over all classes and verify them.
+    for (const DexFile* dex_file : dex_files_) {
+      for (uint32_t cdef_idx = 0; cdef_idx < dex_file->NumClassDefs(); cdef_idx++) {
+        const dex::ClassDef& class_def = dex_file->GetClassDef(cdef_idx);
+
+        // Take handles inside the loop. The background verification is low priority
+        // and we want to minimize the risk of blocking anyone else.
+        ScopedObjectAccess soa(self);
+        StackHandleScope<2> hs(self);
+        Handle<mirror::ClassLoader> h_loader(hs.NewHandle(
+            soa.Decode<mirror::ClassLoader>(class_loader_)));
+        Handle<mirror::Class> h_class(hs.NewHandle<mirror::Class>(class_linker->FindClass(
+            self,
+            dex_file->GetClassDescriptor(class_def),
+            h_loader)));
+
+        if (h_class == nullptr) {
+          CHECK(self->IsExceptionPending());
+          self->ClearException();
+          continue;
+        }
+
+        if (&h_class->GetDexFile() != dex_file) {
+          // There is a different class in the class path or a parent class loader
+          // with the same descriptor. This `h_class` is not resolvable, skip it.
+          continue;
+        }
+
+        CHECK(h_class->IsResolved()) << h_class->PrettyDescriptor();
+        class_linker->VerifyClass(self, h_class);
+        if (h_class->IsErroneous()) {
+          // ClassLinker::VerifyClass throws, which isn't useful here.
+          CHECK(soa.Self()->IsExceptionPending());
+          soa.Self()->ClearException();
+        }
+
+        CHECK(h_class->IsVerified() || h_class->IsErroneous())
+            << h_class->PrettyDescriptor() << ": state=" << h_class->GetStatus();
+
+        if (h_class->IsVerified()) {
+          verifier_deps.RecordClassVerified(*dex_file, class_def);
+        }
+      }
+    }
+
+    // Delete old vdex files if there are too many in the folder.
+    if (!UnlinkLeastRecentlyUsedVdexIfNeeded(vdex_path_, &error_msg)) {
+      LOG(ERROR) << "Could not unlink old vdex files " << vdex_path_ << ": " << error_msg;
+      return;
+    }
+
+    // Construct a vdex file and write `verifier_deps` into it.
+    if (!VdexFile::WriteToDisk(vdex_path_,
+                               dex_files_,
+                               verifier_deps,
+                               class_loader_context_,
+                               &error_msg)) {
+      LOG(ERROR) << "Could not write anonymous vdex " << vdex_path_ << ": " << error_msg;
+      return;
+    }
+  }
+
+  void Finalize() override {
+    delete this;
+  }
+
+ private:
+  const std::vector<const DexFile*> dex_files_;
+  jobject class_loader_;
+  const std::string class_loader_context_;
+  const std::string vdex_path_;
+
+  DISALLOW_COPY_AND_ASSIGN(BackgroundVerificationTask);
+};
+
+void OatFileManager::RunBackgroundVerification(const std::vector<const DexFile*>& dex_files,
+                                               jobject class_loader,
+                                               const char* class_loader_context) {
+  Runtime* const runtime = Runtime::Current();
+  Thread* const self = Thread::Current();
+
+  if (runtime->IsJavaDebuggable()) {
+    // Threads created by ThreadPool ("runtime threads") are not allowed to load
+    // classes when debuggable to match class-initialization semantics
+    // expectations. Do not verify in the background.
+    return;
+  }
+
+  if (!IsSdkVersionSetAndAtLeast(runtime->GetTargetSdkVersion(), SdkVersion::kQ)) {
+    // Do not run for legacy apps as they may depend on the previous class loader behaviour.
+    return;
+  }
+
+  if (runtime->IsShuttingDown(self)) {
+    // Not allowed to create new threads during runtime shutdown.
+    return;
+  }
+
+  uint32_t location_checksum;
+  std::string dex_location;
+  std::string vdex_path;
+  if (OatFileAssistant::AnonymousDexVdexLocation(GetDexFileHeaders(dex_files),
+                                                 kRuntimeISA,
+                                                 &location_checksum,
+                                                 &dex_location,
+                                                 &vdex_path)) {
+    if (verification_thread_pool_ == nullptr) {
+      verification_thread_pool_.reset(
+          new ThreadPool("Verification thread pool", /* num_threads= */ 1));
+      verification_thread_pool_->StartWorkers(self);
+    }
+    verification_thread_pool_->AddTask(self, new BackgroundVerificationTask(
+        dex_files,
+        class_loader,
+        class_loader_context,
+        vdex_path));
+  }
+}
+
+void OatFileManager::WaitForWorkersToBeCreated() {
+  DCHECK(!Runtime::Current()->IsShuttingDown(Thread::Current()))
+      << "Cannot create new threads during runtime shutdown";
+  if (verification_thread_pool_ != nullptr) {
+    verification_thread_pool_->WaitForWorkersToBeCreated();
+  }
+}
+
+void OatFileManager::DeleteThreadPool() {
+  verification_thread_pool_.reset(nullptr);
+}
+
+void OatFileManager::WaitForBackgroundVerificationTasks() {
+  if (verification_thread_pool_ != nullptr) {
+    Thread* const self = Thread::Current();
+    verification_thread_pool_->WaitForWorkersToBeCreated();
+    verification_thread_pool_->Wait(self, /* do_work= */ true, /* may_hold_locks= */ false);
+  }
+}
+
+void OatFileManager::SetOnlyUseSystemOatFiles(bool enforce, bool assert_no_files_loaded) {
+  ReaderMutexLock mu(Thread::Current(), *Locks::oat_file_manager_lock_);
+  if (!only_use_system_oat_files_ && enforce && assert_no_files_loaded) {
+    // Make sure all files that were loaded up to this point are on /system. Skip the image
+    // files.
+    std::vector<const OatFile*> boot_vector = GetBootOatFiles();
+    std::unordered_set<const OatFile*> boot_set(boot_vector.begin(), boot_vector.end());
+
+    for (const std::unique_ptr<const OatFile>& oat_file : oat_files_) {
+      if (boot_set.find(oat_file.get()) == boot_set.end()) {
+        CHECK(LocationIsOnSystem(oat_file->GetLocation().c_str())) << oat_file->GetLocation();
+      }
+    }
+  }
+  only_use_system_oat_files_ = enforce;
 }
 
 void OatFileManager::DumpForSigQuit(std::ostream& os) {

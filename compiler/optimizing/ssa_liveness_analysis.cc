@@ -26,7 +26,7 @@ namespace art {
 void SsaLivenessAnalysis::Analyze() {
   // Compute the linear order directly in the graph's data structure
   // (there are no more following graph mutations).
-  LinearizeGraph(graph_, graph_->GetArena(), &graph_->linear_order_);
+  LinearizeGraph(graph_, &graph_->linear_order_);
 
   // Liveness analysis.
   NumberInstructions();
@@ -56,7 +56,7 @@ void SsaLivenessAnalysis::NumberInstructions() {
         instructions_from_ssa_index_.push_back(current);
         current->SetSsaIndex(ssa_index++);
         current->SetLiveInterval(
-            LiveInterval::MakeInterval(graph_->GetArena(), current->GetType(), current));
+            LiveInterval::MakeInterval(allocator_, current->GetType(), current));
       }
       current->SetLifetimePosition(lifetime_position);
     }
@@ -74,7 +74,7 @@ void SsaLivenessAnalysis::NumberInstructions() {
         instructions_from_ssa_index_.push_back(current);
         current->SetSsaIndex(ssa_index++);
         current->SetLiveInterval(
-            LiveInterval::MakeInterval(graph_->GetArena(), current->GetType(), current));
+            LiveInterval::MakeInterval(allocator_, current->GetType(), current));
       }
       instructions_from_lifetime_position_.push_back(current);
       current->SetLifetimePosition(lifetime_position);
@@ -89,7 +89,7 @@ void SsaLivenessAnalysis::NumberInstructions() {
 void SsaLivenessAnalysis::ComputeLiveness() {
   for (HBasicBlock* block : graph_->GetLinearOrder()) {
     block_infos_[block->GetBlockId()] =
-        new (graph_->GetArena()) BlockInfo(graph_->GetArena(), *block, number_of_ssa_values_);
+        new (allocator_) BlockInfo(allocator_, *block, number_of_ssa_values_);
   }
 
   // Compute the live ranges, as well as the initial live_in, live_out, and kill sets.
@@ -103,9 +103,9 @@ void SsaLivenessAnalysis::ComputeLiveness() {
   ComputeLiveInAndLiveOutSets();
 }
 
-static void RecursivelyProcessInputs(HInstruction* current,
-                                     HInstruction* actual_user,
-                                     BitVector* live_in) {
+void SsaLivenessAnalysis::RecursivelyProcessInputs(HInstruction* current,
+                                                   HInstruction* actual_user,
+                                                   BitVector* live_in) {
   HInputsRef inputs = current->GetInputs();
   for (size_t i = 0; i < inputs.size(); ++i) {
     HInstruction* input = inputs[i];
@@ -120,7 +120,7 @@ static void RecursivelyProcessInputs(HInstruction* current,
       DCHECK(input->HasSsaIndex());
       // `input` generates a result used by `current`. Add use and update
       // the live-in set.
-      input->GetLiveInterval()->AddUse(current, /* environment */ nullptr, i, actual_user);
+      input->GetLiveInterval()->AddUse(current, /* environment= */ nullptr, i, actual_user);
       live_in->SetBit(input->GetSsaIndex());
     } else if (has_out_location) {
       // `input` generates a result but it is not used by `current`.
@@ -131,7 +131,36 @@ static void RecursivelyProcessInputs(HInstruction* current,
       // Check that the inlined input is not a phi. Recursing on loop phis could
       // lead to an infinite loop.
       DCHECK(!input->IsPhi());
+      DCHECK(!input->HasEnvironment());
       RecursivelyProcessInputs(input, actual_user, live_in);
+    }
+  }
+}
+
+void SsaLivenessAnalysis::ProcessEnvironment(HInstruction* current,
+                                             HInstruction* actual_user,
+                                             BitVector* live_in) {
+  for (HEnvironment* environment = current->GetEnvironment();
+       environment != nullptr;
+       environment = environment->GetParent()) {
+    // Handle environment uses. See statements (b) and (c) of the
+    // SsaLivenessAnalysis.
+    for (size_t i = 0, e = environment->Size(); i < e; ++i) {
+      HInstruction* instruction = environment->GetInstructionAt(i);
+      if (instruction == nullptr) {
+        continue;
+      }
+      bool should_be_live = ShouldBeLiveForEnvironment(current, instruction);
+      // If this environment use does not keep the instruction live, it does not
+      // affect the live range of that instruction.
+      if (should_be_live) {
+        CHECK(instruction->HasSsaIndex()) << instruction->DebugName();
+        live_in->SetBit(instruction->GetSsaIndex());
+        instruction->GetLiveInterval()->AddUse(current,
+                                               environment,
+                                               i,
+                                               actual_user);
+      }
     }
   }
 }
@@ -186,27 +215,6 @@ void SsaLivenessAnalysis::ComputeLiveRanges() {
         current->GetLiveInterval()->SetFrom(current->GetLifetimePosition());
       }
 
-      // Process the environment first, because we know their uses come after
-      // or at the same liveness position of inputs.
-      for (HEnvironment* environment = current->GetEnvironment();
-           environment != nullptr;
-           environment = environment->GetParent()) {
-        // Handle environment uses. See statements (b) and (c) of the
-        // SsaLivenessAnalysis.
-        for (size_t i = 0, e = environment->Size(); i < e; ++i) {
-          HInstruction* instruction = environment->GetInstructionAt(i);
-          bool should_be_live = ShouldBeLiveForEnvironment(current, instruction);
-          if (should_be_live) {
-            DCHECK(instruction->HasSsaIndex());
-            live_in->SetBit(instruction->GetSsaIndex());
-          }
-          if (instruction != nullptr) {
-            instruction->GetLiveInterval()->AddUse(
-                current, environment, i, /* actual_user */ nullptr, should_be_live);
-          }
-        }
-      }
-
       // Process inputs of instructions.
       if (current->IsEmittedAtUseSite()) {
         if (kIsDebugBuild) {
@@ -219,6 +227,16 @@ void SsaLivenessAnalysis::ComputeLiveRanges() {
           DCHECK(!current->HasEnvironmentUses());
         }
       } else {
+        // Process the environment first, because we know their uses come after
+        // or at the same liveness position of inputs.
+        ProcessEnvironment(current, current, live_in);
+
+        // Special case implicit null checks. We want their environment uses to be
+        // emitted at the instruction doing the actual null check.
+        HNullCheck* check = current->GetImplicitNullCheck();
+        if (check != nullptr) {
+          ProcessEnvironment(check, current, live_in);
+        }
         RecursivelyProcessInputs(current, current, live_in);
       }
     }
@@ -356,14 +374,16 @@ int LiveInterval::FindFirstRegisterHint(size_t* free_until,
     }
   }
 
-  UsePosition* use = first_use_;
   size_t start = GetStart();
   size_t end = GetEnd();
-  while (use != nullptr && use->GetPosition() <= end) {
-    size_t use_position = use->GetPosition();
-    if (use_position >= start && !use->IsSynthesized()) {
-      HInstruction* user = use->GetUser();
-      size_t input_index = use->GetInputIndex();
+  for (const UsePosition& use : GetUses()) {
+    size_t use_position = use.GetPosition();
+    if (use_position > end) {
+      break;
+    }
+    if (use_position >= start && !use.IsSynthesized()) {
+      HInstruction* user = use.GetUser();
+      size_t input_index = use.GetInputIndex();
       if (user->IsPhi()) {
         // If the phi has a register, try to use the same.
         Location phi_location = user->GetLiveInterval()->ToLocation();
@@ -395,7 +415,7 @@ int LiveInterval::FindFirstRegisterHint(size_t* free_until,
       } else {
         // If the instruction is expected in a register, try to use it.
         LocationSummary* locations = user->GetLocations();
-        Location expected = locations->InAt(use->GetInputIndex());
+        Location expected = locations->InAt(use.GetInputIndex());
         // We use the user's lifetime position - 1 (and not `use_position`) because the
         // register is blocked at the beginning of the user.
         size_t position = user->GetLifetimePosition() - 1;
@@ -408,7 +428,6 @@ int LiveInterval::FindFirstRegisterHint(size_t* free_until,
         }
       }
     }
-    use = use->GetNext();
   }
 
   return kNoRegister;
@@ -473,11 +492,14 @@ size_t LiveInterval::NumberOfSpillSlotsNeeded() const {
   // For a SIMD operation, compute the number of needed spill slots.
   // TODO: do through vector type?
   HInstruction* definition = GetParent()->GetDefinedBy();
-  if (definition != nullptr && definition->IsVecOperation()) {
+  if (definition != nullptr && HVecOperation::ReturnsSIMDValue(definition)) {
+    if (definition->IsPhi()) {
+      definition = definition->InputAt(1);  // SIMD always appears on back-edge
+    }
     return definition->AsVecOperation()->GetVectorNumberOfBytes() / kVRegSize;
   }
   // Return number of needed spill slots based on type.
-  return (type_ == Primitive::kPrimLong || type_ == Primitive::kPrimDouble) ? 2 : 1;
+  return (type_ == DataType::Type::kInt64 || type_ == DataType::Type::kFloat64) ? 2 : 1;
 }
 
 Location LiveInterval::ToLocation() const {

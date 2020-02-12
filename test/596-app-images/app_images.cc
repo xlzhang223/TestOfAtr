@@ -14,16 +14,18 @@
  * limitations under the License.
  */
 
-#include <iostream>
 #include <pthread.h>
-#include <stdio.h>
+
+#include <cstdio>
+#include <iostream>
 #include <vector>
+
+#include "jni.h"
 
 #include "gc/heap.h"
 #include "gc/space/image_space.h"
 #include "gc/space/space-inl.h"
 #include "image.h"
-#include "jni.h"
 #include "mirror/class.h"
 #include "runtime.h"
 #include "scoped_thread_state_change-inl.h"
@@ -61,6 +63,12 @@ extern "C" JNIEXPORT jboolean JNICALL Java_Main_checkAppImageContains(JNIEnv*, j
     }
   }
   return JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL Java_Main_checkInitialized(JNIEnv*, jclass, jclass c) {
+  ScopedObjectAccess soa(Thread::Current());
+  ObjPtr<mirror::Class> klass_ptr = soa.Decode<mirror::Class>(c);
+  return klass_ptr->IsInitialized();
 }
 
 }  // namespace

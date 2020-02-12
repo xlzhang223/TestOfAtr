@@ -18,6 +18,7 @@
 
 #include <memory>
 
+#include "base/logging.h"  // For VLOG
 #include "base/stl_util.h"
 #include "bitmap-inl.h"
 #include "card_table-inl.h"
@@ -27,8 +28,9 @@
 #include "gc/space/space.h"
 #include "mirror/object-inl.h"
 #include "mirror/object-refvisitor-inl.h"
+#include "object_callbacks.h"
 #include "space_bitmap-inl.h"
-#include "thread-inl.h"
+#include "thread-current-inl.h"
 
 namespace art {
 namespace gc {
@@ -114,8 +116,8 @@ class ModUnionUpdateObjectReferencesVisitor {
   }
 
  private:
-  template<bool kPoisonReferences>
-  void MarkReference(mirror::ObjectReference<kPoisonReferences, mirror::Object>* obj_ptr) const
+  template<typename CompressedReferenceType>
+  void MarkReference(CompressedReferenceType* obj_ptr) const
       REQUIRES_SHARED(Locks::mutator_lock_) {
     // Only add the reference if it is non null and fits our criteria.
     mirror::Object* ref = obj_ptr->AsMirrorPtr();
@@ -327,8 +329,8 @@ class ModUnionCheckReferences {
 
 class EmptyMarkObjectVisitor : public MarkObjectVisitor {
  public:
-  mirror::Object* MarkObject(mirror::Object* obj) OVERRIDE {return obj;}
-  void MarkHeapReference(mirror::HeapReference<mirror::Object>*, bool) OVERRIDE {}
+  mirror::Object* MarkObject(mirror::Object* obj) override {return obj;}
+  void MarkHeapReference(mirror::HeapReference<mirror::Object>*, bool) override {}
 };
 
 void ModUnionTable::FilterCards() {
@@ -383,7 +385,7 @@ void ModUnionTableReferenceCache::Dump(std::ostream& os) {
   }
 }
 
-void ModUnionTableReferenceCache::VisitObjects(ObjectCallback* callback, void* arg) {
+void ModUnionTableReferenceCache::VisitObjects(ObjectCallback callback, void* arg) {
   CardTable* const card_table = heap_->GetCardTable();
   ContinuousSpaceBitmap* live_bitmap = space_->GetLiveBitmap();
   for (uint8_t* card : cleared_cards_) {
@@ -391,7 +393,7 @@ void ModUnionTableReferenceCache::VisitObjects(ObjectCallback* callback, void* a
     uintptr_t end = start + CardTable::kCardSize;
     live_bitmap->VisitMarkedRange(start,
                                   end,
-                                  [this, callback, arg](mirror::Object* obj) {
+                                  [callback, arg](mirror::Object* obj) {
       callback(obj, arg);
     });
   }
@@ -402,7 +404,7 @@ void ModUnionTableReferenceCache::VisitObjects(ObjectCallback* callback, void* a
     uintptr_t end = start + CardTable::kCardSize;
     live_bitmap->VisitMarkedRange(start,
                                   end,
-                                  [this, callback, arg](mirror::Object* obj) {
+                                  [callback, arg](mirror::Object* obj) {
       callback(obj, arg);
     });
   }
@@ -460,7 +462,7 @@ void ModUnionTableReferenceCache::UpdateAndMarkReferences(MarkObjectVisitor* vis
     for (mirror::HeapReference<mirror::Object>* obj_ptr : references) {
       if (obj_ptr->AsMirrorPtr() != nullptr) {
         all_null = false;
-        visitor->MarkHeapReference(obj_ptr, /*do_atomic_update*/ false);
+        visitor->MarkHeapReference(obj_ptr, /*do_atomic_update=*/ false);
       }
     }
     count += references.size();
@@ -550,7 +552,7 @@ void ModUnionTableCardCache::UpdateAndMarkReferences(MarkObjectVisitor* visitor)
       0, RoundUp(space_->Size(), CardTable::kCardSize) / CardTable::kCardSize, bit_visitor);
 }
 
-void ModUnionTableCardCache::VisitObjects(ObjectCallback* callback, void* arg) {
+void ModUnionTableCardCache::VisitObjects(ObjectCallback callback, void* arg) {
   card_bitmap_->VisitSetBits(
       0,
       RoundUp(space_->Size(), CardTable::kCardSize) / CardTable::kCardSize,
@@ -560,7 +562,7 @@ void ModUnionTableCardCache::VisitObjects(ObjectCallback* callback, void* arg) {
             << start << " " << *space_;
         space_->GetLiveBitmap()->VisitMarkedRange(start,
                                                   start + CardTable::kCardSize,
-                                                  [this, callback, arg](mirror::Object* obj) {
+                                                  [callback, arg](mirror::Object* obj) {
           callback(obj, arg);
         });
       });

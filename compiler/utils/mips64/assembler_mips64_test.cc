@@ -35,32 +35,44 @@ struct MIPS64CpuRegisterCompare {
 };
 
 class AssemblerMIPS64Test : public AssemblerTest<mips64::Mips64Assembler,
+                                                 mips64::Mips64Label,
                                                  mips64::GpuRegister,
                                                  mips64::FpuRegister,
                                                  uint32_t,
                                                  mips64::VectorRegister> {
  public:
-  typedef AssemblerTest<mips64::Mips64Assembler,
-                        mips64::GpuRegister,
-                        mips64::FpuRegister,
-                        uint32_t,
-                        mips64::VectorRegister> Base;
+  using Base = AssemblerTest<mips64::Mips64Assembler,
+                             mips64::Mips64Label,
+                             mips64::GpuRegister,
+                             mips64::FpuRegister,
+                             uint32_t,
+                             mips64::VectorRegister>;
+
+  // These tests were taking too long, so we hide the DriverStr() from AssemblerTest<>
+  // and reimplement it without the verification against `assembly_string`. b/73903608
+  void DriverStr(const std::string& assembly_string ATTRIBUTE_UNUSED,
+                 const std::string& test_name ATTRIBUTE_UNUSED) {
+    GetAssembler()->FinalizeCode();
+    std::vector<uint8_t> data(GetAssembler()->CodeSize());
+    MemoryRegion code(data.data(), data.size());
+    GetAssembler()->FinalizeInstructions(code);
+  }
 
   AssemblerMIPS64Test()
       : instruction_set_features_(Mips64InstructionSetFeatures::FromVariant("default", nullptr)) {}
 
  protected:
   // Get the typically used name for this architecture, e.g., aarch64, x86-64, ...
-  std::string GetArchitectureString() OVERRIDE {
+  std::string GetArchitectureString() override {
     return "mips64";
   }
 
-  std::string GetAssemblerCmdName() OVERRIDE {
+  std::string GetAssemblerCmdName() override {
     // We assemble and link for MIPS64R6. See GetAssemblerParameters() for details.
     return "gcc";
   }
 
-  std::string GetAssemblerParameters() OVERRIDE {
+  std::string GetAssemblerParameters() override {
     // We assemble and link for MIPS64R6. The reason is that object files produced for MIPS64R6
     // (and MIPS32R6) with the GNU assembler don't have correct final offsets in PC-relative
     // branches in the .text section and so they require a relocation pass (there's a relocation
@@ -68,7 +80,7 @@ class AssemblerMIPS64Test : public AssemblerTest<mips64::Mips64Assembler,
     return " -march=mips64r6 -mmsa -Wa,--no-warn -Wl,-Ttext=0 -Wl,-e0 -nostdlib";
   }
 
-  void Pad(std::vector<uint8_t>& data) OVERRIDE {
+  void Pad(std::vector<uint8_t>& data) override {
     // The GNU linker unconditionally pads the code segment with NOPs to a size that is a multiple
     // of 16 and there doesn't appear to be a way to suppress this padding. Our assembler doesn't
     // pad, so, in order for two assembler outputs to match, we need to match the padding as well.
@@ -77,15 +89,15 @@ class AssemblerMIPS64Test : public AssemblerTest<mips64::Mips64Assembler,
     data.insert(data.end(), pad_size, 0);
   }
 
-  std::string GetDisassembleParameters() OVERRIDE {
+  std::string GetDisassembleParameters() override {
     return " -D -bbinary -mmips:isa64r6";
   }
 
-  mips64::Mips64Assembler* CreateAssembler(ArenaAllocator* arena) OVERRIDE {
-    return new (arena) mips64::Mips64Assembler(arena, instruction_set_features_.get());
+  mips64::Mips64Assembler* CreateAssembler(ArenaAllocator* allocator) override {
+    return new (allocator) mips64::Mips64Assembler(allocator, instruction_set_features_.get());
   }
 
-  void SetUpHelpers() OVERRIDE {
+  void SetUpHelpers() override {
     if (registers_.size() == 0) {
       registers_.push_back(new mips64::GpuRegister(mips64::ZERO));
       registers_.push_back(new mips64::GpuRegister(mips64::AT));
@@ -221,30 +233,35 @@ class AssemblerMIPS64Test : public AssemblerTest<mips64::Mips64Assembler,
     }
   }
 
-  void TearDown() OVERRIDE {
+  void TearDown() override {
     AssemblerTest::TearDown();
     STLDeleteElements(&registers_);
     STLDeleteElements(&fp_registers_);
     STLDeleteElements(&vec_registers_);
   }
 
-  std::vector<mips64::GpuRegister*> GetRegisters() OVERRIDE {
+  std::vector<mips64::Mips64Label> GetAddresses() override {
+    UNIMPLEMENTED(FATAL) << "Feature not implemented yet";
+    UNREACHABLE();
+  }
+
+  std::vector<mips64::GpuRegister*> GetRegisters() override {
     return registers_;
   }
 
-  std::vector<mips64::FpuRegister*> GetFPRegisters() OVERRIDE {
+  std::vector<mips64::FpuRegister*> GetFPRegisters() override {
     return fp_registers_;
   }
 
-  std::vector<mips64::VectorRegister*> GetVectorRegisters() OVERRIDE {
+  std::vector<mips64::VectorRegister*> GetVectorRegisters() override {
     return vec_registers_;
   }
 
-  uint32_t CreateImmediate(int64_t imm_value) OVERRIDE {
+  uint32_t CreateImmediate(int64_t imm_value) override {
     return imm_value;
   }
 
-  std::string GetSecondaryRegisterName(const mips64::GpuRegister& reg) OVERRIDE {
+  std::string GetSecondaryRegisterName(const mips64::GpuRegister& reg) override {
     CHECK(secondary_register_names_.find(reg) != secondary_register_names_.end());
     return secondary_register_names_[reg];
   }
@@ -257,11 +274,46 @@ class AssemblerMIPS64Test : public AssemblerTest<mips64::Mips64Assembler,
     return result;
   }
 
+  void BranchHelper(void (mips64::Mips64Assembler::*f)(mips64::Mips64Label*,
+                                                       bool),
+                    const std::string& instr_name,
+                    bool is_bare = false) {
+    mips64::Mips64Label label1, label2;
+    (Base::GetAssembler()->*f)(&label1, is_bare);
+    constexpr size_t kAdduCount1 = 63;
+    for (size_t i = 0; i != kAdduCount1; ++i) {
+      __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
+    }
+    __ Bind(&label1);
+    (Base::GetAssembler()->*f)(&label2, is_bare);
+    constexpr size_t kAdduCount2 = 64;
+    for (size_t i = 0; i != kAdduCount2; ++i) {
+      __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
+    }
+    __ Bind(&label2);
+    (Base::GetAssembler()->*f)(&label1, is_bare);
+    __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
+
+    std::string expected =
+        ".set noreorder\n" +
+        instr_name + " 1f\n" +
+        RepeatInsn(kAdduCount1, "addu $zero, $zero, $zero\n") +
+        "1:\n" +
+        instr_name + " 2f\n" +
+        RepeatInsn(kAdduCount2, "addu $zero, $zero, $zero\n") +
+        "2:\n" +
+        instr_name + " 1b\n" +
+        "addu $zero, $zero, $zero\n";
+    DriverStr(expected, instr_name);
+  }
+
   void BranchCondOneRegHelper(void (mips64::Mips64Assembler::*f)(mips64::GpuRegister,
-                                                                 mips64::Mips64Label*),
-                              const std::string& instr_name) {
+                                                                 mips64::Mips64Label*,
+                                                                 bool),
+                              const std::string& instr_name,
+                              bool is_bare = false) {
     mips64::Mips64Label label;
-    (Base::GetAssembler()->*f)(mips64::A0, &label);
+    (Base::GetAssembler()->*f)(mips64::A0, &label, is_bare);
     constexpr size_t kAdduCount1 = 63;
     for (size_t i = 0; i != kAdduCount1; ++i) {
       __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
@@ -271,26 +323,30 @@ class AssemblerMIPS64Test : public AssemblerTest<mips64::Mips64Assembler,
     for (size_t i = 0; i != kAdduCount2; ++i) {
       __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
     }
-    (Base::GetAssembler()->*f)(mips64::A1, &label);
+    (Base::GetAssembler()->*f)(mips64::A1, &label, is_bare);
+    __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
 
     std::string expected =
         ".set noreorder\n" +
-        instr_name + " $a0, 1f\n"
-        "nop\n" +
+        instr_name + " $a0, 1f\n" +
+        (is_bare ? "" : "nop\n") +
         RepeatInsn(kAdduCount1, "addu $zero, $zero, $zero\n") +
         "1:\n" +
         RepeatInsn(kAdduCount2, "addu $zero, $zero, $zero\n") +
-        instr_name + " $a1, 1b\n"
-        "nop\n";
+        instr_name + " $a1, 1b\n" +
+        (is_bare ? "" : "nop\n") +
+        "addu $zero, $zero, $zero\n";
     DriverStr(expected, instr_name);
   }
 
   void BranchCondTwoRegsHelper(void (mips64::Mips64Assembler::*f)(mips64::GpuRegister,
                                                                   mips64::GpuRegister,
-                                                                  mips64::Mips64Label*),
-                               const std::string& instr_name) {
+                                                                  mips64::Mips64Label*,
+                                                                  bool),
+                               const std::string& instr_name,
+                               bool is_bare = false) {
     mips64::Mips64Label label;
-    (Base::GetAssembler()->*f)(mips64::A0, mips64::A1, &label);
+    (Base::GetAssembler()->*f)(mips64::A0, mips64::A1, &label, is_bare);
     constexpr size_t kAdduCount1 = 63;
     for (size_t i = 0; i != kAdduCount1; ++i) {
       __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
@@ -300,17 +356,51 @@ class AssemblerMIPS64Test : public AssemblerTest<mips64::Mips64Assembler,
     for (size_t i = 0; i != kAdduCount2; ++i) {
       __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
     }
-    (Base::GetAssembler()->*f)(mips64::A2, mips64::A3, &label);
+    (Base::GetAssembler()->*f)(mips64::A2, mips64::A3, &label, is_bare);
+    __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
 
     std::string expected =
         ".set noreorder\n" +
-        instr_name + " $a0, $a1, 1f\n"
-        "nop\n" +
+        instr_name + " $a0, $a1, 1f\n" +
+        (is_bare ? "" : "nop\n") +
         RepeatInsn(kAdduCount1, "addu $zero, $zero, $zero\n") +
         "1:\n" +
         RepeatInsn(kAdduCount2, "addu $zero, $zero, $zero\n") +
-        instr_name + " $a2, $a3, 1b\n"
-        "nop\n";
+        instr_name + " $a2, $a3, 1b\n" +
+        (is_bare ? "" : "nop\n") +
+        "addu $zero, $zero, $zero\n";
+    DriverStr(expected, instr_name);
+  }
+
+  void BranchFpuCondHelper(void (mips64::Mips64Assembler::*f)(mips64::FpuRegister,
+                                                              mips64::Mips64Label*,
+                                                              bool),
+                           const std::string& instr_name,
+                           bool is_bare = false) {
+    mips64::Mips64Label label;
+    (Base::GetAssembler()->*f)(mips64::F0, &label, is_bare);
+    constexpr size_t kAdduCount1 = 63;
+    for (size_t i = 0; i != kAdduCount1; ++i) {
+      __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
+    }
+    __ Bind(&label);
+    constexpr size_t kAdduCount2 = 64;
+    for (size_t i = 0; i != kAdduCount2; ++i) {
+      __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
+    }
+    (Base::GetAssembler()->*f)(mips64::F31, &label, is_bare);
+    __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
+
+    std::string expected =
+        ".set noreorder\n" +
+        instr_name + " $f0, 1f\n" +
+        (is_bare ? "" : "nop\n") +
+        RepeatInsn(kAdduCount1, "addu $zero, $zero, $zero\n") +
+        "1:\n" +
+        RepeatInsn(kAdduCount2, "addu $zero, $zero, $zero\n") +
+        instr_name + " $f31, 1b\n" +
+        (is_bare ? "" : "nop\n") +
+        "addu $zero, $zero, $zero\n";
     DriverStr(expected, instr_name);
   }
 
@@ -450,6 +540,26 @@ TEST_F(AssemblerMIPS64Test, SelS) {
 
 TEST_F(AssemblerMIPS64Test, SelD) {
   DriverStr(RepeatFFF(&mips64::Mips64Assembler::SelD, "sel.d ${reg1}, ${reg2}, ${reg3}"), "sel.d");
+}
+
+TEST_F(AssemblerMIPS64Test, SeleqzS) {
+  DriverStr(RepeatFFF(&mips64::Mips64Assembler::SeleqzS, "seleqz.s ${reg1}, ${reg2}, ${reg3}"),
+            "seleqz.s");
+}
+
+TEST_F(AssemblerMIPS64Test, SeleqzD) {
+  DriverStr(RepeatFFF(&mips64::Mips64Assembler::SeleqzD, "seleqz.d ${reg1}, ${reg2}, ${reg3}"),
+            "seleqz.d");
+}
+
+TEST_F(AssemblerMIPS64Test, SelnezS) {
+  DriverStr(RepeatFFF(&mips64::Mips64Assembler::SelnezS, "selnez.s ${reg1}, ${reg2}, ${reg3}"),
+            "selnez.s");
+}
+
+TEST_F(AssemblerMIPS64Test, SelnezD) {
+  DriverStr(RepeatFFF(&mips64::Mips64Assembler::SelnezD, "selnez.d ${reg1}, ${reg2}, ${reg3}"),
+            "selnez.d");
 }
 
 TEST_F(AssemblerMIPS64Test, RintS) {
@@ -668,41 +778,258 @@ TEST_F(AssemblerMIPS64Test, Sdc1) {
             "sdc1");
 }
 
-////////////////
-// CALL / JMP //
-////////////////
+//////////////
+// BRANCHES //
+//////////////
 
 TEST_F(AssemblerMIPS64Test, Jalr) {
   DriverStr(".set noreorder\n" +
             RepeatRRNoDupes(&mips64::Mips64Assembler::Jalr, "jalr ${reg1}, ${reg2}"), "jalr");
 }
 
-TEST_F(AssemblerMIPS64Test, Balc) {
-  mips64::Mips64Label label1, label2;
-  __ Balc(&label1);
-  constexpr size_t kAdduCount1 = 63;
-  for (size_t i = 0; i != kAdduCount1; ++i) {
-    __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
-  }
-  __ Bind(&label1);
-  __ Balc(&label2);
-  constexpr size_t kAdduCount2 = 64;
-  for (size_t i = 0; i != kAdduCount2; ++i) {
-    __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
-  }
-  __ Bind(&label2);
-  __ Balc(&label1);
+TEST_F(AssemblerMIPS64Test, Bc) {
+  BranchHelper(&mips64::Mips64Assembler::Bc, "Bc");
+}
 
-  std::string expected =
+TEST_F(AssemblerMIPS64Test, Balc) {
+  BranchHelper(&mips64::Mips64Assembler::Balc, "Balc");
+}
+
+TEST_F(AssemblerMIPS64Test, Beqzc) {
+  BranchCondOneRegHelper(&mips64::Mips64Assembler::Beqzc, "Beqzc");
+}
+
+TEST_F(AssemblerMIPS64Test, Bnezc) {
+  BranchCondOneRegHelper(&mips64::Mips64Assembler::Bnezc, "Bnezc");
+}
+
+TEST_F(AssemblerMIPS64Test, Bltzc) {
+  BranchCondOneRegHelper(&mips64::Mips64Assembler::Bltzc, "Bltzc");
+}
+
+TEST_F(AssemblerMIPS64Test, Bgezc) {
+  BranchCondOneRegHelper(&mips64::Mips64Assembler::Bgezc, "Bgezc");
+}
+
+TEST_F(AssemblerMIPS64Test, Blezc) {
+  BranchCondOneRegHelper(&mips64::Mips64Assembler::Blezc, "Blezc");
+}
+
+TEST_F(AssemblerMIPS64Test, Bgtzc) {
+  BranchCondOneRegHelper(&mips64::Mips64Assembler::Bgtzc, "Bgtzc");
+}
+
+TEST_F(AssemblerMIPS64Test, Beqc) {
+  BranchCondTwoRegsHelper(&mips64::Mips64Assembler::Beqc, "Beqc");
+}
+
+TEST_F(AssemblerMIPS64Test, Bnec) {
+  BranchCondTwoRegsHelper(&mips64::Mips64Assembler::Bnec, "Bnec");
+}
+
+TEST_F(AssemblerMIPS64Test, Bltc) {
+  BranchCondTwoRegsHelper(&mips64::Mips64Assembler::Bltc, "Bltc");
+}
+
+TEST_F(AssemblerMIPS64Test, Bgec) {
+  BranchCondTwoRegsHelper(&mips64::Mips64Assembler::Bgec, "Bgec");
+}
+
+TEST_F(AssemblerMIPS64Test, Bltuc) {
+  BranchCondTwoRegsHelper(&mips64::Mips64Assembler::Bltuc, "Bltuc");
+}
+
+TEST_F(AssemblerMIPS64Test, Bgeuc) {
+  BranchCondTwoRegsHelper(&mips64::Mips64Assembler::Bgeuc, "Bgeuc");
+}
+
+TEST_F(AssemblerMIPS64Test, Bc1eqz) {
+  BranchFpuCondHelper(&mips64::Mips64Assembler::Bc1eqz, "Bc1eqz");
+}
+
+TEST_F(AssemblerMIPS64Test, Bc1nez) {
+  BranchFpuCondHelper(&mips64::Mips64Assembler::Bc1nez, "Bc1nez");
+}
+
+TEST_F(AssemblerMIPS64Test, BareBc) {
+  BranchHelper(&mips64::Mips64Assembler::Bc, "Bc", /* is_bare= */ true);
+}
+
+TEST_F(AssemblerMIPS64Test, BareBalc) {
+  BranchHelper(&mips64::Mips64Assembler::Balc, "Balc", /* is_bare= */ true);
+}
+
+TEST_F(AssemblerMIPS64Test, BareBeqzc) {
+  BranchCondOneRegHelper(&mips64::Mips64Assembler::Beqzc, "Beqzc", /* is_bare= */ true);
+}
+
+TEST_F(AssemblerMIPS64Test, BareBnezc) {
+  BranchCondOneRegHelper(&mips64::Mips64Assembler::Bnezc, "Bnezc", /* is_bare= */ true);
+}
+
+TEST_F(AssemblerMIPS64Test, BareBltzc) {
+  BranchCondOneRegHelper(&mips64::Mips64Assembler::Bltzc, "Bltzc", /* is_bare= */ true);
+}
+
+TEST_F(AssemblerMIPS64Test, BareBgezc) {
+  BranchCondOneRegHelper(&mips64::Mips64Assembler::Bgezc, "Bgezc", /* is_bare= */ true);
+}
+
+TEST_F(AssemblerMIPS64Test, BareBlezc) {
+  BranchCondOneRegHelper(&mips64::Mips64Assembler::Blezc, "Blezc", /* is_bare= */ true);
+}
+
+TEST_F(AssemblerMIPS64Test, BareBgtzc) {
+  BranchCondOneRegHelper(&mips64::Mips64Assembler::Bgtzc, "Bgtzc", /* is_bare= */ true);
+}
+
+TEST_F(AssemblerMIPS64Test, BareBeqc) {
+  BranchCondTwoRegsHelper(&mips64::Mips64Assembler::Beqc, "Beqc", /* is_bare= */ true);
+}
+
+TEST_F(AssemblerMIPS64Test, BareBnec) {
+  BranchCondTwoRegsHelper(&mips64::Mips64Assembler::Bnec, "Bnec", /* is_bare= */ true);
+}
+
+TEST_F(AssemblerMIPS64Test, BareBltc) {
+  BranchCondTwoRegsHelper(&mips64::Mips64Assembler::Bltc, "Bltc", /* is_bare= */ true);
+}
+
+TEST_F(AssemblerMIPS64Test, BareBgec) {
+  BranchCondTwoRegsHelper(&mips64::Mips64Assembler::Bgec, "Bgec", /* is_bare= */ true);
+}
+
+TEST_F(AssemblerMIPS64Test, BareBltuc) {
+  BranchCondTwoRegsHelper(&mips64::Mips64Assembler::Bltuc, "Bltuc", /* is_bare= */ true);
+}
+
+TEST_F(AssemblerMIPS64Test, BareBgeuc) {
+  BranchCondTwoRegsHelper(&mips64::Mips64Assembler::Bgeuc, "Bgeuc", /* is_bare= */ true);
+}
+
+TEST_F(AssemblerMIPS64Test, BareBc1eqz) {
+  BranchFpuCondHelper(&mips64::Mips64Assembler::Bc1eqz, "Bc1eqz", /* is_bare= */ true);
+}
+
+TEST_F(AssemblerMIPS64Test, BareBc1nez) {
+  BranchFpuCondHelper(&mips64::Mips64Assembler::Bc1nez, "Bc1nez", /* is_bare= */ true);
+}
+
+TEST_F(AssemblerMIPS64Test, BareBeqz) {
+  BranchCondOneRegHelper(&mips64::Mips64Assembler::Beqz, "Beqz", /* is_bare= */ true);
+}
+
+TEST_F(AssemblerMIPS64Test, BareBnez) {
+  BranchCondOneRegHelper(&mips64::Mips64Assembler::Bnez, "Bnez", /* is_bare= */ true);
+}
+
+TEST_F(AssemblerMIPS64Test, BareBltz) {
+  BranchCondOneRegHelper(&mips64::Mips64Assembler::Bltz, "Bltz", /* is_bare= */ true);
+}
+
+TEST_F(AssemblerMIPS64Test, BareBgez) {
+  BranchCondOneRegHelper(&mips64::Mips64Assembler::Bgez, "Bgez", /* is_bare= */ true);
+}
+
+TEST_F(AssemblerMIPS64Test, BareBlez) {
+  BranchCondOneRegHelper(&mips64::Mips64Assembler::Blez, "Blez", /* is_bare= */ true);
+}
+
+TEST_F(AssemblerMIPS64Test, BareBgtz) {
+  BranchCondOneRegHelper(&mips64::Mips64Assembler::Bgtz, "Bgtz", /* is_bare= */ true);
+}
+
+TEST_F(AssemblerMIPS64Test, BareBeq) {
+  BranchCondTwoRegsHelper(&mips64::Mips64Assembler::Beq, "Beq", /* is_bare= */ true);
+}
+
+TEST_F(AssemblerMIPS64Test, BareBne) {
+  BranchCondTwoRegsHelper(&mips64::Mips64Assembler::Bne, "Bne", /* is_bare= */ true);
+}
+
+TEST_F(AssemblerMIPS64Test, LongBeqc) {
+  mips64::Mips64Label label;
+  __ Beqc(mips64::A0, mips64::A1, &label);
+  constexpr uint32_t kAdduCount1 = (1u << 15) + 1;
+  for (uint32_t i = 0; i != kAdduCount1; ++i) {
+    __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
+  }
+  __ Bind(&label);
+  constexpr uint32_t kAdduCount2 = (1u << 15) + 1;
+  for (uint32_t i = 0; i != kAdduCount2; ++i) {
+    __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
+  }
+  __ Beqc(mips64::A2, mips64::A3, &label);
+
+  uint32_t offset_forward = 2 + kAdduCount1;  // 2: account for auipc and jic.
+  offset_forward <<= 2;
+  offset_forward += (offset_forward & 0x8000) << 1;  // Account for sign extension in jic.
+
+  uint32_t offset_back = -(kAdduCount2 + 1);  // 1: account for bnec.
+  offset_back <<= 2;
+  offset_back += (offset_back & 0x8000) << 1;  // Account for sign extension in jic.
+
+  std::ostringstream oss;
+  oss <<
       ".set noreorder\n"
-      "balc 1f\n" +
-      RepeatInsn(kAdduCount1, "addu $zero, $zero, $zero\n") +
-      "1:\n"
-      "balc 2f\n" +
-      RepeatInsn(kAdduCount2, "addu $zero, $zero, $zero\n") +
-      "2:\n"
-      "balc 1b\n";
-  DriverStr(expected, "Balc");
+      "bnec $a0, $a1, 1f\n"
+      "auipc $at, 0x" << std::hex << High16Bits(offset_forward) << "\n"
+      "jic $at, 0x" << std::hex << Low16Bits(offset_forward) << "\n"
+      "1:\n" <<
+      RepeatInsn(kAdduCount1, "addu $zero, $zero, $zero\n") <<
+      "2:\n" <<
+      RepeatInsn(kAdduCount2, "addu $zero, $zero, $zero\n") <<
+      "bnec $a2, $a3, 3f\n"
+      "auipc $at, 0x" << std::hex << High16Bits(offset_back) << "\n"
+      "jic $at, 0x" << std::hex << Low16Bits(offset_back) << "\n"
+      "3:\n";
+  std::string expected = oss.str();
+  DriverStr(expected, "LongBeqc");
+}
+
+TEST_F(AssemblerMIPS64Test, LongBeqzc) {
+  constexpr uint32_t kNopCount1 = (1u << 20) + 1;
+  constexpr uint32_t kNopCount2 = (1u << 20) + 1;
+  constexpr uint32_t kRequiredCapacity = (kNopCount1 + kNopCount2 + 6u) * 4u;
+  ASSERT_LT(__ GetBuffer()->Capacity(), kRequiredCapacity);
+  __ GetBuffer()->ExtendCapacity(kRequiredCapacity);
+  mips64::Mips64Label label;
+  __ Beqzc(mips64::A0, &label);
+  for (uint32_t i = 0; i != kNopCount1; ++i) {
+    __ Nop();
+  }
+  __ Bind(&label);
+  for (uint32_t i = 0; i != kNopCount2; ++i) {
+    __ Nop();
+  }
+  __ Beqzc(mips64::A2, &label);
+
+  uint32_t offset_forward = 2 + kNopCount1;  // 2: account for auipc and jic.
+  offset_forward <<= 2;
+  offset_forward += (offset_forward & 0x8000) << 1;  // Account for sign extension in jic.
+
+  uint32_t offset_back = -(kNopCount2 + 1);  // 1: account for bnezc.
+  offset_back <<= 2;
+  offset_back += (offset_back & 0x8000) << 1;  // Account for sign extension in jic.
+
+  // Note, we're using the ".fill" directive to tell the assembler to generate many NOPs
+  // instead of generating them ourselves in the source code. This saves test time.
+  std::ostringstream oss;
+  oss <<
+      ".set noreorder\n"
+      "bnezc $a0, 1f\n"
+      "auipc $at, 0x" << std::hex << High16Bits(offset_forward) << "\n"
+      "jic $at, 0x" << std::hex << Low16Bits(offset_forward) << "\n"
+      "1:\n" <<
+      ".fill 0x" << std::hex << kNopCount1 << " , 4, 0\n"
+      "2:\n" <<
+      ".fill 0x" << std::hex << kNopCount2 << " , 4, 0\n"
+      "bnezc $a2, 3f\n"
+      "auipc $at, 0x" << std::hex << High16Bits(offset_back) << "\n"
+      "jic $at, 0x" << std::hex << Low16Bits(offset_back) << "\n"
+      "3:\n";
+  std::string expected = oss.str();
+  DriverStr(expected, "LongBeqzc");
 }
 
 TEST_F(AssemblerMIPS64Test, LongBalc) {
@@ -756,174 +1083,6 @@ TEST_F(AssemblerMIPS64Test, LongBalc) {
   DriverStr(expected, "LongBalc");
 }
 
-TEST_F(AssemblerMIPS64Test, Bc) {
-  mips64::Mips64Label label1, label2;
-  __ Bc(&label1);
-  constexpr size_t kAdduCount1 = 63;
-  for (size_t i = 0; i != kAdduCount1; ++i) {
-    __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
-  }
-  __ Bind(&label1);
-  __ Bc(&label2);
-  constexpr size_t kAdduCount2 = 64;
-  for (size_t i = 0; i != kAdduCount2; ++i) {
-    __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
-  }
-  __ Bind(&label2);
-  __ Bc(&label1);
-
-  std::string expected =
-      ".set noreorder\n"
-      "bc 1f\n" +
-      RepeatInsn(kAdduCount1, "addu $zero, $zero, $zero\n") +
-      "1:\n"
-      "bc 2f\n" +
-      RepeatInsn(kAdduCount2, "addu $zero, $zero, $zero\n") +
-      "2:\n"
-      "bc 1b\n";
-  DriverStr(expected, "Bc");
-}
-
-TEST_F(AssemblerMIPS64Test, Beqzc) {
-  BranchCondOneRegHelper(&mips64::Mips64Assembler::Beqzc, "Beqzc");
-}
-
-TEST_F(AssemblerMIPS64Test, Bnezc) {
-  BranchCondOneRegHelper(&mips64::Mips64Assembler::Bnezc, "Bnezc");
-}
-
-TEST_F(AssemblerMIPS64Test, Bltzc) {
-  BranchCondOneRegHelper(&mips64::Mips64Assembler::Bltzc, "Bltzc");
-}
-
-TEST_F(AssemblerMIPS64Test, Bgezc) {
-  BranchCondOneRegHelper(&mips64::Mips64Assembler::Bgezc, "Bgezc");
-}
-
-TEST_F(AssemblerMIPS64Test, Blezc) {
-  BranchCondOneRegHelper(&mips64::Mips64Assembler::Blezc, "Blezc");
-}
-
-TEST_F(AssemblerMIPS64Test, Bgtzc) {
-  BranchCondOneRegHelper(&mips64::Mips64Assembler::Bgtzc, "Bgtzc");
-}
-
-TEST_F(AssemblerMIPS64Test, Beqc) {
-  BranchCondTwoRegsHelper(&mips64::Mips64Assembler::Beqc, "Beqc");
-}
-
-TEST_F(AssemblerMIPS64Test, Bnec) {
-  BranchCondTwoRegsHelper(&mips64::Mips64Assembler::Bnec, "Bnec");
-}
-
-TEST_F(AssemblerMIPS64Test, Bltc) {
-  BranchCondTwoRegsHelper(&mips64::Mips64Assembler::Bltc, "Bltc");
-}
-
-TEST_F(AssemblerMIPS64Test, Bgec) {
-  BranchCondTwoRegsHelper(&mips64::Mips64Assembler::Bgec, "Bgec");
-}
-
-TEST_F(AssemblerMIPS64Test, Bltuc) {
-  BranchCondTwoRegsHelper(&mips64::Mips64Assembler::Bltuc, "Bltuc");
-}
-
-TEST_F(AssemblerMIPS64Test, Bgeuc) {
-  BranchCondTwoRegsHelper(&mips64::Mips64Assembler::Bgeuc, "Bgeuc");
-}
-
-TEST_F(AssemblerMIPS64Test, Bc1eqz) {
-    mips64::Mips64Label label;
-    __ Bc1eqz(mips64::F0, &label);
-    constexpr size_t kAdduCount1 = 63;
-    for (size_t i = 0; i != kAdduCount1; ++i) {
-      __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
-    }
-    __ Bind(&label);
-    constexpr size_t kAdduCount2 = 64;
-    for (size_t i = 0; i != kAdduCount2; ++i) {
-      __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
-    }
-    __ Bc1eqz(mips64::F31, &label);
-
-    std::string expected =
-        ".set noreorder\n"
-        "bc1eqz $f0, 1f\n"
-        "nop\n" +
-        RepeatInsn(kAdduCount1, "addu $zero, $zero, $zero\n") +
-        "1:\n" +
-        RepeatInsn(kAdduCount2, "addu $zero, $zero, $zero\n") +
-        "bc1eqz $f31, 1b\n"
-        "nop\n";
-    DriverStr(expected, "Bc1eqz");
-}
-
-TEST_F(AssemblerMIPS64Test, Bc1nez) {
-    mips64::Mips64Label label;
-    __ Bc1nez(mips64::F0, &label);
-    constexpr size_t kAdduCount1 = 63;
-    for (size_t i = 0; i != kAdduCount1; ++i) {
-      __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
-    }
-    __ Bind(&label);
-    constexpr size_t kAdduCount2 = 64;
-    for (size_t i = 0; i != kAdduCount2; ++i) {
-      __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
-    }
-    __ Bc1nez(mips64::F31, &label);
-
-    std::string expected =
-        ".set noreorder\n"
-        "bc1nez $f0, 1f\n"
-        "nop\n" +
-        RepeatInsn(kAdduCount1, "addu $zero, $zero, $zero\n") +
-        "1:\n" +
-        RepeatInsn(kAdduCount2, "addu $zero, $zero, $zero\n") +
-        "bc1nez $f31, 1b\n"
-        "nop\n";
-    DriverStr(expected, "Bc1nez");
-}
-
-TEST_F(AssemblerMIPS64Test, LongBeqc) {
-  mips64::Mips64Label label;
-  __ Beqc(mips64::A0, mips64::A1, &label);
-  constexpr uint32_t kAdduCount1 = (1u << 15) + 1;
-  for (uint32_t i = 0; i != kAdduCount1; ++i) {
-    __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
-  }
-  __ Bind(&label);
-  constexpr uint32_t kAdduCount2 = (1u << 15) + 1;
-  for (uint32_t i = 0; i != kAdduCount2; ++i) {
-    __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
-  }
-  __ Beqc(mips64::A2, mips64::A3, &label);
-
-  uint32_t offset_forward = 2 + kAdduCount1;  // 2: account for auipc and jic.
-  offset_forward <<= 2;
-  offset_forward += (offset_forward & 0x8000) << 1;  // Account for sign extension in jic.
-
-  uint32_t offset_back = -(kAdduCount2 + 1);  // 1: account for bnec.
-  offset_back <<= 2;
-  offset_back += (offset_back & 0x8000) << 1;  // Account for sign extension in jic.
-
-  std::ostringstream oss;
-  oss <<
-      ".set noreorder\n"
-      "bnec $a0, $a1, 1f\n"
-      "auipc $at, 0x" << std::hex << High16Bits(offset_forward) << "\n"
-      "jic $at, 0x" << std::hex << Low16Bits(offset_forward) << "\n"
-      "1:\n" <<
-      RepeatInsn(kAdduCount1, "addu $zero, $zero, $zero\n") <<
-      "2:\n" <<
-      RepeatInsn(kAdduCount2, "addu $zero, $zero, $zero\n") <<
-      "bnec $a2, $a3, 3f\n"
-      "auipc $at, 0x" << std::hex << High16Bits(offset_back) << "\n"
-      "jic $at, 0x" << std::hex << Low16Bits(offset_back) << "\n"
-      "3:\n";
-  std::string expected = oss.str();
-  DriverStr(expected, "LongBeqc");
-}
-
 //////////
 // MISC //
 //////////
@@ -959,235 +1118,6 @@ TEST_F(AssemblerMIPS64Test, Addiupc) {
   // The comment from the Lwpc() test applies to this Addiupc() test as well.
   const char* code = ".set imm, {imm}\naddiupc ${reg}, (imm - ((imm & 0x40000) << 1)) << 2";
   DriverStr(RepeatRIb(&mips64::Mips64Assembler::Addiupc, 19, code), "Addiupc");
-}
-
-TEST_F(AssemblerMIPS64Test, LoadFarthestNearLabelAddress) {
-  mips64::Mips64Label label;
-  __ LoadLabelAddress(mips64::V0, &label);
-  constexpr uint32_t kAdduCount = 0x3FFDE;
-  for (uint32_t i = 0; i != kAdduCount; ++i) {
-    __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
-  }
-  __ Bind(&label);
-
-  std::string expected =
-      "lapc $v0, 1f\n" +
-      RepeatInsn(kAdduCount, "addu $zero, $zero, $zero\n") +
-      "1:\n";
-  DriverStr(expected, "LoadFarthestNearLabelAddress");
-  EXPECT_EQ(__ GetLabelLocation(&label), (1 + kAdduCount) * 4);
-}
-
-TEST_F(AssemblerMIPS64Test, LoadNearestFarLabelAddress) {
-  mips64::Mips64Label label;
-  __ LoadLabelAddress(mips64::V0, &label);
-  constexpr uint32_t kAdduCount = 0x3FFDF;
-  for (uint32_t i = 0; i != kAdduCount; ++i) {
-    __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
-  }
-  __ Bind(&label);
-
-  std::string expected =
-      "1:\n"
-      "auipc $at, %hi(2f - 1b)\n"
-      "daddiu $v0, $at, %lo(2f - 1b)\n" +
-      RepeatInsn(kAdduCount, "addu $zero, $zero, $zero\n") +
-      "2:\n";
-  DriverStr(expected, "LoadNearestFarLabelAddress");
-  EXPECT_EQ(__ GetLabelLocation(&label), (2 + kAdduCount) * 4);
-}
-
-TEST_F(AssemblerMIPS64Test, LoadFarthestNearLiteral) {
-  mips64::Literal* literal = __ NewLiteral<uint32_t>(0x12345678);
-  __ LoadLiteral(mips64::V0, mips64::kLoadWord, literal);
-  constexpr uint32_t kAdduCount = 0x3FFDE;
-  for (uint32_t i = 0; i != kAdduCount; ++i) {
-    __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
-  }
-
-  std::string expected =
-      "lwpc $v0, 1f\n" +
-      RepeatInsn(kAdduCount, "addu $zero, $zero, $zero\n") +
-      "1:\n"
-      ".word 0x12345678\n";
-  DriverStr(expected, "LoadFarthestNearLiteral");
-  EXPECT_EQ(__ GetLabelLocation(literal->GetLabel()), (1 + kAdduCount) * 4);
-}
-
-TEST_F(AssemblerMIPS64Test, LoadNearestFarLiteral) {
-  mips64::Literal* literal = __ NewLiteral<uint32_t>(0x12345678);
-  __ LoadLiteral(mips64::V0, mips64::kLoadWord, literal);
-  constexpr uint32_t kAdduCount = 0x3FFDF;
-  for (uint32_t i = 0; i != kAdduCount; ++i) {
-    __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
-  }
-
-  std::string expected =
-      "1:\n"
-      "auipc $at, %hi(2f - 1b)\n"
-      "lw $v0, %lo(2f - 1b)($at)\n" +
-      RepeatInsn(kAdduCount, "addu $zero, $zero, $zero\n") +
-      "2:\n"
-      ".word 0x12345678\n";
-  DriverStr(expected, "LoadNearestFarLiteral");
-  EXPECT_EQ(__ GetLabelLocation(literal->GetLabel()), (2 + kAdduCount) * 4);
-}
-
-TEST_F(AssemblerMIPS64Test, LoadFarthestNearLiteralUnsigned) {
-  mips64::Literal* literal = __ NewLiteral<uint32_t>(0x12345678);
-  __ LoadLiteral(mips64::V0, mips64::kLoadUnsignedWord, literal);
-  constexpr uint32_t kAdduCount = 0x3FFDE;
-  for (uint32_t i = 0; i != kAdduCount; ++i) {
-    __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
-  }
-
-  std::string expected =
-      "lwupc $v0, 1f\n" +
-      RepeatInsn(kAdduCount, "addu $zero, $zero, $zero\n") +
-      "1:\n"
-      ".word 0x12345678\n";
-  DriverStr(expected, "LoadFarthestNearLiteralUnsigned");
-  EXPECT_EQ(__ GetLabelLocation(literal->GetLabel()), (1 + kAdduCount) * 4);
-}
-
-TEST_F(AssemblerMIPS64Test, LoadNearestFarLiteralUnsigned) {
-  mips64::Literal* literal = __ NewLiteral<uint32_t>(0x12345678);
-  __ LoadLiteral(mips64::V0, mips64::kLoadUnsignedWord, literal);
-  constexpr uint32_t kAdduCount = 0x3FFDF;
-  for (uint32_t i = 0; i != kAdduCount; ++i) {
-    __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
-  }
-
-  std::string expected =
-      "1:\n"
-      "auipc $at, %hi(2f - 1b)\n"
-      "lwu $v0, %lo(2f - 1b)($at)\n" +
-      RepeatInsn(kAdduCount, "addu $zero, $zero, $zero\n") +
-      "2:\n"
-      ".word 0x12345678\n";
-  DriverStr(expected, "LoadNearestFarLiteralUnsigned");
-  EXPECT_EQ(__ GetLabelLocation(literal->GetLabel()), (2 + kAdduCount) * 4);
-}
-
-TEST_F(AssemblerMIPS64Test, LoadFarthestNearLiteralLong) {
-  mips64::Literal* literal = __ NewLiteral<uint64_t>(UINT64_C(0x0123456789ABCDEF));
-  __ LoadLiteral(mips64::V0, mips64::kLoadDoubleword, literal);
-  constexpr uint32_t kAdduCount = 0x3FFDD;
-  for (uint32_t i = 0; i != kAdduCount; ++i) {
-    __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
-  }
-
-  std::string expected =
-      "ldpc $v0, 1f\n" +
-      RepeatInsn(kAdduCount, "addu $zero, $zero, $zero\n") +
-      "1:\n"
-      ".dword 0x0123456789ABCDEF\n";
-  DriverStr(expected, "LoadFarthestNearLiteralLong");
-  EXPECT_EQ(__ GetLabelLocation(literal->GetLabel()), (1 + kAdduCount) * 4);
-}
-
-TEST_F(AssemblerMIPS64Test, LoadNearestFarLiteralLong) {
-  mips64::Literal* literal = __ NewLiteral<uint64_t>(UINT64_C(0x0123456789ABCDEF));
-  __ LoadLiteral(mips64::V0, mips64::kLoadDoubleword, literal);
-  constexpr uint32_t kAdduCount = 0x3FFDE;
-  for (uint32_t i = 0; i != kAdduCount; ++i) {
-    __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
-  }
-
-  std::string expected =
-      "1:\n"
-      "auipc $at, %hi(2f - 1b)\n"
-      "ld $v0, %lo(2f - 1b)($at)\n" +
-      RepeatInsn(kAdduCount, "addu $zero, $zero, $zero\n") +
-      "2:\n"
-      ".dword 0x0123456789ABCDEF\n";
-  DriverStr(expected, "LoadNearestFarLiteralLong");
-  EXPECT_EQ(__ GetLabelLocation(literal->GetLabel()), (2 + kAdduCount) * 4);
-}
-
-TEST_F(AssemblerMIPS64Test, LongLiteralAlignmentNop) {
-  mips64::Literal* literal1 = __ NewLiteral<uint64_t>(UINT64_C(0x0123456789ABCDEF));
-  mips64::Literal* literal2 = __ NewLiteral<uint64_t>(UINT64_C(0x5555555555555555));
-  mips64::Literal* literal3 = __ NewLiteral<uint64_t>(UINT64_C(0xAAAAAAAAAAAAAAAA));
-  __ LoadLiteral(mips64::A1, mips64::kLoadDoubleword, literal1);
-  __ LoadLiteral(mips64::A2, mips64::kLoadDoubleword, literal2);
-  __ LoadLiteral(mips64::A3, mips64::kLoadDoubleword, literal3);
-  __ LoadLabelAddress(mips64::V0, literal1->GetLabel());
-  __ LoadLabelAddress(mips64::V1, literal2->GetLabel());
-  // A nop will be inserted here before the 64-bit literals.
-
-  std::string expected =
-      "ldpc $a1, 1f\n"
-      // The GNU assembler incorrectly requires the ldpc instruction to be located
-      // at an address that's a multiple of 8. TODO: Remove this workaround if/when
-      // the assembler is fixed.
-      // "ldpc $a2, 2f\n"
-      ".word 0xECD80004\n"
-      "ldpc $a3, 3f\n"
-      "lapc $v0, 1f\n"
-      "lapc $v1, 2f\n"
-      "nop\n"
-      "1:\n"
-      ".dword 0x0123456789ABCDEF\n"
-      "2:\n"
-      ".dword 0x5555555555555555\n"
-      "3:\n"
-      ".dword 0xAAAAAAAAAAAAAAAA\n";
-  DriverStr(expected, "LongLiteralAlignmentNop");
-  EXPECT_EQ(__ GetLabelLocation(literal1->GetLabel()), 6 * 4u);
-  EXPECT_EQ(__ GetLabelLocation(literal2->GetLabel()), 8 * 4u);
-  EXPECT_EQ(__ GetLabelLocation(literal3->GetLabel()), 10 * 4u);
-}
-
-TEST_F(AssemblerMIPS64Test, LongLiteralAlignmentNoNop) {
-  mips64::Literal* literal1 = __ NewLiteral<uint64_t>(UINT64_C(0x0123456789ABCDEF));
-  mips64::Literal* literal2 = __ NewLiteral<uint64_t>(UINT64_C(0x5555555555555555));
-  __ LoadLiteral(mips64::A1, mips64::kLoadDoubleword, literal1);
-  __ LoadLiteral(mips64::A2, mips64::kLoadDoubleword, literal2);
-  __ LoadLabelAddress(mips64::V0, literal1->GetLabel());
-  __ LoadLabelAddress(mips64::V1, literal2->GetLabel());
-
-  std::string expected =
-      "ldpc $a1, 1f\n"
-      // The GNU assembler incorrectly requires the ldpc instruction to be located
-      // at an address that's a multiple of 8. TODO: Remove this workaround if/when
-      // the assembler is fixed.
-      // "ldpc $a2, 2f\n"
-      ".word 0xECD80003\n"
-      "lapc $v0, 1f\n"
-      "lapc $v1, 2f\n"
-      "1:\n"
-      ".dword 0x0123456789ABCDEF\n"
-      "2:\n"
-      ".dword 0x5555555555555555\n";
-  DriverStr(expected, "LongLiteralAlignmentNoNop");
-  EXPECT_EQ(__ GetLabelLocation(literal1->GetLabel()), 4 * 4u);
-  EXPECT_EQ(__ GetLabelLocation(literal2->GetLabel()), 6 * 4u);
-}
-
-TEST_F(AssemblerMIPS64Test, FarLongLiteralAlignmentNop) {
-  mips64::Literal* literal = __ NewLiteral<uint64_t>(UINT64_C(0x0123456789ABCDEF));
-  __ LoadLiteral(mips64::V0, mips64::kLoadDoubleword, literal);
-  __ LoadLabelAddress(mips64::V1, literal->GetLabel());
-  constexpr uint32_t kAdduCount = 0x3FFDF;
-  for (uint32_t i = 0; i != kAdduCount; ++i) {
-    __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
-  }
-  // A nop will be inserted here before the 64-bit literal.
-
-  std::string expected =
-      "1:\n"
-      "auipc $at, %hi(3f - 1b)\n"
-      "ld $v0, %lo(3f - 1b)($at)\n"
-      "2:\n"
-      "auipc $at, %hi(3f - 2b)\n"
-      "daddiu $v1, $at, %lo(3f - 2b)\n" +
-      RepeatInsn(kAdduCount, "addu $zero, $zero, $zero\n") +
-      "nop\n"
-      "3:\n"
-      ".dword 0x0123456789ABCDEF\n";
-  DriverStr(expected, "FarLongLiteralAlignmentNop");
-  EXPECT_EQ(__ GetLabelLocation(literal->GetLabel()), (5 + kAdduCount) * 4);
 }
 
 TEST_F(AssemblerMIPS64Test, Addu) {
@@ -1322,7 +1252,7 @@ TEST_F(AssemblerMIPS64Test, Daui) {
   std::vector<mips64::GpuRegister*> reg1_registers = GetRegisters();
   std::vector<mips64::GpuRegister*> reg2_registers = GetRegisters();
   reg2_registers.erase(reg2_registers.begin());  // reg2 can't be ZERO, remove it.
-  std::vector<int64_t> imms = CreateImmediateValuesBits(/* imm_bits */ 16, /* as_uint */ true);
+  std::vector<int64_t> imms = CreateImmediateValuesBits(/* imm_bits= */ 16, /* as_uint= */ true);
   WarnOnCombinations(reg1_registers.size() * reg2_registers.size() * imms.size());
   std::ostringstream expected;
   for (mips64::GpuRegister* reg1 : reg1_registers) {
@@ -1433,23 +1363,42 @@ TEST_F(AssemblerMIPS64Test, Dext) {
   DriverStr(expected.str(), "Dext");
 }
 
-TEST_F(AssemblerMIPS64Test, Dinsu) {
+TEST_F(AssemblerMIPS64Test, Ins) {
+  std::vector<mips64::GpuRegister*> regs = GetRegisters();
+  WarnOnCombinations(regs.size() * regs.size() * 33 * 16);
+  std::string expected;
+  for (mips64::GpuRegister* reg1 : regs) {
+    for (mips64::GpuRegister* reg2 : regs) {
+      for (int32_t pos = 0; pos < 32; pos++) {
+        for (int32_t size = 1; pos + size <= 32; size++) {
+          __ Ins(*reg1, *reg2, pos, size);
+          std::ostringstream instr;
+          instr << "ins $" << *reg1 << ", $" << *reg2 << ", " << pos << ", " << size << "\n";
+          expected += instr.str();
+        }
+      }
+    }
+  }
+  DriverStr(expected, "Ins");
+}
+
+TEST_F(AssemblerMIPS64Test, DblIns) {
   std::vector<mips64::GpuRegister*> reg1_registers = GetRegisters();
   std::vector<mips64::GpuRegister*> reg2_registers = GetRegisters();
-  WarnOnCombinations(reg1_registers.size() * reg2_registers.size() * 33 * 16);
+  WarnOnCombinations(reg1_registers.size() * reg2_registers.size() * 65 * 32);
   std::ostringstream expected;
   for (mips64::GpuRegister* reg1 : reg1_registers) {
     for (mips64::GpuRegister* reg2 : reg2_registers) {
-      for (int32_t pos = 32; pos < 64; pos++) {
+      for (int32_t pos = 0; pos < 64; pos++) {
         for (int32_t size = 1; pos + size <= 64; size++) {
-          __ Dinsu(*reg1, *reg2, pos, size);
-          expected << "dinsu $" << *reg1 << ", $" << *reg2 << ", " << pos << ", " << size << "\n";
+          __ DblIns(*reg1, *reg2, pos, size);
+          expected << "dins $" << *reg1 << ", $" << *reg2 << ", " << pos << ", " << size << "\n";
         }
       }
     }
   }
 
-  DriverStr(expected.str(), "Dinsu");
+  DriverStr(expected.str(), "DblIns");
 }
 
 TEST_F(AssemblerMIPS64Test, Lsa) {
@@ -1970,6 +1919,50 @@ TEST_F(AssemblerMIPS64Test, LoadFpuFromOffset) {
   __ LoadFpuFromOffset(mips64::kLoadDoubleword, mips64::F0, mips64::A0, -32768);
   __ LoadFpuFromOffset(mips64::kLoadDoubleword, mips64::F0, mips64::A0, 0xABCDEF00);
 
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, 0);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, 1);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, 2);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, 4);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, 8);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, 511);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, 512);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, 513);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, 514);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, 516);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, 1022);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, 1024);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, 1025);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, 1026);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, 1028);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, 2044);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, 2048);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, 2049);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, 2050);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, 2052);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, 4088);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, 4096);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, 4097);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, 4098);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, 4100);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, 4104);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, 0x7FFC);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, 0x8000);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, 0x10000);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, 0x12345678);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, 0x12350078);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, -256);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, -511);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, -513);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, -1022);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, -1026);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, -2044);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, -2052);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, -4096);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, -4104);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, -32768);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, 0xABCDEF00);
+  __ LoadFpuFromOffset(mips64::kLoadQuadword, mips64::F0, mips64::A0, 0x7FFFABCD);
+
   const char* expected =
       "lwc1 $f0, 0($a0)\n"
       "lwc1 $f0, 4($a0)\n"
@@ -2010,7 +2003,78 @@ TEST_F(AssemblerMIPS64Test, LoadFpuFromOffset) {
       "ldc1 $f0, -256($a0)\n"
       "ldc1 $f0, -32768($a0)\n"
       "daui $at, $a0, 0xABCE\n"
-      "ldc1 $f0, -0x1100($at) # 0xEF00\n";
+      "ldc1 $f0, -0x1100($at) # 0xEF00\n"
+
+      "ld.d $w0, 0($a0)\n"
+      "ld.b $w0, 1($a0)\n"
+      "ld.h $w0, 2($a0)\n"
+      "ld.w $w0, 4($a0)\n"
+      "ld.d $w0, 8($a0)\n"
+      "ld.b $w0, 511($a0)\n"
+      "ld.d $w0, 512($a0)\n"
+      "daddiu $at, $a0, 513\n"
+      "ld.b $w0, 0($at)\n"
+      "ld.h $w0, 514($a0)\n"
+      "ld.w $w0, 516($a0)\n"
+      "ld.h $w0, 1022($a0)\n"
+      "ld.d $w0, 1024($a0)\n"
+      "daddiu $at, $a0, 1025\n"
+      "ld.b $w0, 0($at)\n"
+      "daddiu $at, $a0, 1026\n"
+      "ld.h $w0, 0($at)\n"
+      "ld.w $w0, 1028($a0)\n"
+      "ld.w $w0, 2044($a0)\n"
+      "ld.d $w0, 2048($a0)\n"
+      "daddiu $at, $a0, 2049\n"
+      "ld.b $w0, 0($at)\n"
+      "daddiu $at, $a0, 2050\n"
+      "ld.h $w0, 0($at)\n"
+      "daddiu $at, $a0, 2052\n"
+      "ld.w $w0, 0($at)\n"
+      "ld.d $w0, 4088($a0)\n"
+      "daddiu $at, $a0, 4096\n"
+      "ld.d $w0, 0($at)\n"
+      "daddiu $at, $a0, 4097\n"
+      "ld.b $w0, 0($at)\n"
+      "daddiu $at, $a0, 4098\n"
+      "ld.h $w0, 0($at)\n"
+      "daddiu $at, $a0, 4100\n"
+      "ld.w $w0, 0($at)\n"
+      "daddiu $at, $a0, 4104\n"
+      "ld.d $w0, 0($at)\n"
+      "daddiu $at, $a0, 0x7FFC\n"
+      "ld.w $w0, 0($at)\n"
+      "daddiu $at, $a0, 0x7FF8\n"
+      "ld.d $w0, 8($at)\n"
+      "daui $at, $a0, 0x1\n"
+      "ld.d $w0, 0($at)\n"
+      "daui $at, $a0, 0x1234\n"
+      "daddiu $at, $at, 0x6000\n"
+      "ld.d $w0, -2440($at) # 0xF678\n"
+      "daui $at, $a0, 0x1235\n"
+      "ld.d $w0, 0x78($at)\n"
+      "ld.d $w0, -256($a0)\n"
+      "ld.b $w0, -511($a0)\n"
+      "daddiu $at, $a0, -513\n"
+      "ld.b $w0, 0($at)\n"
+      "ld.h $w0, -1022($a0)\n"
+      "daddiu $at, $a0, -1026\n"
+      "ld.h $w0, 0($at)\n"
+      "ld.w $w0, -2044($a0)\n"
+      "daddiu $at, $a0, -2052\n"
+      "ld.w $w0, 0($at)\n"
+      "ld.d $w0, -4096($a0)\n"
+      "daddiu $at, $a0, -4104\n"
+      "ld.d $w0, 0($at)\n"
+      "daddiu $at, $a0, -32768\n"
+      "ld.d $w0, 0($at)\n"
+      "daui $at, $a0, 0xABCE\n"
+      "daddiu $at, $at, -8192 # 0xE000\n"
+      "ld.d $w0, 0xF00($at)\n"
+      "daui $at, $a0, 0x8000\n"
+      "dahi $at, $at, 1\n"
+      "daddiu $at, $at, -21504 # 0xAC00\n"
+      "ld.b $w0, -51($at) # 0xFFCD\n";
   DriverStr(expected, "LoadFpuFromOffset");
 }
 
@@ -2200,6 +2264,50 @@ TEST_F(AssemblerMIPS64Test, StoreFpuToOffset) {
   __ StoreFpuToOffset(mips64::kStoreDoubleword, mips64::F0, mips64::A0, -32768);
   __ StoreFpuToOffset(mips64::kStoreDoubleword, mips64::F0, mips64::A0, 0xABCDEF00);
 
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, 0);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, 1);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, 2);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, 4);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, 8);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, 511);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, 512);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, 513);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, 514);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, 516);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, 1022);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, 1024);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, 1025);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, 1026);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, 1028);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, 2044);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, 2048);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, 2049);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, 2050);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, 2052);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, 4088);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, 4096);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, 4097);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, 4098);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, 4100);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, 4104);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, 0x7FFC);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, 0x8000);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, 0x10000);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, 0x12345678);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, 0x12350078);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, -256);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, -511);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, -513);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, -1022);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, -1026);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, -2044);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, -2052);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, -4096);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, -4104);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, -32768);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, 0xABCDEF00);
+  __ StoreFpuToOffset(mips64::kStoreQuadword, mips64::F0, mips64::A0, 0x7FFFABCD);
+
   const char* expected =
       "swc1 $f0, 0($a0)\n"
       "swc1 $f0, 4($a0)\n"
@@ -2240,7 +2348,78 @@ TEST_F(AssemblerMIPS64Test, StoreFpuToOffset) {
       "sdc1 $f0, -256($a0)\n"
       "sdc1 $f0, -32768($a0)\n"
       "daui $at, $a0, 0xABCE\n"
-      "sdc1 $f0, -0x1100($at)\n";
+      "sdc1 $f0, -0x1100($at)\n"
+
+      "st.d $w0, 0($a0)\n"
+      "st.b $w0, 1($a0)\n"
+      "st.h $w0, 2($a0)\n"
+      "st.w $w0, 4($a0)\n"
+      "st.d $w0, 8($a0)\n"
+      "st.b $w0, 511($a0)\n"
+      "st.d $w0, 512($a0)\n"
+      "daddiu $at, $a0, 513\n"
+      "st.b $w0, 0($at)\n"
+      "st.h $w0, 514($a0)\n"
+      "st.w $w0, 516($a0)\n"
+      "st.h $w0, 1022($a0)\n"
+      "st.d $w0, 1024($a0)\n"
+      "daddiu $at, $a0, 1025\n"
+      "st.b $w0, 0($at)\n"
+      "daddiu $at, $a0, 1026\n"
+      "st.h $w0, 0($at)\n"
+      "st.w $w0, 1028($a0)\n"
+      "st.w $w0, 2044($a0)\n"
+      "st.d $w0, 2048($a0)\n"
+      "daddiu $at, $a0, 2049\n"
+      "st.b $w0, 0($at)\n"
+      "daddiu $at, $a0, 2050\n"
+      "st.h $w0, 0($at)\n"
+      "daddiu $at, $a0, 2052\n"
+      "st.w $w0, 0($at)\n"
+      "st.d $w0, 4088($a0)\n"
+      "daddiu $at, $a0, 4096\n"
+      "st.d $w0, 0($at)\n"
+      "daddiu $at, $a0, 4097\n"
+      "st.b $w0, 0($at)\n"
+      "daddiu $at, $a0, 4098\n"
+      "st.h $w0, 0($at)\n"
+      "daddiu $at, $a0, 4100\n"
+      "st.w $w0, 0($at)\n"
+      "daddiu $at, $a0, 4104\n"
+      "st.d $w0, 0($at)\n"
+      "daddiu $at, $a0, 0x7FFC\n"
+      "st.w $w0, 0($at)\n"
+      "daddiu $at, $a0, 0x7FF8\n"
+      "st.d $w0, 8($at)\n"
+      "daui $at, $a0, 0x1\n"
+      "st.d $w0, 0($at)\n"
+      "daui $at, $a0, 0x1234\n"
+      "daddiu $at, $at, 0x6000\n"
+      "st.d $w0, -2440($at) # 0xF678\n"
+      "daui $at, $a0, 0x1235\n"
+      "st.d $w0, 0x78($at)\n"
+      "st.d $w0, -256($a0)\n"
+      "st.b $w0, -511($a0)\n"
+      "daddiu $at, $a0, -513\n"
+      "st.b $w0, 0($at)\n"
+      "st.h $w0, -1022($a0)\n"
+      "daddiu $at, $a0, -1026\n"
+      "st.h $w0, 0($at)\n"
+      "st.w $w0, -2044($a0)\n"
+      "daddiu $at, $a0, -2052\n"
+      "st.w $w0, 0($at)\n"
+      "st.d $w0, -4096($a0)\n"
+      "daddiu $at, $a0, -4104\n"
+      "st.d $w0, 0($at)\n"
+      "daddiu $at, $a0, -32768\n"
+      "st.d $w0, 0($at)\n"
+      "daui $at, $a0, 0xABCE\n"
+      "daddiu $at, $at, -8192 # 0xE000\n"
+      "st.d $w0, 0xF00($at)\n"
+      "daui $at, $a0, 0x8000\n"
+      "dahi $at, $at, 1\n"
+      "daddiu $at, $at, -21504 # 0xAC00\n"
+      "st.b $w0, -51($at) # 0xFFCD\n";
   DriverStr(expected, "StoreFpuToOffset");
 }
 
@@ -2510,6 +2689,235 @@ TEST_F(AssemblerMIPS64Test, LoadConst64) {
   EXPECT_EQ(tester.GetPathsCovered(), art::mips64::kLoadConst64PathAllPaths);
 }
 
+TEST_F(AssemblerMIPS64Test, LoadFarthestNearLabelAddress) {
+  mips64::Mips64Label label;
+  __ LoadLabelAddress(mips64::V0, &label);
+  constexpr uint32_t kAdduCount = 0x3FFDE;
+  for (uint32_t i = 0; i != kAdduCount; ++i) {
+    __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
+  }
+  __ Bind(&label);
+
+  std::string expected =
+      "lapc $v0, 1f\n" +
+      RepeatInsn(kAdduCount, "addu $zero, $zero, $zero\n") +
+      "1:\n";
+  DriverStr(expected, "LoadFarthestNearLabelAddress");
+  EXPECT_EQ(__ GetLabelLocation(&label), (1 + kAdduCount) * 4);
+}
+
+TEST_F(AssemblerMIPS64Test, LoadNearestFarLabelAddress) {
+  mips64::Mips64Label label;
+  __ LoadLabelAddress(mips64::V0, &label);
+  constexpr uint32_t kAdduCount = 0x3FFDF;
+  for (uint32_t i = 0; i != kAdduCount; ++i) {
+    __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
+  }
+  __ Bind(&label);
+
+  std::string expected =
+      "1:\n"
+      "auipc $at, %hi(2f - 1b)\n"
+      "daddiu $v0, $at, %lo(2f - 1b)\n" +
+      RepeatInsn(kAdduCount, "addu $zero, $zero, $zero\n") +
+      "2:\n";
+  DriverStr(expected, "LoadNearestFarLabelAddress");
+  EXPECT_EQ(__ GetLabelLocation(&label), (2 + kAdduCount) * 4);
+}
+
+TEST_F(AssemblerMIPS64Test, LoadFarthestNearLiteral) {
+  mips64::Literal* literal = __ NewLiteral<uint32_t>(0x12345678);
+  __ LoadLiteral(mips64::V0, mips64::kLoadWord, literal);
+  constexpr uint32_t kAdduCount = 0x3FFDE;
+  for (uint32_t i = 0; i != kAdduCount; ++i) {
+    __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
+  }
+
+  std::string expected =
+      "lwpc $v0, 1f\n" +
+      RepeatInsn(kAdduCount, "addu $zero, $zero, $zero\n") +
+      "1:\n"
+      ".word 0x12345678\n";
+  DriverStr(expected, "LoadFarthestNearLiteral");
+  EXPECT_EQ(__ GetLabelLocation(literal->GetLabel()), (1 + kAdduCount) * 4);
+}
+
+TEST_F(AssemblerMIPS64Test, LoadNearestFarLiteral) {
+  mips64::Literal* literal = __ NewLiteral<uint32_t>(0x12345678);
+  __ LoadLiteral(mips64::V0, mips64::kLoadWord, literal);
+  constexpr uint32_t kAdduCount = 0x3FFDF;
+  for (uint32_t i = 0; i != kAdduCount; ++i) {
+    __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
+  }
+
+  std::string expected =
+      "1:\n"
+      "auipc $at, %hi(2f - 1b)\n"
+      "lw $v0, %lo(2f - 1b)($at)\n" +
+      RepeatInsn(kAdduCount, "addu $zero, $zero, $zero\n") +
+      "2:\n"
+      ".word 0x12345678\n";
+  DriverStr(expected, "LoadNearestFarLiteral");
+  EXPECT_EQ(__ GetLabelLocation(literal->GetLabel()), (2 + kAdduCount) * 4);
+}
+
+TEST_F(AssemblerMIPS64Test, LoadFarthestNearLiteralUnsigned) {
+  mips64::Literal* literal = __ NewLiteral<uint32_t>(0x12345678);
+  __ LoadLiteral(mips64::V0, mips64::kLoadUnsignedWord, literal);
+  constexpr uint32_t kAdduCount = 0x3FFDE;
+  for (uint32_t i = 0; i != kAdduCount; ++i) {
+    __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
+  }
+
+  std::string expected =
+      "lwupc $v0, 1f\n" +
+      RepeatInsn(kAdduCount, "addu $zero, $zero, $zero\n") +
+      "1:\n"
+      ".word 0x12345678\n";
+  DriverStr(expected, "LoadFarthestNearLiteralUnsigned");
+  EXPECT_EQ(__ GetLabelLocation(literal->GetLabel()), (1 + kAdduCount) * 4);
+}
+
+TEST_F(AssemblerMIPS64Test, LoadNearestFarLiteralUnsigned) {
+  mips64::Literal* literal = __ NewLiteral<uint32_t>(0x12345678);
+  __ LoadLiteral(mips64::V0, mips64::kLoadUnsignedWord, literal);
+  constexpr uint32_t kAdduCount = 0x3FFDF;
+  for (uint32_t i = 0; i != kAdduCount; ++i) {
+    __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
+  }
+
+  std::string expected =
+      "1:\n"
+      "auipc $at, %hi(2f - 1b)\n"
+      "lwu $v0, %lo(2f - 1b)($at)\n" +
+      RepeatInsn(kAdduCount, "addu $zero, $zero, $zero\n") +
+      "2:\n"
+      ".word 0x12345678\n";
+  DriverStr(expected, "LoadNearestFarLiteralUnsigned");
+  EXPECT_EQ(__ GetLabelLocation(literal->GetLabel()), (2 + kAdduCount) * 4);
+}
+
+TEST_F(AssemblerMIPS64Test, LoadFarthestNearLiteralLong) {
+  mips64::Literal* literal = __ NewLiteral<uint64_t>(UINT64_C(0x0123456789ABCDEF));
+  __ LoadLiteral(mips64::V0, mips64::kLoadDoubleword, literal);
+  constexpr uint32_t kAdduCount = 0x3FFDD;
+  for (uint32_t i = 0; i != kAdduCount; ++i) {
+    __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
+  }
+
+  std::string expected =
+      "ldpc $v0, 1f\n" +
+      RepeatInsn(kAdduCount, "addu $zero, $zero, $zero\n") +
+      "1:\n"
+      ".dword 0x0123456789ABCDEF\n";
+  DriverStr(expected, "LoadFarthestNearLiteralLong");
+  EXPECT_EQ(__ GetLabelLocation(literal->GetLabel()), (1 + kAdduCount) * 4);
+}
+
+TEST_F(AssemblerMIPS64Test, LoadNearestFarLiteralLong) {
+  mips64::Literal* literal = __ NewLiteral<uint64_t>(UINT64_C(0x0123456789ABCDEF));
+  __ LoadLiteral(mips64::V0, mips64::kLoadDoubleword, literal);
+  constexpr uint32_t kAdduCount = 0x3FFDE;
+  for (uint32_t i = 0; i != kAdduCount; ++i) {
+    __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
+  }
+
+  std::string expected =
+      "1:\n"
+      "auipc $at, %hi(2f - 1b)\n"
+      "ld $v0, %lo(2f - 1b)($at)\n" +
+      RepeatInsn(kAdduCount, "addu $zero, $zero, $zero\n") +
+      "2:\n"
+      ".dword 0x0123456789ABCDEF\n";
+  DriverStr(expected, "LoadNearestFarLiteralLong");
+  EXPECT_EQ(__ GetLabelLocation(literal->GetLabel()), (2 + kAdduCount) * 4);
+}
+
+TEST_F(AssemblerMIPS64Test, LongLiteralAlignmentNop) {
+  mips64::Literal* literal1 = __ NewLiteral<uint64_t>(UINT64_C(0x0123456789ABCDEF));
+  mips64::Literal* literal2 = __ NewLiteral<uint64_t>(UINT64_C(0x5555555555555555));
+  mips64::Literal* literal3 = __ NewLiteral<uint64_t>(UINT64_C(0xAAAAAAAAAAAAAAAA));
+  __ LoadLiteral(mips64::A1, mips64::kLoadDoubleword, literal1);
+  __ LoadLiteral(mips64::A2, mips64::kLoadDoubleword, literal2);
+  __ LoadLiteral(mips64::A3, mips64::kLoadDoubleword, literal3);
+  __ LoadLabelAddress(mips64::V0, literal1->GetLabel());
+  __ LoadLabelAddress(mips64::V1, literal2->GetLabel());
+  // A nop will be inserted here before the 64-bit literals.
+
+  std::string expected =
+      "ldpc $a1, 1f\n"
+      // The GNU assembler incorrectly requires the ldpc instruction to be located
+      // at an address that's a multiple of 8. TODO: Remove this workaround if/when
+      // the assembler is fixed.
+      // "ldpc $a2, 2f\n"
+      ".word 0xECD80004\n"
+      "ldpc $a3, 3f\n"
+      "lapc $v0, 1f\n"
+      "lapc $v1, 2f\n"
+      "nop\n"
+      "1:\n"
+      ".dword 0x0123456789ABCDEF\n"
+      "2:\n"
+      ".dword 0x5555555555555555\n"
+      "3:\n"
+      ".dword 0xAAAAAAAAAAAAAAAA\n";
+  DriverStr(expected, "LongLiteralAlignmentNop");
+  EXPECT_EQ(__ GetLabelLocation(literal1->GetLabel()), 6 * 4u);
+  EXPECT_EQ(__ GetLabelLocation(literal2->GetLabel()), 8 * 4u);
+  EXPECT_EQ(__ GetLabelLocation(literal3->GetLabel()), 10 * 4u);
+}
+
+TEST_F(AssemblerMIPS64Test, LongLiteralAlignmentNoNop) {
+  mips64::Literal* literal1 = __ NewLiteral<uint64_t>(UINT64_C(0x0123456789ABCDEF));
+  mips64::Literal* literal2 = __ NewLiteral<uint64_t>(UINT64_C(0x5555555555555555));
+  __ LoadLiteral(mips64::A1, mips64::kLoadDoubleword, literal1);
+  __ LoadLiteral(mips64::A2, mips64::kLoadDoubleword, literal2);
+  __ LoadLabelAddress(mips64::V0, literal1->GetLabel());
+  __ LoadLabelAddress(mips64::V1, literal2->GetLabel());
+
+  std::string expected =
+      "ldpc $a1, 1f\n"
+      // The GNU assembler incorrectly requires the ldpc instruction to be located
+      // at an address that's a multiple of 8. TODO: Remove this workaround if/when
+      // the assembler is fixed.
+      // "ldpc $a2, 2f\n"
+      ".word 0xECD80003\n"
+      "lapc $v0, 1f\n"
+      "lapc $v1, 2f\n"
+      "1:\n"
+      ".dword 0x0123456789ABCDEF\n"
+      "2:\n"
+      ".dword 0x5555555555555555\n";
+  DriverStr(expected, "LongLiteralAlignmentNoNop");
+  EXPECT_EQ(__ GetLabelLocation(literal1->GetLabel()), 4 * 4u);
+  EXPECT_EQ(__ GetLabelLocation(literal2->GetLabel()), 6 * 4u);
+}
+
+TEST_F(AssemblerMIPS64Test, FarLongLiteralAlignmentNop) {
+  mips64::Literal* literal = __ NewLiteral<uint64_t>(UINT64_C(0x0123456789ABCDEF));
+  __ LoadLiteral(mips64::V0, mips64::kLoadDoubleword, literal);
+  __ LoadLabelAddress(mips64::V1, literal->GetLabel());
+  constexpr uint32_t kAdduCount = 0x3FFDF;
+  for (uint32_t i = 0; i != kAdduCount; ++i) {
+    __ Addu(mips64::ZERO, mips64::ZERO, mips64::ZERO);
+  }
+  // A nop will be inserted here before the 64-bit literal.
+
+  std::string expected =
+      "1:\n"
+      "auipc $at, %hi(3f - 1b)\n"
+      "ld $v0, %lo(3f - 1b)($at)\n"
+      "2:\n"
+      "auipc $at, %hi(3f - 2b)\n"
+      "daddiu $v1, $at, %lo(3f - 2b)\n" +
+      RepeatInsn(kAdduCount, "addu $zero, $zero, $zero\n") +
+      "nop\n"
+      "3:\n"
+      ".dword 0x0123456789ABCDEF\n";
+  DriverStr(expected, "FarLongLiteralAlignmentNop");
+  EXPECT_EQ(__ GetLabelLocation(literal->GetLabel()), (5 + kAdduCount) * 4);
+}
+
 // MSA instructions.
 
 TEST_F(AssemblerMIPS64Test, AndV) {
@@ -2566,6 +2974,46 @@ TEST_F(AssemblerMIPS64Test, SubvW) {
 TEST_F(AssemblerMIPS64Test, SubvD) {
   DriverStr(RepeatVVV(&mips64::Mips64Assembler::SubvD, "subv.d ${reg1}, ${reg2}, ${reg3}"),
             "subv.d");
+}
+
+TEST_F(AssemblerMIPS64Test, Asub_sB) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Asub_sB, "asub_s.b ${reg1}, ${reg2}, ${reg3}"),
+            "asub_s.b");
+}
+
+TEST_F(AssemblerMIPS64Test, Asub_sH) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Asub_sH, "asub_s.h ${reg1}, ${reg2}, ${reg3}"),
+            "asub_s.h");
+}
+
+TEST_F(AssemblerMIPS64Test, Asub_sW) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Asub_sW, "asub_s.w ${reg1}, ${reg2}, ${reg3}"),
+            "asub_s.w");
+}
+
+TEST_F(AssemblerMIPS64Test, Asub_sD) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Asub_sD, "asub_s.d ${reg1}, ${reg2}, ${reg3}"),
+            "asub_s.d");
+}
+
+TEST_F(AssemblerMIPS64Test, Asub_uB) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Asub_uB, "asub_u.b ${reg1}, ${reg2}, ${reg3}"),
+            "asub_u.b");
+}
+
+TEST_F(AssemblerMIPS64Test, Asub_uH) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Asub_uH, "asub_u.h ${reg1}, ${reg2}, ${reg3}"),
+            "asub_u.h");
+}
+
+TEST_F(AssemblerMIPS64Test, Asub_uW) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Asub_uW, "asub_u.w ${reg1}, ${reg2}, ${reg3}"),
+            "asub_u.w");
+}
+
+TEST_F(AssemblerMIPS64Test, Asub_uD) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Asub_uD, "asub_u.d ${reg1}, ${reg2}, ${reg3}"),
+            "asub_u.d");
 }
 
 TEST_F(AssemblerMIPS64Test, MulvB) {
@@ -2668,6 +3116,186 @@ TEST_F(AssemblerMIPS64Test, Mod_uD) {
             "mod_u.d");
 }
 
+TEST_F(AssemblerMIPS64Test, Add_aB) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Add_aB, "add_a.b ${reg1}, ${reg2}, ${reg3}"),
+            "add_a.b");
+}
+
+TEST_F(AssemblerMIPS64Test, Add_aH) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Add_aH, "add_a.h ${reg1}, ${reg2}, ${reg3}"),
+            "add_a.h");
+}
+
+TEST_F(AssemblerMIPS64Test, Add_aW) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Add_aW, "add_a.w ${reg1}, ${reg2}, ${reg3}"),
+            "add_a.w");
+}
+
+TEST_F(AssemblerMIPS64Test, Add_aD) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Add_aD, "add_a.d ${reg1}, ${reg2}, ${reg3}"),
+            "add_a.d");
+}
+
+TEST_F(AssemblerMIPS64Test, Ave_sB) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Ave_sB, "ave_s.b ${reg1}, ${reg2}, ${reg3}"),
+            "ave_s.b");
+}
+
+TEST_F(AssemblerMIPS64Test, Ave_sH) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Ave_sH, "ave_s.h ${reg1}, ${reg2}, ${reg3}"),
+            "ave_s.h");
+}
+
+TEST_F(AssemblerMIPS64Test, Ave_sW) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Ave_sW, "ave_s.w ${reg1}, ${reg2}, ${reg3}"),
+            "ave_s.w");
+}
+
+TEST_F(AssemblerMIPS64Test, Ave_sD) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Ave_sD, "ave_s.d ${reg1}, ${reg2}, ${reg3}"),
+            "ave_s.d");
+}
+
+TEST_F(AssemblerMIPS64Test, Ave_uB) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Ave_uB, "ave_u.b ${reg1}, ${reg2}, ${reg3}"),
+            "ave_u.b");
+}
+
+TEST_F(AssemblerMIPS64Test, Ave_uH) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Ave_uH, "ave_u.h ${reg1}, ${reg2}, ${reg3}"),
+            "ave_u.h");
+}
+
+TEST_F(AssemblerMIPS64Test, Ave_uW) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Ave_uW, "ave_u.w ${reg1}, ${reg2}, ${reg3}"),
+            "ave_u.w");
+}
+
+TEST_F(AssemblerMIPS64Test, Ave_uD) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Ave_uD, "ave_u.d ${reg1}, ${reg2}, ${reg3}"),
+            "ave_u.d");
+}
+
+TEST_F(AssemblerMIPS64Test, Aver_sB) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Aver_sB, "aver_s.b ${reg1}, ${reg2}, ${reg3}"),
+            "aver_s.b");
+}
+
+TEST_F(AssemblerMIPS64Test, Aver_sH) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Aver_sH, "aver_s.h ${reg1}, ${reg2}, ${reg3}"),
+            "aver_s.h");
+}
+
+TEST_F(AssemblerMIPS64Test, Aver_sW) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Aver_sW, "aver_s.w ${reg1}, ${reg2}, ${reg3}"),
+            "aver_s.w");
+}
+
+TEST_F(AssemblerMIPS64Test, Aver_sD) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Aver_sD, "aver_s.d ${reg1}, ${reg2}, ${reg3}"),
+            "aver_s.d");
+}
+
+TEST_F(AssemblerMIPS64Test, Aver_uB) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Aver_uB, "aver_u.b ${reg1}, ${reg2}, ${reg3}"),
+            "aver_u.b");
+}
+
+TEST_F(AssemblerMIPS64Test, Aver_uH) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Aver_uH, "aver_u.h ${reg1}, ${reg2}, ${reg3}"),
+            "aver_u.h");
+}
+
+TEST_F(AssemblerMIPS64Test, Aver_uW) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Aver_uW, "aver_u.w ${reg1}, ${reg2}, ${reg3}"),
+            "aver_u.w");
+}
+
+TEST_F(AssemblerMIPS64Test, Aver_uD) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Aver_uD, "aver_u.d ${reg1}, ${reg2}, ${reg3}"),
+            "aver_u.d");
+}
+
+TEST_F(AssemblerMIPS64Test, Max_sB) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Max_sB, "max_s.b ${reg1}, ${reg2}, ${reg3}"),
+            "max_s.b");
+}
+
+TEST_F(AssemblerMIPS64Test, Max_sH) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Max_sH, "max_s.h ${reg1}, ${reg2}, ${reg3}"),
+            "max_s.h");
+}
+
+TEST_F(AssemblerMIPS64Test, Max_sW) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Max_sW, "max_s.w ${reg1}, ${reg2}, ${reg3}"),
+            "max_s.w");
+}
+
+TEST_F(AssemblerMIPS64Test, Max_sD) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Max_sD, "max_s.d ${reg1}, ${reg2}, ${reg3}"),
+            "max_s.d");
+}
+
+TEST_F(AssemblerMIPS64Test, Max_uB) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Max_uB, "max_u.b ${reg1}, ${reg2}, ${reg3}"),
+            "max_u.b");
+}
+
+TEST_F(AssemblerMIPS64Test, Max_uH) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Max_uH, "max_u.h ${reg1}, ${reg2}, ${reg3}"),
+            "max_u.h");
+}
+
+TEST_F(AssemblerMIPS64Test, Max_uW) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Max_uW, "max_u.w ${reg1}, ${reg2}, ${reg3}"),
+            "max_u.w");
+}
+
+TEST_F(AssemblerMIPS64Test, Max_uD) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Max_uD, "max_u.d ${reg1}, ${reg2}, ${reg3}"),
+            "max_u.d");
+}
+
+TEST_F(AssemblerMIPS64Test, Min_sB) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Min_sB, "min_s.b ${reg1}, ${reg2}, ${reg3}"),
+            "min_s.b");
+}
+
+TEST_F(AssemblerMIPS64Test, Min_sH) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Min_sH, "min_s.h ${reg1}, ${reg2}, ${reg3}"),
+            "min_s.h");
+}
+
+TEST_F(AssemblerMIPS64Test, Min_sW) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Min_sW, "min_s.w ${reg1}, ${reg2}, ${reg3}"),
+            "min_s.w");
+}
+
+TEST_F(AssemblerMIPS64Test, Min_sD) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Min_sD, "min_s.d ${reg1}, ${reg2}, ${reg3}"),
+            "min_s.d");
+}
+
+TEST_F(AssemblerMIPS64Test, Min_uB) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Min_uB, "min_u.b ${reg1}, ${reg2}, ${reg3}"),
+            "min_u.b");
+}
+
+TEST_F(AssemblerMIPS64Test, Min_uH) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Min_uH, "min_u.h ${reg1}, ${reg2}, ${reg3}"),
+            "min_u.h");
+}
+
+TEST_F(AssemblerMIPS64Test, Min_uW) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Min_uW, "min_u.w ${reg1}, ${reg2}, ${reg3}"),
+            "min_u.w");
+}
+
+TEST_F(AssemblerMIPS64Test, Min_uD) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Min_uD, "min_u.d ${reg1}, ${reg2}, ${reg3}"),
+            "min_u.d");
+}
+
 TEST_F(AssemblerMIPS64Test, FaddW) {
   DriverStr(RepeatVVV(&mips64::Mips64Assembler::FaddW, "fadd.w ${reg1}, ${reg2}, ${reg3}"),
             "fadd.w");
@@ -2706,6 +3334,26 @@ TEST_F(AssemblerMIPS64Test, FdivW) {
 TEST_F(AssemblerMIPS64Test, FdivD) {
   DriverStr(RepeatVVV(&mips64::Mips64Assembler::FdivD, "fdiv.d ${reg1}, ${reg2}, ${reg3}"),
             "fdiv.d");
+}
+
+TEST_F(AssemblerMIPS64Test, FmaxW) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::FmaxW, "fmax.w ${reg1}, ${reg2}, ${reg3}"),
+            "fmax.w");
+}
+
+TEST_F(AssemblerMIPS64Test, FmaxD) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::FmaxD, "fmax.d ${reg1}, ${reg2}, ${reg3}"),
+            "fmax.d");
+}
+
+TEST_F(AssemblerMIPS64Test, FminW) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::FminW, "fmin.w ${reg1}, ${reg2}, ${reg3}"),
+            "fmin.w");
+}
+
+TEST_F(AssemblerMIPS64Test, FminD) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::FminD, "fmin.d ${reg1}, ${reg2}, ${reg3}"),
+            "fmin.d");
 }
 
 TEST_F(AssemblerMIPS64Test, Ffint_sW) {
@@ -2820,6 +3468,61 @@ TEST_F(AssemblerMIPS64Test, SplatiD) {
             "splati.d");
 }
 
+TEST_F(AssemblerMIPS64Test, Copy_sB) {
+  DriverStr(RepeatRVIb(&mips64::Mips64Assembler::Copy_sB, 4, "copy_s.b ${reg1}, ${reg2}[{imm}]"),
+            "copy_s.b");
+}
+
+TEST_F(AssemblerMIPS64Test, Copy_sH) {
+  DriverStr(RepeatRVIb(&mips64::Mips64Assembler::Copy_sH, 3, "copy_s.h ${reg1}, ${reg2}[{imm}]"),
+            "copy_s.h");
+}
+
+TEST_F(AssemblerMIPS64Test, Copy_sW) {
+  DriverStr(RepeatRVIb(&mips64::Mips64Assembler::Copy_sW, 2, "copy_s.w ${reg1}, ${reg2}[{imm}]"),
+            "copy_s.w");
+}
+
+TEST_F(AssemblerMIPS64Test, Copy_sD) {
+  DriverStr(RepeatRVIb(&mips64::Mips64Assembler::Copy_sD, 1, "copy_s.d ${reg1}, ${reg2}[{imm}]"),
+            "copy_s.d");
+}
+
+TEST_F(AssemblerMIPS64Test, Copy_uB) {
+  DriverStr(RepeatRVIb(&mips64::Mips64Assembler::Copy_uB, 4, "copy_u.b ${reg1}, ${reg2}[{imm}]"),
+            "copy_u.b");
+}
+
+TEST_F(AssemblerMIPS64Test, Copy_uH) {
+  DriverStr(RepeatRVIb(&mips64::Mips64Assembler::Copy_uH, 3, "copy_u.h ${reg1}, ${reg2}[{imm}]"),
+            "copy_u.h");
+}
+
+TEST_F(AssemblerMIPS64Test, Copy_uW) {
+  DriverStr(RepeatRVIb(&mips64::Mips64Assembler::Copy_uW, 2, "copy_u.w ${reg1}, ${reg2}[{imm}]"),
+            "copy_u.w");
+}
+
+TEST_F(AssemblerMIPS64Test, InsertB) {
+  DriverStr(RepeatVRIb(&mips64::Mips64Assembler::InsertB, 4, "insert.b ${reg1}[{imm}], ${reg2}"),
+            "insert.b");
+}
+
+TEST_F(AssemblerMIPS64Test, InsertH) {
+  DriverStr(RepeatVRIb(&mips64::Mips64Assembler::InsertH, 3, "insert.h ${reg1}[{imm}], ${reg2}"),
+            "insert.h");
+}
+
+TEST_F(AssemblerMIPS64Test, InsertW) {
+  DriverStr(RepeatVRIb(&mips64::Mips64Assembler::InsertW, 2, "insert.w ${reg1}[{imm}], ${reg2}"),
+            "insert.w");
+}
+
+TEST_F(AssemblerMIPS64Test, InsertD) {
+  DriverStr(RepeatVRIb(&mips64::Mips64Assembler::InsertD, 1, "insert.d ${reg1}[{imm}], ${reg2}"),
+            "insert.d");
+}
+
 TEST_F(AssemblerMIPS64Test, FillB) {
   DriverStr(RepeatVR(&mips64::Mips64Assembler::FillB, "fill.b ${reg1}, ${reg2}"), "fill.b");
 }
@@ -2834,6 +3537,22 @@ TEST_F(AssemblerMIPS64Test, FillW) {
 
 TEST_F(AssemblerMIPS64Test, FillD) {
   DriverStr(RepeatVR(&mips64::Mips64Assembler::FillD, "fill.d ${reg1}, ${reg2}"), "fill.d");
+}
+
+TEST_F(AssemblerMIPS64Test, PcntB) {
+  DriverStr(RepeatVV(&mips64::Mips64Assembler::PcntB, "pcnt.b ${reg1}, ${reg2}"), "pcnt.b");
+}
+
+TEST_F(AssemblerMIPS64Test, PcntH) {
+  DriverStr(RepeatVV(&mips64::Mips64Assembler::PcntH, "pcnt.h ${reg1}, ${reg2}"), "pcnt.h");
+}
+
+TEST_F(AssemblerMIPS64Test, PcntW) {
+  DriverStr(RepeatVV(&mips64::Mips64Assembler::PcntW, "pcnt.w ${reg1}, ${reg2}"), "pcnt.w");
+}
+
+TEST_F(AssemblerMIPS64Test, PcntD) {
+  DriverStr(RepeatVV(&mips64::Mips64Assembler::PcntD, "pcnt.d ${reg1}, ${reg2}"), "pcnt.d");
 }
 
 TEST_F(AssemblerMIPS64Test, LdiB) {
@@ -2888,6 +3607,176 @@ TEST_F(AssemblerMIPS64Test, StW) {
 TEST_F(AssemblerMIPS64Test, StD) {
   DriverStr(RepeatVRIb(&mips64::Mips64Assembler::StD, -10, "st.d ${reg1}, {imm}(${reg2})", 0, 8),
             "st.d");
+}
+
+TEST_F(AssemblerMIPS64Test, IlvlB) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::IlvlB, "ilvl.b ${reg1}, ${reg2}, ${reg3}"),
+            "ilvl.b");
+}
+
+TEST_F(AssemblerMIPS64Test, IlvlH) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::IlvlH, "ilvl.h ${reg1}, ${reg2}, ${reg3}"),
+            "ilvl.h");
+}
+
+TEST_F(AssemblerMIPS64Test, IlvlW) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::IlvlW, "ilvl.w ${reg1}, ${reg2}, ${reg3}"),
+            "ilvl.w");
+}
+
+TEST_F(AssemblerMIPS64Test, IlvlD) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::IlvlD, "ilvl.d ${reg1}, ${reg2}, ${reg3}"),
+            "ilvl.d");
+}
+
+TEST_F(AssemblerMIPS64Test, IlvrB) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::IlvrB, "ilvr.b ${reg1}, ${reg2}, ${reg3}"),
+            "ilvr.b");
+}
+
+TEST_F(AssemblerMIPS64Test, IlvrH) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::IlvrH, "ilvr.h ${reg1}, ${reg2}, ${reg3}"),
+            "ilvr.h");
+}
+
+TEST_F(AssemblerMIPS64Test, IlvrW) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::IlvrW, "ilvr.w ${reg1}, ${reg2}, ${reg3}"),
+            "ilvr.w");
+}
+
+TEST_F(AssemblerMIPS64Test, IlvrD) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::IlvrD, "ilvr.d ${reg1}, ${reg2}, ${reg3}"),
+            "ilvr.d");
+}
+
+TEST_F(AssemblerMIPS64Test, IlvevB) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::IlvevB, "ilvev.b ${reg1}, ${reg2}, ${reg3}"),
+            "ilvev.b");
+}
+
+TEST_F(AssemblerMIPS64Test, IlvevH) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::IlvevH, "ilvev.h ${reg1}, ${reg2}, ${reg3}"),
+            "ilvev.h");
+}
+
+TEST_F(AssemblerMIPS64Test, IlvevW) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::IlvevW, "ilvev.w ${reg1}, ${reg2}, ${reg3}"),
+            "ilvev.w");
+}
+
+TEST_F(AssemblerMIPS64Test, IlvevD) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::IlvevD, "ilvev.d ${reg1}, ${reg2}, ${reg3}"),
+            "ilvev.d");
+}
+
+TEST_F(AssemblerMIPS64Test, IlvodB) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::IlvodB, "ilvod.b ${reg1}, ${reg2}, ${reg3}"),
+            "ilvod.b");
+}
+
+TEST_F(AssemblerMIPS64Test, IlvodH) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::IlvodH, "ilvod.h ${reg1}, ${reg2}, ${reg3}"),
+            "ilvod.h");
+}
+
+TEST_F(AssemblerMIPS64Test, IlvodW) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::IlvodW, "ilvod.w ${reg1}, ${reg2}, ${reg3}"),
+            "ilvod.w");
+}
+
+TEST_F(AssemblerMIPS64Test, IlvodD) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::IlvodD, "ilvod.d ${reg1}, ${reg2}, ${reg3}"),
+            "ilvod.d");
+}
+
+TEST_F(AssemblerMIPS64Test, MaddvB) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::MaddvB, "maddv.b ${reg1}, ${reg2}, ${reg3}"),
+            "maddv.b");
+}
+
+TEST_F(AssemblerMIPS64Test, MaddvH) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::MaddvH, "maddv.h ${reg1}, ${reg2}, ${reg3}"),
+            "maddv.h");
+}
+
+TEST_F(AssemblerMIPS64Test, MaddvW) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::MaddvW, "maddv.w ${reg1}, ${reg2}, ${reg3}"),
+            "maddv.w");
+}
+
+TEST_F(AssemblerMIPS64Test, MaddvD) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::MaddvD, "maddv.d ${reg1}, ${reg2}, ${reg3}"),
+            "maddv.d");
+}
+
+TEST_F(AssemblerMIPS64Test, Hadd_sH) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Hadd_sH, "hadd_s.h ${reg1}, ${reg2}, ${reg3}"),
+            "hadd_s.h");
+}
+
+TEST_F(AssemblerMIPS64Test, Hadd_sW) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Hadd_sW, "hadd_s.w ${reg1}, ${reg2}, ${reg3}"),
+            "hadd_s.w");
+}
+
+TEST_F(AssemblerMIPS64Test, Hadd_sD) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Hadd_sD, "hadd_s.d ${reg1}, ${reg2}, ${reg3}"),
+            "hadd_s.d");
+}
+
+TEST_F(AssemblerMIPS64Test, Hadd_uH) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Hadd_uH, "hadd_u.h ${reg1}, ${reg2}, ${reg3}"),
+            "hadd_u.h");
+}
+
+TEST_F(AssemblerMIPS64Test, Hadd_uW) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Hadd_uW, "hadd_u.w ${reg1}, ${reg2}, ${reg3}"),
+            "hadd_u.w");
+}
+
+TEST_F(AssemblerMIPS64Test, Hadd_uD) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::Hadd_uD, "hadd_u.d ${reg1}, ${reg2}, ${reg3}"),
+            "hadd_u.d");
+}
+
+TEST_F(AssemblerMIPS64Test, MsubvB) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::MsubvB, "msubv.b ${reg1}, ${reg2}, ${reg3}"),
+            "msubv.b");
+}
+
+TEST_F(AssemblerMIPS64Test, MsubvH) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::MsubvH, "msubv.h ${reg1}, ${reg2}, ${reg3}"),
+            "msubv.h");
+}
+
+TEST_F(AssemblerMIPS64Test, MsubvW) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::MsubvW, "msubv.w ${reg1}, ${reg2}, ${reg3}"),
+            "msubv.w");
+}
+
+TEST_F(AssemblerMIPS64Test, MsubvD) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::MsubvD, "msubv.d ${reg1}, ${reg2}, ${reg3}"),
+            "msubv.d");
+}
+
+TEST_F(AssemblerMIPS64Test, FmaddW) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::FmaddW, "fmadd.w ${reg1}, ${reg2}, ${reg3}"),
+            "fmadd.w");
+}
+
+TEST_F(AssemblerMIPS64Test, FmaddD) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::FmaddD, "fmadd.d ${reg1}, ${reg2}, ${reg3}"),
+            "fmadd.d");
+}
+
+TEST_F(AssemblerMIPS64Test, FmsubW) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::FmsubW, "fmsub.w ${reg1}, ${reg2}, ${reg3}"),
+            "fmsub.w");
+}
+
+TEST_F(AssemblerMIPS64Test, FmsubD) {
+  DriverStr(RepeatVVV(&mips64::Mips64Assembler::FmsubD, "fmsub.d ${reg1}, ${reg2}, ${reg3}"),
+            "fmsub.d");
 }
 
 #undef __

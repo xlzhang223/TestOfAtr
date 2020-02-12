@@ -17,17 +17,12 @@
 #ifndef ART_COMPILER_OPTIMIZING_CODEGEN_TEST_UTILS_H_
 #define ART_COMPILER_OPTIMIZING_CODEGEN_TEST_UTILS_H_
 
-#include "arch/arm/instruction_set_features_arm.h"
 #include "arch/arm/registers_arm.h"
-#include "arch/arm64/instruction_set_features_arm64.h"
 #include "arch/instruction_set.h"
-#include "arch/mips/instruction_set_features_mips.h"
 #include "arch/mips/registers_mips.h"
-#include "arch/mips64/instruction_set_features_mips64.h"
 #include "arch/mips64/registers_mips64.h"
-#include "arch/x86/instruction_set_features_x86.h"
 #include "arch/x86/registers_x86.h"
-#include "arch/x86_64/instruction_set_features_x86_64.h"
+#include "code_simulator.h"
 #include "code_simulator_container.h"
 #include "common_compiler_test.h"
 #include "graph_checker.h"
@@ -35,7 +30,6 @@
 #include "ssa_liveness_analysis.h"
 
 #ifdef ART_ENABLE_CODEGEN_arm
-#include "code_generator_arm.h"
 #include "code_generator_arm_vixl.h"
 #endif
 
@@ -79,46 +73,81 @@ class CodegenTargetConfig {
 };
 
 #ifdef ART_ENABLE_CODEGEN_arm
+// Special ARM code generator for codegen testing in a limited code
+// generation environment (i.e. with no runtime support).
+//
+// Note: If we want to exercise certains HIR constructions
+// (e.g. reference field load in Baker read barrier configuration) in
+// codegen tests in the future, we should also:
+// - save the Thread Register (R9) and possibly the Marking Register
+//   (R8) before entering the generated function (both registers are
+//   callee-save in AAPCS);
+// - set these registers to meaningful values before or upon entering
+//   the generated function (so that generated code using them is
+//   correct);
+// - restore their original values before leaving the generated
+//   function.
+
 // Provide our own codegen, that ensures the C calling conventions
 // are preserved. Currently, ART and C do not match as R4 is caller-save
 // in ART, and callee-save in C. Alternatively, we could use or write
 // the stub that saves and restores all registers, but it is easier
 // to just overwrite the code generator.
-class TestCodeGeneratorARM : public arm::CodeGeneratorARM {
- public:
-  TestCodeGeneratorARM(HGraph* graph,
-                       const ArmInstructionSetFeatures& isa_features,
-                       const CompilerOptions& compiler_options)
-      : arm::CodeGeneratorARM(graph, isa_features, compiler_options) {
-    AddAllocatedRegister(Location::RegisterLocation(arm::R6));
-    AddAllocatedRegister(Location::RegisterLocation(arm::R7));
-  }
-
-  void SetupBlockedRegisters() const OVERRIDE {
-    arm::CodeGeneratorARM::SetupBlockedRegisters();
-    blocked_core_registers_[arm::R4] = true;
-    blocked_core_registers_[arm::R6] = false;
-    blocked_core_registers_[arm::R7] = false;
-  }
-};
-
-// A way to test the VIXL32-based code generator on ARM. This will replace
-// TestCodeGeneratorARM when the VIXL32-based backend replaces the existing one.
 class TestCodeGeneratorARMVIXL : public arm::CodeGeneratorARMVIXL {
  public:
-  TestCodeGeneratorARMVIXL(HGraph* graph,
-                           const ArmInstructionSetFeatures& isa_features,
-                           const CompilerOptions& compiler_options)
-      : arm::CodeGeneratorARMVIXL(graph, isa_features, compiler_options) {
+  TestCodeGeneratorARMVIXL(HGraph* graph, const CompilerOptions& compiler_options)
+      : arm::CodeGeneratorARMVIXL(graph, compiler_options) {
     AddAllocatedRegister(Location::RegisterLocation(arm::R6));
     AddAllocatedRegister(Location::RegisterLocation(arm::R7));
   }
 
-  void SetupBlockedRegisters() const OVERRIDE {
+  void SetupBlockedRegisters() const override {
     arm::CodeGeneratorARMVIXL::SetupBlockedRegisters();
     blocked_core_registers_[arm::R4] = true;
     blocked_core_registers_[arm::R6] = false;
     blocked_core_registers_[arm::R7] = false;
+  }
+
+  void MaybeGenerateMarkingRegisterCheck(int code ATTRIBUTE_UNUSED,
+                                         Location temp_loc ATTRIBUTE_UNUSED) override {
+    // When turned on, the marking register checks in
+    // CodeGeneratorARMVIXL::MaybeGenerateMarkingRegisterCheck expects the
+    // Thread Register and the Marking Register to be set to
+    // meaningful values. This is not the case in codegen testing, so
+    // just disable them entirely here (by doing nothing in this
+    // method).
+  }
+};
+#endif
+
+#ifdef ART_ENABLE_CODEGEN_arm64
+// Special ARM64 code generator for codegen testing in a limited code
+// generation environment (i.e. with no runtime support).
+//
+// Note: If we want to exercise certains HIR constructions
+// (e.g. reference field load in Baker read barrier configuration) in
+// codegen tests in the future, we should also:
+// - save the Thread Register (X19) and possibly the Marking Register
+//   (X20) before entering the generated function (both registers are
+//   callee-save in AAPCS64);
+// - set these registers to meaningful values before or upon entering
+//   the generated function (so that generated code using them is
+//   correct);
+// - restore their original values before leaving the generated
+//   function.
+class TestCodeGeneratorARM64 : public arm64::CodeGeneratorARM64 {
+ public:
+  TestCodeGeneratorARM64(HGraph* graph, const CompilerOptions& compiler_options)
+      : arm64::CodeGeneratorARM64(graph, compiler_options) {}
+
+  void MaybeGenerateMarkingRegisterCheck(int codem ATTRIBUTE_UNUSED,
+                                         Location temp_loc ATTRIBUTE_UNUSED) override {
+    // When turned on, the marking register checks in
+    // CodeGeneratorARM64::MaybeGenerateMarkingRegisterCheck expect the
+    // Thread Register and the Marking Register to be set to
+    // meaningful values. This is not the case in codegen testing, so
+    // just disable them entirely here (by doing nothing in this
+    // method).
   }
 };
 #endif
@@ -126,15 +155,13 @@ class TestCodeGeneratorARMVIXL : public arm::CodeGeneratorARMVIXL {
 #ifdef ART_ENABLE_CODEGEN_x86
 class TestCodeGeneratorX86 : public x86::CodeGeneratorX86 {
  public:
-  TestCodeGeneratorX86(HGraph* graph,
-                       const X86InstructionSetFeatures& isa_features,
-                       const CompilerOptions& compiler_options)
-      : x86::CodeGeneratorX86(graph, isa_features, compiler_options) {
+  TestCodeGeneratorX86(HGraph* graph, const CompilerOptions& compiler_options)
+      : x86::CodeGeneratorX86(graph, compiler_options) {
     // Save edi, we need it for getting enough registers for long multiplication.
     AddAllocatedRegister(Location::RegisterLocation(x86::EDI));
   }
 
-  void SetupBlockedRegisters() const OVERRIDE {
+  void SetupBlockedRegisters() const override {
     x86::CodeGeneratorX86::SetupBlockedRegisters();
     // ebx is a callee-save register in C, but caller-save for ART.
     blocked_core_registers_[x86::EBX] = true;
@@ -149,14 +176,16 @@ class InternalCodeAllocator : public CodeAllocator {
  public:
   InternalCodeAllocator() : size_(0) { }
 
-  virtual uint8_t* Allocate(size_t size) {
+  uint8_t* Allocate(size_t size) override {
     size_ = size;
     memory_.reset(new uint8_t[size]);
     return memory_.get();
   }
 
   size_t GetSize() const { return size_; }
-  uint8_t* GetMemory() const { return memory_.get(); }
+  ArrayRef<const uint8_t> GetMemory() const override {
+    return ArrayRef<const uint8_t>(memory_.get(), size_);
+  }
 
  private:
   size_t size_;
@@ -168,7 +197,7 @@ class InternalCodeAllocator : public CodeAllocator {
 static bool CanExecuteOnHardware(InstructionSet target_isa) {
   return (target_isa == kRuntimeISA)
       // Handle the special case of ARM, with two instructions sets (ARM32 and Thumb-2).
-      || (kRuntimeISA == kArm && target_isa == kThumb2);
+      || (kRuntimeISA == InstructionSet::kArm && target_isa == InstructionSet::kThumb2);
 }
 
 static bool CanExecute(InstructionSet target_isa) {
@@ -230,9 +259,9 @@ static void Run(const InternalCodeAllocator& allocator,
   InstructionSet target_isa = codegen.GetInstructionSet();
 
   typedef Expected (*fptr)();
-  CommonCompilerTest::MakeExecutable(allocator.GetMemory(), allocator.GetSize());
-  fptr f = reinterpret_cast<fptr>(allocator.GetMemory());
-  if (target_isa == kThumb2) {
+  CommonCompilerTest::MakeExecutable(allocator.GetMemory().data(), allocator.GetMemory().size());
+  fptr f = reinterpret_cast<fptr>(reinterpret_cast<uintptr_t>(allocator.GetMemory().data()));
+  if (target_isa == InstructionSet::kThumb2) {
     // For thumb we need the bottom bit set.
     f = reinterpret_cast<fptr>(reinterpret_cast<uintptr_t>(f) + 1);
   }
@@ -243,7 +272,7 @@ static void ValidateGraph(HGraph* graph) {
   GraphChecker graph_checker(graph);
   graph_checker.Run();
   if (!graph_checker.IsValid()) {
-    for (const auto& error : graph_checker.GetErrors()) {
+    for (const std::string& error : graph_checker.GetErrors()) {
       std::cout << error << std::endl;
     }
   }
@@ -256,10 +285,15 @@ static void RunCodeNoCheck(CodeGenerator* codegen,
                            const std::function<void(HGraph*)>& hook_before_codegen,
                            bool has_result,
                            Expected expected) {
-  SsaLivenessAnalysis liveness(graph, codegen);
-  PrepareForRegisterAllocation(graph).Run();
-  liveness.Analyze();
-  RegisterAllocator::Create(graph->GetArena(), codegen, liveness)->AllocateRegisters();
+  {
+    ScopedArenaAllocator local_allocator(graph->GetArenaStack());
+    SsaLivenessAnalysis liveness(graph, codegen, &local_allocator);
+    PrepareForRegisterAllocation(graph, codegen->GetCompilerOptions()).Run();
+    liveness.Analyze();
+    std::unique_ptr<RegisterAllocator> register_allocator =
+        RegisterAllocator::Create(&local_allocator, codegen, liveness);
+    register_allocator->AllocateRegisters();
+  }
   hook_before_codegen(graph);
   InternalCodeAllocator allocator;
   codegen->Compile(&allocator);
@@ -278,74 +312,49 @@ static void RunCode(CodeGenerator* codegen,
 
 template <typename Expected>
 static void RunCode(CodegenTargetConfig target_config,
+                    const CompilerOptions& compiler_options,
                     HGraph* graph,
                     std::function<void(HGraph*)> hook_before_codegen,
                     bool has_result,
                     Expected expected) {
-  CompilerOptions compiler_options;
-  std::unique_ptr<CodeGenerator> codegen(target_config.CreateCodeGenerator(graph, compiler_options));
+  std::unique_ptr<CodeGenerator> codegen(target_config.CreateCodeGenerator(graph,
+                                                                           compiler_options));
   RunCode(codegen.get(), graph, hook_before_codegen, has_result, expected);
 }
 
 #ifdef ART_ENABLE_CODEGEN_arm
-CodeGenerator* create_codegen_arm(HGraph* graph, const CompilerOptions& compiler_options) {
-  std::unique_ptr<const ArmInstructionSetFeatures> features_arm(
-      ArmInstructionSetFeatures::FromCppDefines());
-  return new (graph->GetArena()) TestCodeGeneratorARM(graph,
-                                                      *features_arm.get(),
-                                                      compiler_options);
-}
-
 CodeGenerator* create_codegen_arm_vixl32(HGraph* graph, const CompilerOptions& compiler_options) {
-  std::unique_ptr<const ArmInstructionSetFeatures> features_arm(
-      ArmInstructionSetFeatures::FromCppDefines());
-  return new (graph->GetArena())
-      TestCodeGeneratorARMVIXL(graph, *features_arm.get(), compiler_options);
+  return new (graph->GetAllocator()) TestCodeGeneratorARMVIXL(graph, compiler_options);
 }
 #endif
 
 #ifdef ART_ENABLE_CODEGEN_arm64
 CodeGenerator* create_codegen_arm64(HGraph* graph, const CompilerOptions& compiler_options) {
-  std::unique_ptr<const Arm64InstructionSetFeatures> features_arm64(
-      Arm64InstructionSetFeatures::FromCppDefines());
-  return new (graph->GetArena()) arm64::CodeGeneratorARM64(graph,
-                                                           *features_arm64.get(),
-                                                           compiler_options);
+  return new (graph->GetAllocator()) TestCodeGeneratorARM64(graph, compiler_options);
 }
 #endif
 
 #ifdef ART_ENABLE_CODEGEN_x86
 CodeGenerator* create_codegen_x86(HGraph* graph, const CompilerOptions& compiler_options) {
-  std::unique_ptr<const X86InstructionSetFeatures> features_x86(
-      X86InstructionSetFeatures::FromCppDefines());
-  return new (graph->GetArena()) TestCodeGeneratorX86(graph, *features_x86.get(), compiler_options);
+  return new (graph->GetAllocator()) TestCodeGeneratorX86(graph, compiler_options);
 }
 #endif
 
 #ifdef ART_ENABLE_CODEGEN_x86_64
 CodeGenerator* create_codegen_x86_64(HGraph* graph, const CompilerOptions& compiler_options) {
-  std::unique_ptr<const X86_64InstructionSetFeatures> features_x86_64(
-     X86_64InstructionSetFeatures::FromCppDefines());
-  return new (graph->GetArena())
-      x86_64::CodeGeneratorX86_64(graph, *features_x86_64.get(), compiler_options);
+  return new (graph->GetAllocator()) x86_64::CodeGeneratorX86_64(graph, compiler_options);
 }
 #endif
 
 #ifdef ART_ENABLE_CODEGEN_mips
 CodeGenerator* create_codegen_mips(HGraph* graph, const CompilerOptions& compiler_options) {
-  std::unique_ptr<const MipsInstructionSetFeatures> features_mips(
-      MipsInstructionSetFeatures::FromCppDefines());
-  return new (graph->GetArena())
-      mips::CodeGeneratorMIPS(graph, *features_mips.get(), compiler_options);
+  return new (graph->GetAllocator()) mips::CodeGeneratorMIPS(graph, compiler_options);
 }
 #endif
 
 #ifdef ART_ENABLE_CODEGEN_mips64
 CodeGenerator* create_codegen_mips64(HGraph* graph, const CompilerOptions& compiler_options) {
-  std::unique_ptr<const Mips64InstructionSetFeatures> features_mips64(
-      Mips64InstructionSetFeatures::FromCppDefines());
-  return new (graph->GetArena())
-      mips64::CodeGeneratorMIPS64(graph, *features_mips64.get(), compiler_options);
+  return new (graph->GetAllocator()) mips64::CodeGeneratorMIPS64(graph, compiler_options);
 }
 #endif
 

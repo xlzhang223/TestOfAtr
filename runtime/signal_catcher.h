@@ -17,6 +17,7 @@
 #ifndef ART_RUNTIME_SIGNAL_CATCHER_H_
 #define ART_RUNTIME_SIGNAL_CATCHER_H_
 
+#include "android-base/unique_fd.h"
 #include "base/mutex.h"
 
 namespace art {
@@ -32,7 +33,7 @@ class Thread;
  */
 class SignalCatcher {
  public:
-  explicit SignalCatcher(const std::string& stack_trace_file);
+  SignalCatcher();
   ~SignalCatcher();
 
   void HandleSigQuit() REQUIRES(!Locks::mutator_lock_, !Locks::thread_list_lock_,
@@ -48,8 +49,6 @@ class SignalCatcher {
   void SetHaltFlag(bool new_value) REQUIRES(!lock_);
   bool ShouldHalt() REQUIRES(!lock_);
   int WaitForSignal(Thread* self, SignalSet& signals) REQUIRES(!lock_);
-
-  std::string stack_trace_file_;
 
   mutable Mutex lock_ DEFAULT_MUTEX_ACQUIRED_AFTER;
   ConditionVariable cond_ GUARDED_BY(lock_);

@@ -28,6 +28,8 @@ where
          (higher values yield deeper nested conditionals)
     -n : defines a fuzzing nest for for/while/do-while loops
          (higher values yield deeper nested loops)
+    -t : defines a fuzzing nest for try-catch-finally blocks
+         (higher values yield deeper nested try-catch-finally blocks)
     -v : prints version number and exits
     -h : prints help and exits
 
@@ -35,8 +37,10 @@ The current version of JFuzz sends all output to stdout, and uses
 a fixed testing class named Test. So a typical test run looks as follows.
 
     jfuzz > Test.java
-    jack -cp ${JACK_CLASSPATH} --output-dex . Test.java
-    art -classpath classes.dex Test
+    mkdir classes
+    javac -d classes Test.java
+    dx --dex --output=classes.dex classes
+    art -cp classes.dex Test
 
 How to start JFuzz testing
 ==========================
@@ -48,6 +52,8 @@ How to start JFuzz testing
                           [--report_script=SCRIPT]
                           [--jfuzz_arg=ARG]
                           [--true_divergence]
+                          [--dexer=DEXER]
+                          [--debug_info]
 
 where
 
@@ -63,6 +69,8 @@ where
     --report_script   : path to script called for each divergence
     --jfuzz_arg       : argument for jfuzz
     --true_divergence : don't bisect timeout divergences
+    --dexer=DEXER     : use either dx or d8 to obtain dex files
+    --debug_info      : include debugging info
 
 How to start JFuzz nightly testing
 ==================================
@@ -83,12 +91,16 @@ How to start J/DexFuzz testing (multi-layered)
                           [--num_tests=NUM_TESTS]
                           [--num_inputs=NUM_INPUTS]
                           [--device=DEVICE]
+                          [--dexer=DEXER]
+                          [--debug_info]
 
 where
 
-    --num_tests : number of tests to run (10000 by default)
-    --num_inputs: number of JFuzz programs to generate
-    --device    : target device serial number (passed to adb -s)
+    --num_tests   : number of tests to run (10000 by default)
+    --num_inputs  : number of JFuzz programs to generate
+    --device      : target device serial number (passed to adb -s)
+    --dexer=DEXER : use either dx or d8 to obtain dex files
+    --debug_info  : include debugging info
 
 Background
 ==========

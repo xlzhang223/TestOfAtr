@@ -27,13 +27,15 @@
 #include <string>
 #include <vector>
 
-#include "gc_root.h"
+#include "base/array_ref.h"
 #include "class_linker.h"
+#include "gc_root.h"
 #include "handle.h"
 #include "jdwp/jdwp.h"
 #include "jni.h"
 #include "jvalue.h"
 #include "obj_ptr.h"
+#include "runtime_callbacks.h"
 #include "thread.h"
 #include "thread_state.h"
 
@@ -51,17 +53,44 @@ class ScopedObjectAccessUnchecked;
 class StackVisitor;
 class Thread;
 
+struct DebuggerActiveMethodInspectionCallback : public MethodInspectionCallback {
+  bool IsMethodBeingInspected(ArtMethod* method) override REQUIRES_SHARED(Locks::mutator_lock_);
+  bool IsMethodSafeToJit(ArtMethod* method) override REQUIRES_SHARED(Locks::mutator_lock_);
+  bool MethodNeedsDebugVersion(ArtMethod* method) override REQUIRES_SHARED(Locks::mutator_lock_);
+};
+
+struct DebuggerDdmCallback : public DdmCallback {
+  void DdmPublishChunk(uint32_t type, const ArrayRef<const uint8_t>& data)
+      override REQUIRES_SHARED(Locks::mutator_lock_);
+};
+
+struct InternalDebuggerControlCallback : public DebuggerControlCallback {
+  void StartDebugger() override;
+  void StopDebugger() override;
+  bool IsDebuggerConfigured() override;
+};
+
 /*
  * Invoke-during-breakpoint support.
  */
 struct DebugInvokeReq {
-  DebugInvokeReq(uint32_t invoke_request_id, JDWP::ObjectId invoke_thread_id,
-                 mirror::Object* invoke_receiver, mirror::Class* invoke_class,
-                 ArtMethod* invoke_method, uint32_t invoke_options,
-                 uint64_t args[], uint32_t args_count)
-      : request_id(invoke_request_id), thread_id(invoke_thread_id), receiver(invoke_receiver),
-        klass(invoke_class), method(invoke_method), arg_count(args_count), arg_values(args),
-        options(invoke_options), reply(JDWP::expandBufAlloc()) {
+  DebugInvokeReq(uint32_t invoke_request_id,
+                 JDWP::ObjectId invoke_thread_id,
+                 ObjPtr<mirror::Object> invoke_receiver,
+                 ObjPtr<mirror::Class> invoke_class,
+                 ArtMethod* invoke_method,
+                 uint32_t invoke_options,
+                 uint64_t args[],
+                 uint32_t args_count)
+      : request_id(invoke_request_id),
+        thread_id(invoke_thread_id),
+        receiver(invoke_receiver),
+        klass(invoke_class),
+        method(invoke_method),
+        arg_count(args_count),
+        arg_values(args),
+        options(invoke_options),
+        reply(JDWP::expandBufAlloc()) {
   }
 
   ~DebugInvokeReq() {
@@ -237,7 +266,8 @@ class Dbg {
   }
 
   // Configures JDWP with parsed command-line options.
-  static void ConfigureJdwp(const JDWP::JdwpOptions& jdwp_options);
+  static void ConfigureJdwp(const JDWP::JdwpOptions& jdwp_options)
+      REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Returns true if we had -Xrunjdwp or -agentlib:jdwp= on the command line.
   static bool IsJdwpConfigured();
@@ -265,7 +295,7 @@ class Dbg {
    */
   static std::string GetClassName(JDWP::RefTypeId id)
       REQUIRES_SHARED(Locks::mutator_lock_);
-  static std::string GetClassName(mirror::Class* klass)
+  static std::string GetClassName(ObjPtr<mirror::Class> klass)
       REQUIRES_SHARED(Locks::mutator_lock_);
   static JDWP::JdwpError GetClassObject(JDWP::RefTypeId id, JDWP::ObjectId* class_object_id)
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -299,7 +329,9 @@ class Dbg {
 
   static JDWP::JdwpError GetArrayLength(JDWP::ObjectId array_id, int32_t* length)
       REQUIRES_SHARED(Locks::mutator_lock_);
-  static JDWP::JdwpError OutputArray(JDWP::ObjectId array_id, int offset, int count,
+  static JDWP::JdwpError OutputArray(JDWP::ObjectId array_id,
+                                     int offset,
+                                     int count,
                                      JDWP::ExpandBuf* pReply)
       REQUIRES_SHARED(Locks::mutator_lock_);
   static JDWP::JdwpError SetArrayElements(JDWP::ObjectId array_id, int offset, int count,
@@ -639,15 +671,15 @@ class Dbg {
       REQUIRES_SHARED(Locks::mutator_lock_);
   static void DdmSetThreadNotification(bool enable)
       REQUIRES(!Locks::thread_list_lock_);
+  static bool DdmHandleChunk(
+      JNIEnv* env,
+      uint32_t type,
+      const ArrayRef<const jbyte>& data,
+      /*out*/uint32_t* out_type,
+      /*out*/std::vector<uint8_t>* out_data);
   static bool DdmHandlePacket(JDWP::Request* request, uint8_t** pReplyBuf, int* pReplyLen);
   static void DdmConnected() REQUIRES_SHARED(Locks::mutator_lock_);
   static void DdmDisconnected() REQUIRES_SHARED(Locks::mutator_lock_);
-  static void DdmSendChunk(uint32_t type, const std::vector<uint8_t>& bytes)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-  static void DdmSendChunk(uint32_t type, size_t len, const uint8_t* buf)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-  static void DdmSendChunkV(uint32_t type, const iovec* iov, int iov_count)
-      REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Visit breakpoint roots, used to prevent unloading of methods with breakpoints.
   static void VisitRoots(RootVisitor* visitor)
@@ -689,7 +721,8 @@ class Dbg {
     return gRegistry;
   }
 
-  static JDWP::JdwpTag TagFromObject(const ScopedObjectAccessUnchecked& soa, mirror::Object* o)
+  static JDWP::JdwpTag TagFromObject(const ScopedObjectAccessUnchecked& soa,
+                                     ObjPtr<mirror::Object> o)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   static JDWP::JdwpTypeTag GetTypeTag(ObjPtr<mirror::Class> klass)
@@ -773,6 +806,10 @@ class Dbg {
   // Indicates whether the debugger is making requests.
   static bool gDebuggerActive;
 
+  static DebuggerActiveMethodInspectionCallback gDebugActiveCallback;
+  static DebuggerDdmCallback gDebugDdmCallback;
+  static InternalDebuggerControlCallback gDebuggerControlCallback;
+
   // Indicates whether we should drop the JDWP connection because the runtime stops or the
   // debugger called VirtualMachine.Dispose.
   static bool gDisposed;
@@ -807,15 +844,15 @@ class Dbg {
 
   class DbgThreadLifecycleCallback : public ThreadLifecycleCallback {
    public:
-    void ThreadStart(Thread* self) OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_);
-    void ThreadDeath(Thread* self) OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_);
+    void ThreadStart(Thread* self) override REQUIRES_SHARED(Locks::mutator_lock_);
+    void ThreadDeath(Thread* self) override REQUIRES_SHARED(Locks::mutator_lock_);
   };
 
   class DbgClassLoadCallback : public ClassLoadCallback {
    public:
-    void ClassLoad(Handle<mirror::Class> klass) OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_);
+    void ClassLoad(Handle<mirror::Class> klass) override REQUIRES_SHARED(Locks::mutator_lock_);
     void ClassPrepare(Handle<mirror::Class> temp_klass,
-                      Handle<mirror::Class> klass) OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_);
+                      Handle<mirror::Class> klass) override REQUIRES_SHARED(Locks::mutator_lock_);
   };
 
   static DbgThreadLifecycleCallback thread_lifecycle_callback_;

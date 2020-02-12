@@ -18,8 +18,11 @@
 #define ART_RUNTIME_CHECK_REFERENCE_MAP_VISITOR_H_
 
 #include "art_method-inl.h"
+#include "dex/code_item_accessors-inl.h"
+#include "dex/dex_file_types.h"
 #include "oat_quick_method_header.h"
 #include "scoped_thread_state_change-inl.h"
+#include "stack.h"
 #include "stack_map.h"
 
 namespace art {
@@ -34,7 +37,7 @@ class CheckReferenceMapVisitor : public StackVisitor {
   bool VisitFrame() REQUIRES_SHARED(Locks::mutator_lock_) {
     ArtMethod* m = GetMethod();
     if (m->IsCalleeSaveMethod() || m->IsNative()) {
-      CHECK_EQ(GetDexPc(), DexFile::kDexNoIndex);
+      CHECK_EQ(GetDexPc(), dex::kDexNoIndex);
     }
 
     if (m == nullptr || m->IsNative() || m->IsRuntimeMethod() || IsShadowFrame()) {
@@ -61,19 +64,18 @@ class CheckReferenceMapVisitor : public StackVisitor {
   void CheckOptimizedMethod(int* registers, int number_of_references, uint32_t native_pc_offset)
       REQUIRES_SHARED(Locks::mutator_lock_) {
     ArtMethod* m = GetMethod();
-    CodeInfo code_info = GetCurrentOatQuickMethodHeader()->GetOptimizedCodeInfo();
-    CodeInfoEncoding encoding = code_info.ExtractEncoding();
-    StackMap stack_map = code_info.GetStackMapForNativePcOffset(native_pc_offset, encoding);
-    uint16_t number_of_dex_registers = m->GetCodeItem()->registers_size_;
-    DexRegisterMap dex_register_map =
-        code_info.GetDexRegisterMapOf(stack_map, encoding, number_of_dex_registers);
-    uint32_t register_mask = code_info.GetRegisterMaskOf(encoding, stack_map);
-    BitMemoryRegion stack_mask = code_info.GetStackMaskOf(encoding, stack_map);
+    CodeInfo code_info(GetCurrentOatQuickMethodHeader());
+    StackMap stack_map = code_info.GetStackMapForNativePcOffset(native_pc_offset);
+    CodeItemDataAccessor accessor(m->DexInstructionData());
+    uint16_t number_of_dex_registers = accessor.RegistersSize();
+    DexRegisterMap dex_register_map = code_info.GetDexRegisterMapOf(stack_map);
+    DCHECK_EQ(dex_register_map.size(), number_of_dex_registers);
+    uint32_t register_mask = code_info.GetRegisterMaskOf(stack_map);
+    BitMemoryRegion stack_mask = code_info.GetStackMaskOf(stack_map);
     for (int i = 0; i < number_of_references; ++i) {
       int reg = registers[i];
-      CHECK(reg < m->GetCodeItem()->registers_size_);
-      DexRegisterLocation location = dex_register_map.GetDexRegisterLocation(
-          reg, number_of_dex_registers, code_info, encoding);
+      CHECK_LT(reg, accessor.RegistersSize());
+      DexRegisterLocation location = dex_register_map[reg];
       switch (location.GetKind()) {
         case DexRegisterLocation::Kind::kNone:
           // Not set, should not be a reference.
@@ -96,7 +98,7 @@ class CheckReferenceMapVisitor : public StackVisitor {
           CHECK_EQ(location.GetValue(), 0);
           break;
         default:
-          LOG(FATAL) << "Unexpected location kind " << location.GetInternalKind();
+          LOG(FATAL) << "Unexpected location kind " << location.GetKind();
       }
     }
   }

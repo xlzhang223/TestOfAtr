@@ -14,6 +14,8 @@
  * limitations under the License.
  */
 
+import java.lang.reflect.Method;
+
 class Circle {
   Circle(double radius) {
     this.radius = radius;
@@ -62,11 +64,12 @@ class TestClass3 {
 
 class Finalizable {
   static boolean sVisited = false;
-  static final int VALUE = 0xbeef;
+  static final int VALUE1 = 0xbeef;
+  static final int VALUE2 = 0xcafe;
   int i;
 
   protected void finalize() {
-    if (i != VALUE) {
+    if (i != VALUE1) {
       System.out.println("Where is the beef?");
     }
     sVisited = true;
@@ -166,51 +169,6 @@ public class Main {
     return obj.i + obj1.j + obj2.i + obj2.j;
   }
 
-  /// CHECK-START: int Main.test4(TestClass, boolean) load_store_elimination (before)
-  /// CHECK: InstanceFieldSet
-  /// CHECK: InstanceFieldGet
-  /// CHECK: Return
-  /// CHECK: InstanceFieldSet
-
-  /// CHECK-START: int Main.test4(TestClass, boolean) load_store_elimination (after)
-  /// CHECK: InstanceFieldSet
-  /// CHECK-NOT: NullCheck
-  /// CHECK-NOT: InstanceFieldGet
-  /// CHECK: Return
-  /// CHECK: InstanceFieldSet
-
-  // Set and merge the same value in two branches.
-  static int test4(TestClass obj, boolean b) {
-    if (b) {
-      obj.i = 1;
-    } else {
-      obj.i = 1;
-    }
-    return obj.i;
-  }
-
-  /// CHECK-START: int Main.test5(TestClass, boolean) load_store_elimination (before)
-  /// CHECK: InstanceFieldSet
-  /// CHECK: InstanceFieldGet
-  /// CHECK: Return
-  /// CHECK: InstanceFieldSet
-
-  /// CHECK-START: int Main.test5(TestClass, boolean) load_store_elimination (after)
-  /// CHECK: InstanceFieldSet
-  /// CHECK: InstanceFieldGet
-  /// CHECK: Return
-  /// CHECK: InstanceFieldSet
-
-  // Set and merge different values in two branches.
-  static int test5(TestClass obj, boolean b) {
-    if (b) {
-      obj.i = 1;
-    } else {
-      obj.i = 2;
-    }
-    return obj.i;
-  }
-
   /// CHECK-START: int Main.test6(TestClass, TestClass, boolean) load_store_elimination (before)
   /// CHECK: InstanceFieldSet
   /// CHECK: InstanceFieldSet
@@ -291,25 +249,6 @@ public class Main {
     obj.next = obj2;
     System.out.print("");
     return obj2.i;
-  }
-
-  /// CHECK-START: int Main.test10(TestClass) load_store_elimination (before)
-  /// CHECK: StaticFieldGet
-  /// CHECK: InstanceFieldGet
-  /// CHECK: StaticFieldSet
-  /// CHECK: InstanceFieldGet
-
-  /// CHECK-START: int Main.test10(TestClass) load_store_elimination (after)
-  /// CHECK: StaticFieldGet
-  /// CHECK: InstanceFieldGet
-  /// CHECK: StaticFieldSet
-  /// CHECK-NOT: NullCheck
-  /// CHECK-NOT: InstanceFieldGet
-
-  // Static fields shouldn't alias with instance fields.
-  static int test10(TestClass obj) {
-    TestClass.si += obj.i;
-    return obj.i;
   }
 
   /// CHECK-START: int Main.test11(TestClass) load_store_elimination (before)
@@ -396,7 +335,6 @@ public class Main {
 
   /// CHECK-START: int Main.test15() load_store_elimination (after)
   /// CHECK: <<Const2:i\d+>> IntConstant 2
-  /// CHECK: StaticFieldSet
   /// CHECK: StaticFieldSet
   /// CHECK-NOT: StaticFieldGet
   /// CHECK: Return [<<Const2>>]
@@ -557,78 +495,21 @@ public class Main {
     return sum;
   }
 
-  /// CHECK-START: int Main.test23(boolean) load_store_elimination (before)
-  /// CHECK: NewInstance
-  /// CHECK: InstanceFieldSet
-  /// CHECK: InstanceFieldGet
-  /// CHECK: InstanceFieldSet
-  /// CHECK: InstanceFieldGet
-  /// CHECK: Return
-  /// CHECK: InstanceFieldGet
-  /// CHECK: InstanceFieldSet
-
-  /// CHECK-START: int Main.test23(boolean) load_store_elimination (after)
-  /// CHECK: NewInstance
-  /// CHECK-NOT: InstanceFieldSet
-  /// CHECK-NOT: InstanceFieldGet
-  /// CHECK: InstanceFieldSet
-  /// CHECK: InstanceFieldGet
-  /// CHECK: Return
-  /// CHECK-NOT: InstanceFieldGet
-  /// CHECK: InstanceFieldSet
-
-  // Test store elimination on merging.
-  static int test23(boolean b) {
-    TestClass obj = new TestClass();
-    obj.i = 3;      // This store can be eliminated since the value flows into each branch.
-    if (b) {
-      obj.i += 1;   // This store cannot be eliminated due to the merge later.
-    } else {
-      obj.i += 2;   // This store cannot be eliminated due to the merge later.
-    }
-    return obj.i;
-  }
-
-  /// CHECK-START: float Main.test24() load_store_elimination (before)
-  /// CHECK-DAG:     <<True:i\d+>>     IntConstant 1
-  /// CHECK-DAG:     <<Float8:f\d+>>   FloatConstant 8
-  /// CHECK-DAG:     <<Float42:f\d+>>  FloatConstant 42
-  /// CHECK-DAG:     <<Obj:l\d+>>      NewInstance
-  /// CHECK-DAG:                       InstanceFieldSet [<<Obj>>,<<True>>]
-  /// CHECK-DAG:                       InstanceFieldSet [<<Obj>>,<<Float8>>]
-  /// CHECK-DAG:     <<GetTest:z\d+>>  InstanceFieldGet [<<Obj>>]
-  /// CHECK-DAG:     <<GetField:f\d+>> InstanceFieldGet [<<Obj>>]
-  /// CHECK-DAG:     <<Select:f\d+>>   Select [<<Float42>>,<<GetField>>,<<GetTest>>]
-  /// CHECK-DAG:                       Return [<<Select>>]
-
-  /// CHECK-START: float Main.test24() load_store_elimination (after)
-  /// CHECK-DAG:     <<True:i\d+>>     IntConstant 1
-  /// CHECK-DAG:     <<Float8:f\d+>>   FloatConstant 8
-  /// CHECK-DAG:     <<Float42:f\d+>>  FloatConstant 42
-  /// CHECK-DAG:     <<Select:f\d+>>   Select [<<Float42>>,<<Float8>>,<<True>>]
-  /// CHECK-DAG:                       Return [<<Select>>]
-
-  static float test24() {
-    float a = 42.0f;
-    TestClass3 obj = new TestClass3();
-    if (obj.test1) {
-      a = obj.floatField;
-    }
-    return a;
-  }
-
   /// CHECK-START: void Main.testFinalizable() load_store_elimination (before)
   /// CHECK: NewInstance
+  /// CHECK: InstanceFieldSet
   /// CHECK: InstanceFieldSet
 
   /// CHECK-START: void Main.testFinalizable() load_store_elimination (after)
   /// CHECK: NewInstance
   /// CHECK: InstanceFieldSet
+  /// CHECK-NOT: InstanceFieldSet
 
-  // Allocations and stores into finalizable objects cannot be eliminated.
+  // Allocations of finalizable objects cannot be eliminated.
   static void testFinalizable() {
     Finalizable finalizable = new Finalizable();
-    finalizable.i = Finalizable.VALUE;
+    finalizable.i = Finalizable.VALUE2;
+    finalizable.i = Finalizable.VALUE1;
   }
 
   static java.lang.ref.WeakReference<Object> getWeakReference() {
@@ -769,6 +650,127 @@ public class Main {
     return obj;
   }
 
+  /// CHECK-START: void Main.testStoreStore2(TestClass2) load_store_elimination (before)
+  /// CHECK: InstanceFieldSet
+  /// CHECK: InstanceFieldSet
+  /// CHECK: InstanceFieldSet
+  /// CHECK: InstanceFieldSet
+
+  /// CHECK-START: void Main.testStoreStore2(TestClass2) load_store_elimination (after)
+  /// CHECK: InstanceFieldSet
+  /// CHECK: InstanceFieldSet
+  /// CHECK-NOT: InstanceFieldSet
+
+  private static void testStoreStore2(TestClass2 obj) {
+    obj.i = 41;
+    obj.j = 42;
+    obj.i = 43;
+    obj.j = 44;
+  }
+
+  /// CHECK-START: void Main.testStoreStore3(TestClass2, boolean) load_store_elimination (before)
+  /// CHECK: InstanceFieldSet
+  /// CHECK: InstanceFieldSet
+  /// CHECK: InstanceFieldSet
+  /// CHECK: InstanceFieldSet
+
+  /// CHECK-START: void Main.testStoreStore3(TestClass2, boolean) load_store_elimination (after)
+  /// CHECK: InstanceFieldSet
+  /// CHECK: InstanceFieldSet
+  /// CHECK: InstanceFieldSet
+  /// CHECK-NOT: InstanceFieldSet
+
+  private static void testStoreStore3(TestClass2 obj, boolean flag) {
+    obj.i = 41;
+    obj.j = 42;    // redundant since it's overwritten in both branches below.
+    if (flag) {
+      obj.j = 43;
+    } else {
+      obj.j = 44;
+    }
+  }
+
+  /// CHECK-START: void Main.testStoreStore4() load_store_elimination (before)
+  /// CHECK: StaticFieldSet
+  /// CHECK: StaticFieldSet
+
+  /// CHECK-START: void Main.testStoreStore4() load_store_elimination (after)
+  /// CHECK: StaticFieldSet
+  /// CHECK-NOT: StaticFieldSet
+
+  private static void testStoreStore4() {
+    TestClass.si = 61;
+    TestClass.si = 62;
+  }
+
+  /// CHECK-START: int Main.testStoreStore5(TestClass2, TestClass2) load_store_elimination (before)
+  /// CHECK: InstanceFieldSet
+  /// CHECK: InstanceFieldGet
+  /// CHECK: InstanceFieldSet
+
+  /// CHECK-START: int Main.testStoreStore5(TestClass2, TestClass2) load_store_elimination (after)
+  /// CHECK: InstanceFieldSet
+  /// CHECK: InstanceFieldGet
+  /// CHECK: InstanceFieldSet
+
+  private static int testStoreStore5(TestClass2 obj1, TestClass2 obj2) {
+    obj1.i = 71;      // This store is needed since obj2.i may load from it.
+    int i = obj2.i;
+    obj1.i = 72;
+    return i;
+  }
+
+  /// CHECK-START: int Main.testStoreStore6(TestClass2, TestClass2) load_store_elimination (before)
+  /// CHECK: InstanceFieldSet
+  /// CHECK: InstanceFieldGet
+  /// CHECK: InstanceFieldSet
+
+  /// CHECK-START: int Main.testStoreStore6(TestClass2, TestClass2) load_store_elimination (after)
+  /// CHECK-NOT: InstanceFieldSet
+  /// CHECK: InstanceFieldGet
+  /// CHECK: InstanceFieldSet
+
+  private static int testStoreStore6(TestClass2 obj1, TestClass2 obj2) {
+    obj1.i = 81;      // This store is not needed since obj2.j cannot load from it.
+    int j = obj2.j;
+    obj1.i = 82;
+    return j;
+  }
+
+  /// CHECK-START: int Main.testNoSideEffects(int[]) load_store_elimination (before)
+  /// CHECK: ArraySet
+  /// CHECK: ArraySet
+  /// CHECK: ArraySet
+  /// CHECK: ArrayGet
+
+  /// CHECK-START: int Main.testNoSideEffects(int[]) load_store_elimination (after)
+  /// CHECK: ArraySet
+  /// CHECK: ArraySet
+  /// CHECK-NOT: ArraySet
+  /// CHECK-NOT: ArrayGet
+
+  private static int testNoSideEffects(int[] array) {
+    array[0] = 101;
+    array[1] = 102;
+    int bitCount = Integer.bitCount(0x3456);
+    array[1] = 103;
+    return array[0] + bitCount;
+  }
+
+  /// CHECK-START: void Main.testThrow(TestClass2, java.lang.Exception) load_store_elimination (before)
+  /// CHECK: InstanceFieldSet
+  /// CHECK: Throw
+
+  /// CHECK-START: void Main.testThrow(TestClass2, java.lang.Exception) load_store_elimination (after)
+  /// CHECK: InstanceFieldSet
+  /// CHECK: Throw
+
+  // Make sure throw keeps the store.
+  private static void testThrow(TestClass2 obj, Exception e) throws Exception {
+    obj.i = 55;
+    throw e;
+  }
+
   /// CHECK-START: int Main.testStoreStoreWithDeoptimize(int[]) load_store_elimination (before)
   /// CHECK: NewInstance
   /// CHECK: InstanceFieldSet
@@ -881,10 +883,10 @@ public class Main {
   /// CHECK: ArrayGet
   private static int testAllocationEliminationOfArray2() {
     // Cannot eliminate array allocation since array is accessed with non-constant
-    // index.
-    int[] array = new int[4];
-    array[2] = 4;
-    array[3] = 7;
+    // index (only 3 elements to prevent vectorization of the reduction).
+    int[] array = new int[3];
+    array[1] = 4;
+    array[2] = 7;
     int sum = 0;
     for (int e : array) {
       sum += e;
@@ -928,6 +930,211 @@ public class Main {
     return array[1] + array[i];
   }
 
+  /// CHECK-START: int Main.testAllocationEliminationOfArray5(int) load_store_elimination (before)
+  /// CHECK: NewArray
+  /// CHECK: ArraySet
+  /// CHECK: ArrayGet
+
+  /// CHECK-START: int Main.testAllocationEliminationOfArray5(int) load_store_elimination (after)
+  /// CHECK: NewArray
+  /// CHECK-NOT: ArraySet
+  /// CHECK-NOT: ArrayGet
+  private static int testAllocationEliminationOfArray5(int i) {
+    // Cannot eliminate array allocation due to unknown i that may
+    // cause NegativeArraySizeException.
+    int[] array = new int[i];
+    array[1] = 12;
+    return array[1];
+  }
+
+  /// CHECK-START: int Main.testExitMerge(boolean) load_store_elimination (before)
+  /// CHECK: NewInstance
+  /// CHECK: InstanceFieldSet
+  /// CHECK: InstanceFieldGet
+  /// CHECK: Return
+  /// CHECK: InstanceFieldSet
+  /// CHECK: Throw
+
+  /// CHECK-START: int Main.testExitMerge(boolean) load_store_elimination (after)
+  /// CHECK-NOT: NewInstance
+  /// CHECK-NOT: InstanceFieldSet
+  /// CHECK-NOT: InstanceFieldGet
+  /// CHECK: Return
+  /// CHECK-NOT: InstanceFieldSet
+  /// CHECK: Throw
+  private static int testExitMerge(boolean cond) {
+    TestClass obj = new TestClass();
+    if (cond) {
+      obj.i = 1;
+      return obj.i + 1;
+    } else {
+      obj.i = 2;
+      throw new Error();
+    }
+  }
+
+  /// CHECK-START: int Main.testExitMerge2(boolean) load_store_elimination (before)
+  /// CHECK: NewInstance
+  /// CHECK: InstanceFieldSet
+  /// CHECK: InstanceFieldGet
+  /// CHECK: InstanceFieldSet
+  /// CHECK: InstanceFieldGet
+
+  /// CHECK-START: int Main.testExitMerge2(boolean) load_store_elimination (after)
+  /// CHECK-NOT: NewInstance
+  /// CHECK-NOT: InstanceFieldSet
+  /// CHECK-NOT: InstanceFieldGet
+  private static int testExitMerge2(boolean cond) {
+    TestClass obj = new TestClass();
+    int res;
+    if (cond) {
+      obj.i = 1;
+      res = obj.i + 1;
+    } else {
+      obj.i = 2;
+      res = obj.j + 2;
+    }
+    return res;
+  }
+
+  /// CHECK-START: void Main.testStoreSameValue() load_store_elimination (before)
+  /// CHECK: NewArray
+  /// CHECK: ArrayGet
+  /// CHECK: ArraySet
+
+  /// CHECK-START: void Main.testStoreSameValue() load_store_elimination (after)
+  /// CHECK: NewArray
+  /// CHECK-NOT: ArrayGet
+  /// CHECK-NOT: ArraySet
+  private static void testStoreSameValue() {
+    Object[] array = new Object[2];
+    sArray = array;
+    Object obj = array[0];
+    array[1] = obj;    // store the same value as the defaut value.
+  }
+
+  static Object[] sArray;
+
+  /// CHECK-START: int Main.testLocalArrayMerge1(boolean) load_store_elimination (before)
+  /// CHECK-DAG: <<Const0:i\d+>> IntConstant 0
+  /// CHECK-DAG: <<Const1:i\d+>> IntConstant 1
+  /// CHECK-DAG: <<A:l\d+>>      NewArray
+  /// CHECK-DAG:                 ArraySet [<<A>>,<<Const0>>,<<Const0>>]
+  /// CHECK-DAG:                 ArraySet [<<A>>,<<Const0>>,<<Const1>>]
+  /// CHECK-DAG:                 ArraySet [<<A>>,<<Const0>>,<<Const1>>]
+  /// CHECK-DAG: <<Get:i\d+>>    ArrayGet [<<A>>,<<Const0>>]
+  /// CHECK-DAG:                 Return [<<Get>>]
+  //
+  /// CHECK-START: int Main.testLocalArrayMerge1(boolean) load_store_elimination (after)
+  /// CHECK-DAG: <<Const1:i\d+>> IntConstant 1
+  /// CHECK-DAG:                 Return [<<Const1>>]
+  //
+  /// CHECK-START: int Main.testLocalArrayMerge1(boolean) load_store_elimination (after)
+  /// CHECK-NOT:                 NewArray
+  /// CHECK-NOT:                 ArraySet
+  /// CHECK-NOT:                 ArrayGet
+  private static int testLocalArrayMerge1(boolean x) {
+    // The explicit store can be removed right away
+    // since it is equivalent to the default.
+    int[] a = { 0 };
+    // The diamond pattern stores/load can be replaced
+    // by the direct value.
+    if (x) {
+      a[0] = 1;
+    } else {
+      a[0] = 1;
+    }
+    return a[0];
+  }
+
+  /// CHECK-START: int Main.testLocalArrayMerge2(boolean) load_store_elimination (before)
+  /// CHECK-DAG: <<Const0:i\d+>> IntConstant 0
+  /// CHECK-DAG: <<Const1:i\d+>> IntConstant 1
+  /// CHECK-DAG: <<Const2:i\d+>> IntConstant 2
+  /// CHECK-DAG: <<Const3:i\d+>> IntConstant 3
+  /// CHECK-DAG: <<A:l\d+>>      NewArray
+  /// CHECK-DAG:                 ArraySet [<<A>>,<<Const0>>,<<Const1>>]
+  /// CHECK-DAG:                 ArraySet [<<A>>,<<Const0>>,<<Const2>>]
+  /// CHECK-DAG:                 ArraySet [<<A>>,<<Const0>>,<<Const3>>]
+  /// CHECK-DAG: <<Get:i\d+>>    ArrayGet [<<A>>,<<Const0>>]
+  /// CHECK-DAG:                 Return [<<Get>>]
+  //
+  /// CHECK-START: int Main.testLocalArrayMerge2(boolean) load_store_elimination (after)
+  /// CHECK-DAG: <<Const0:i\d+>> IntConstant 0
+  /// CHECK-DAG: <<A:l\d+>>      NewArray
+  /// CHECK-DAG: <<Get:i\d+>>    ArrayGet [<<A>>,<<Const0>>]
+  /// CHECK-DAG:                 Return [<<Get>>]
+  //
+  /// CHECK-START: int Main.testLocalArrayMerge2(boolean) load_store_elimination (after)
+  /// CHECK-DAG:                 ArraySet
+  /// CHECK-DAG:                 ArraySet
+  /// CHECK-NOT:                 ArraySet
+  private static int testLocalArrayMerge2(boolean x) {
+    // The explicit store can be removed eventually even
+    // though it is not equivalent to the default.
+    int[] a = { 1 };
+    // The diamond pattern stores/load remain.
+    if (x) {
+      a[0] = 2;
+    } else {
+      a[0] = 3;
+    }
+    return a[0];
+  }
+
+  /// CHECK-START: int Main.testLocalArrayMerge3(boolean) load_store_elimination (after)
+  /// CHECK-DAG: <<Const0:i\d+>> IntConstant 0
+  /// CHECK-DAG: <<Const1:i\d+>> IntConstant 1
+  /// CHECK-DAG: <<Const2:i\d+>> IntConstant 2
+  /// CHECK-DAG: <<A:l\d+>>      NewArray
+  /// CHECK-DAG:                 ArraySet [<<A>>,<<Const0>>,<<Const1>>]
+  /// CHECK-DAG:                 ArraySet [<<A>>,<<Const0>>,<<Const2>>]
+  /// CHECK-DAG: <<Get:i\d+>>    ArrayGet [<<A>>,<<Const0>>]
+  /// CHECK-DAG:                 Return [<<Get>>]
+  private static int testLocalArrayMerge3(boolean x) {
+    // All stores/load remain.
+    int[] a = { 1 };
+    if (x) {
+      a[0] = 2;
+    }
+    return a[0];
+  }
+
+  /// CHECK-START: int Main.testLocalArrayMerge4(boolean) load_store_elimination (before)
+  /// CHECK-DAG: <<Const0:i\d+>> IntConstant 0
+  /// CHECK-DAG: <<Const1:i\d+>> IntConstant 1
+  /// CHECK-DAG: <<A:l\d+>>      NewArray
+  /// CHECK-DAG:                 ArraySet [<<A>>,<<Const0>>,<<Const0>>]
+  /// CHECK-DAG:                 ArraySet [<<A>>,<<Const0>>,<<Const1>>]
+  /// CHECK-DAG:                 ArraySet [<<A>>,<<Const0>>,<<Const1>>]
+  /// CHECK-DAG: <<Get1:b\d+>>   ArrayGet [<<A>>,<<Const0>>]
+  /// CHECK-DAG: <<Get2:a\d+>>   ArrayGet [<<A>>,<<Const0>>]
+  /// CHECK-DAG: <<Add:i\d+>>    Add [<<Get1>>,<<Get2>>]
+  /// CHECK-DAG:                 Return [<<Add>>]
+  //
+  /// CHECK-START: int Main.testLocalArrayMerge4(boolean) load_store_elimination (after)
+  /// CHECK-DAG: <<Const1:i\d+>> IntConstant 1
+  /// CHECK-DAG: <<Cnv1:b\d+>>   TypeConversion [<<Const1>>]
+  /// CHECK-DAG: <<Cnv2:a\d+>>   TypeConversion [<<Const1>>]
+  /// CHECK-DAG: <<Add:i\d+>>    Add [<<Cnv1>>,<<Cnv2>>]
+  /// CHECK-DAG:                 Return [<<Add>>]
+  //
+  /// CHECK-START: int Main.testLocalArrayMerge4(boolean) load_store_elimination (after)
+  /// CHECK-NOT:                 NewArray
+  /// CHECK-NOT:                 ArraySet
+  /// CHECK-NOT:                 ArrayGet
+  private static int testLocalArrayMerge4(boolean x) {
+    byte[] a = { 0 };
+    if (x) {
+      a[0] = 1;
+    } else {
+      a[0] = 1;
+    }
+    // Differently typed (signed vs unsigned),
+    // but same reference.
+    return a[0] + (a[0] & 0xff);
+  }
+
   static void assertIntEquals(int result, int expected) {
     if (expected != result) {
       throw new Error("Expected: " + expected + ", found: " + result);
@@ -946,7 +1153,15 @@ public class Main {
     }
   }
 
-  public static void main(String[] args) {
+  public static void main(String[] args) throws Exception {
+
+    Class main2 = Class.forName("Main2");
+    Method test4 = main2.getMethod("test4", TestClass.class, boolean.class);
+    Method test5 = main2.getMethod("test5", TestClass.class, boolean.class);
+    Method test10 = main2.getMethod("test10", TestClass.class);
+    Method test23 = main2.getMethod("test23", boolean.class);
+    Method test24 = main2.getMethod("test24");
+
     assertDoubleEquals(Math.PI * Math.PI * Math.PI, calcCircleArea(Math.PI));
     assertIntEquals(test1(new TestClass(), new TestClass()), 3);
     assertIntEquals(test2(new TestClass()), 1);
@@ -954,10 +1169,10 @@ public class Main {
     TestClass obj2 = new TestClass();
     obj1.next = obj2;
     assertIntEquals(test3(obj1), 10);
-    assertIntEquals(test4(new TestClass(), true), 1);
-    assertIntEquals(test4(new TestClass(), false), 1);
-    assertIntEquals(test5(new TestClass(), true), 1);
-    assertIntEquals(test5(new TestClass(), false), 2);
+    assertIntEquals((int)test4.invoke(null, new TestClass(), true), 1);
+    assertIntEquals((int)test4.invoke(null, new TestClass(), false), 1);
+    assertIntEquals((int)test5.invoke(null, new TestClass(), true), 1);
+    assertIntEquals((int)test5.invoke(null, new TestClass(), false), 2);
     assertIntEquals(test6(new TestClass(), new TestClass(), true), 4);
     assertIntEquals(test6(new TestClass(), new TestClass(), false), 2);
     assertIntEquals(test7(new TestClass()), 1);
@@ -966,7 +1181,7 @@ public class Main {
     obj2 = new TestClass();
     obj1.next = obj2;
     assertIntEquals(test9(new TestClass()), 1);
-    assertIntEquals(test10(new TestClass(3, 4)), 3);
+    assertIntEquals((int)test10.invoke(null, new TestClass(3, 4)), 3);
     assertIntEquals(TestClass.si, 3);
     assertIntEquals(test11(new TestClass()), 10);
     assertIntEquals(test12(new TestClass(), new TestClass()), 10);
@@ -983,9 +1198,9 @@ public class Main {
     assertFloatEquals(test20().i, 0);
     test21(new TestClass());
     assertIntEquals(test22(), 13);
-    assertIntEquals(test23(true), 4);
-    assertIntEquals(test23(false), 5);
-    assertFloatEquals(test24(), 8.0f);
+    assertIntEquals((int)test23.invoke(null, true), 4);
+    assertIntEquals((int)test23.invoke(null, false), 5);
+    assertFloatEquals((float)test24.invoke(null), 8.0f);
     testFinalizableByForcingGc();
     assertIntEquals($noinline$testHSelect(true), 0xdead);
     int[] array = {2, 5, 9, -1, -3, 10, 8, 4};
@@ -1013,10 +1228,64 @@ public class Main {
     assertIntEquals(testAllocationEliminationOfArray2(), 11);
     assertIntEquals(testAllocationEliminationOfArray3(2), 4);
     assertIntEquals(testAllocationEliminationOfArray4(2), 6);
+    assertIntEquals(testAllocationEliminationOfArray5(2), 12);
+    try {
+      testAllocationEliminationOfArray5(-2);
+    } catch (NegativeArraySizeException e) {
+      System.out.println("Got NegativeArraySizeException.");
+    }
 
     assertIntEquals(testStoreStore().i, 41);
     assertIntEquals(testStoreStore().j, 43);
+
+    assertIntEquals(testExitMerge(true), 2);
+    assertIntEquals(testExitMerge2(true), 2);
+    assertIntEquals(testExitMerge2(false), 2);
+
+    TestClass2 testclass2 = new TestClass2();
+    testStoreStore2(testclass2);
+    assertIntEquals(testclass2.i, 43);
+    assertIntEquals(testclass2.j, 44);
+
+    testStoreStore3(testclass2, true);
+    assertIntEquals(testclass2.i, 41);
+    assertIntEquals(testclass2.j, 43);
+    testStoreStore3(testclass2, false);
+    assertIntEquals(testclass2.i, 41);
+    assertIntEquals(testclass2.j, 44);
+
+    testStoreStore4();
+    assertIntEquals(TestClass.si, 62);
+
+    int ret = testStoreStore5(testclass2, testclass2);
+    assertIntEquals(testclass2.i, 72);
+    assertIntEquals(ret, 71);
+
+    testclass2.j = 88;
+    ret = testStoreStore6(testclass2, testclass2);
+    assertIntEquals(testclass2.i, 82);
+    assertIntEquals(ret, 88);
+
+    ret = testNoSideEffects(iarray);
+    assertIntEquals(iarray[0], 101);
+    assertIntEquals(iarray[1], 103);
+    assertIntEquals(ret, 108);
+
+    try {
+      testThrow(testclass2, new Exception());
+    } catch (Exception e) {}
+    assertIntEquals(testclass2.i, 55);
+
     assertIntEquals(testStoreStoreWithDeoptimize(new int[4]), 4);
+
+    assertIntEquals(testLocalArrayMerge1(true), 1);
+    assertIntEquals(testLocalArrayMerge1(false), 1);
+    assertIntEquals(testLocalArrayMerge2(true), 2);
+    assertIntEquals(testLocalArrayMerge2(false), 3);
+    assertIntEquals(testLocalArrayMerge3(true), 2);
+    assertIntEquals(testLocalArrayMerge3(false), 1);
+    assertIntEquals(testLocalArrayMerge4(true), 2);
+    assertIntEquals(testLocalArrayMerge4(false), 2);
   }
 
   static boolean sFlag;

@@ -14,10 +14,10 @@
  * limitations under the License.
  */
 
-#include "mutex.h"
+#include "mutex-inl.h"
 
 #include "common_runtime_test.h"
-#include "thread-inl.h"
+#include "thread-current-inl.h"
 
 namespace art {
 
@@ -97,7 +97,7 @@ TEST_F(MutexTest, RecursiveTryLockUnlock) {
 
 
 struct RecursiveLockWait {
-  explicit RecursiveLockWait()
+  RecursiveLockWait()
       : mu("test mutex", kDefaultMutexLevel, true), cv("test condition variable", mu) {
   }
 

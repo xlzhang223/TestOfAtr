@@ -17,14 +17,15 @@
 #include "mark_sweep.h"
 
 #include <atomic>
+#include <climits>
 #include <functional>
 #include <numeric>
-#include <climits>
 #include <vector>
 
 #include "base/bounded_fifo.h"
 #include "base/enums.h"
-#include "base/logging.h"
+#include "base/file_utils.h"
+#include "base/logging.h"  // For VLOG.
 #include "base/macros.h"
 #include "base/mutex-inl.h"
 #include "base/systrace.h"
@@ -42,11 +43,9 @@
 #include "mirror/object-inl.h"
 #include "runtime.h"
 #include "scoped_thread_state_change-inl.h"
-#include "thread-inl.h"
+#include "thread-current-inl.h"
 #include "thread_list.h"
-//zhangxianlong
-#include "leakleak/leakleak.h"
-//end
+
 namespace art {
 namespace gc {
 namespace collector {
@@ -104,12 +103,14 @@ MarkSweep::MarkSweep(Heap* heap, bool is_concurrent, const std::string& name_pre
       is_concurrent_(is_concurrent),
       live_stack_freeze_size_(0) {
   std::string error_msg;
-  MemMap* mem_map = MemMap::MapAnonymous(
-      "mark sweep sweep array free buffer", nullptr,
+  sweep_array_free_buffer_mem_map_ = MemMap::MapAnonymous(
+      "mark sweep sweep array free buffer",
       RoundUp(kSweepArrayChunkFreeSize * sizeof(mirror::Object*), kPageSize),
-      PROT_READ | PROT_WRITE, false, false, &error_msg);
-  CHECK(mem_map != nullptr) << "Couldn't allocate sweep array free buffer: " << error_msg;
-  sweep_array_free_buffer_mem_map_.reset(mem_map);
+      PROT_READ | PROT_WRITE,
+      /*low_4gb=*/ false,
+      &error_msg);
+  CHECK(sweep_array_free_buffer_mem_map_.IsValid())
+      << "Couldn't allocate sweep array free buffer: " << error_msg;
 }
 
 void MarkSweep::InitializePhase() {
@@ -117,21 +118,21 @@ void MarkSweep::InitializePhase() {
   mark_stack_ = heap_->GetMarkStack();
   DCHECK(mark_stack_ != nullptr);
   immune_spaces_.Reset();
-  no_reference_class_count_.StoreRelaxed(0);
-  normal_count_.StoreRelaxed(0);
-  class_count_.StoreRelaxed(0);
-  object_array_count_.StoreRelaxed(0);
-  other_count_.StoreRelaxed(0);
-  reference_count_.StoreRelaxed(0);
-  large_object_test_.StoreRelaxed(0);
-  large_object_mark_.StoreRelaxed(0);
-  overhead_time_ .StoreRelaxed(0);
-  work_chunks_created_.StoreRelaxed(0);
-  work_chunks_deleted_.StoreRelaxed(0);
-  mark_null_count_.StoreRelaxed(0);
-  mark_immune_count_.StoreRelaxed(0);
-  mark_fastpath_count_.StoreRelaxed(0);
-  mark_slowpath_count_.StoreRelaxed(0);
+  no_reference_class_count_.store(0, std::memory_order_relaxed);
+  normal_count_.store(0, std::memory_order_relaxed);
+  class_count_.store(0, std::memory_order_relaxed);
+  object_array_count_.store(0, std::memory_order_relaxed);
+  other_count_.store(0, std::memory_order_relaxed);
+  reference_count_.store(0, std::memory_order_relaxed);
+  large_object_test_.store(0, std::memory_order_relaxed);
+  large_object_mark_.store(0, std::memory_order_relaxed);
+  overhead_time_ .store(0, std::memory_order_relaxed);
+  work_chunks_created_.store(0, std::memory_order_relaxed);
+  work_chunks_deleted_.store(0, std::memory_order_relaxed);
+  mark_null_count_.store(0, std::memory_order_relaxed);
+  mark_immune_count_.store(0, std::memory_order_relaxed);
+  mark_fastpath_count_.store(0, std::memory_order_relaxed);
+  mark_slowpath_count_.store(0, std::memory_order_relaxed);
   {
     // TODO: I don't think we should need heap bitmap lock to Get the mark bitmap.
     ReaderMutexLock mu(Thread::Current(), *Locks::heap_bitmap_lock_);
@@ -144,9 +145,6 @@ void MarkSweep::InitializePhase() {
 }
 
 void MarkSweep::RunPhases() {
-  // zhangxianlong
-  leakleak::Leaktrace::getInstance().dump_str("MarkSweep");
-  // end
   Thread* self = Thread::Current();
   InitializePhase();
   Locks::mutator_lock_->AssertNotHeld(self);
@@ -195,7 +193,7 @@ void MarkSweep::PausePhase() {
     WriterMutexLock mu(self, *Locks::heap_bitmap_lock_);
     // Re-mark root set.
     ReMarkRoots();
-    // Scan dirty objects, this is only required if we are not doing concurrent GC.
+    // Scan dirty objects, this is only required if we are doing concurrent GC.
     RecursiveMarkDirtyObjects(true, accounting::CardTable::kCardDirty);
   }
   {
@@ -263,8 +261,30 @@ void MarkSweep::MarkingPhase() {
   BindBitmaps();
   FindDefaultSpaceBitmap();
   // Process dirty cards and add dirty cards to mod union tables.
-  // If the GC type is non sticky, then we just clear the cards instead of ageing them.
-  heap_->ProcessCards(GetTimings(), false, true, GetGcType() != kGcTypeSticky);
+  // If the GC type is non sticky, then we just clear the cards of the
+  // alloc space instead of aging them.
+  //
+  // Note that it is fine to clear the cards of the alloc space here,
+  // in the case of a concurrent (non-sticky) mark-sweep GC (whose
+  // marking phase _is_ performed concurrently with mutator threads
+  // running and possibly dirtying cards), as the whole alloc space
+  // will be traced in that case, starting *after* this call to
+  // Heap::ProcessCards (see calls to MarkSweep::MarkRoots and
+  // MarkSweep::MarkReachableObjects). References held by objects on
+  // cards that became dirty *after* the actual marking work started
+  // will be marked in the pause (see MarkSweep::PausePhase), in a
+  // *non-concurrent* way to prevent races with mutator threads.
+  //
+  // TODO: Do we need some sort of fence between the call to
+  // Heap::ProcessCard and the calls to MarkSweep::MarkRoot /
+  // MarkSweep::MarkReachableObjects below to make sure write
+  // operations in the card table clearing the alloc space's dirty
+  // cards (during the call to Heap::ProcessCard) are not reordered
+  // *after* marking actually starts?
+  heap_->ProcessCards(GetTimings(),
+                      /* use_rem_sets= */ false,
+                      /* process_alloc_space_cards= */ true,
+                      /* clear_alloc_space_cards= */ GetGcType() != kGcTypeSticky);
   WriterMutexLock mu(self, *Locks::heap_bitmap_lock_);
   MarkRoots(self);
   MarkReachableObjects();
@@ -425,7 +445,7 @@ class MarkSweep::MarkObjectSlowPath {
                      !large_object_space->Contains(obj)))) {
       // Lowest priority logging first:
       PrintFileToLog("/proc/self/maps", LogSeverity::FATAL_WITHOUT_ABORT);
-      MemMap::DumpMaps(LOG_STREAM(FATAL_WITHOUT_ABORT), true);
+      MemMap::DumpMaps(LOG_STREAM(FATAL_WITHOUT_ABORT), /* terse= */ true);
       // Buffer the output in the string stream since it is more important than the stack traces
       // and we want it to have log priority. The stack traces are printed from Runtime::Abort
       // which is called from LOG(FATAL) but before the abort message.
@@ -557,7 +577,7 @@ class MarkSweep::VerifyRootMarkedVisitor : public SingleRootVisitor {
  public:
   explicit VerifyRootMarkedVisitor(MarkSweep* collector) : collector_(collector) { }
 
-  void VisitRoot(mirror::Object* root, const RootInfo& info) OVERRIDE
+  void VisitRoot(mirror::Object* root, const RootInfo& info) override
       REQUIRES_SHARED(Locks::mutator_lock_, Locks::heap_bitmap_lock_) {
     CHECK(collector_->IsMarked(root) != nullptr) << info.ToString();
   }
@@ -586,7 +606,7 @@ class MarkSweep::VerifyRootVisitor : public SingleRootVisitor {
  public:
   explicit VerifyRootVisitor(std::ostream& os) : os_(os) {}
 
-  void VisitRoot(mirror::Object* root, const RootInfo& info) OVERRIDE
+  void VisitRoot(mirror::Object* root, const RootInfo& info) override
       REQUIRES_SHARED(Locks::mutator_lock_, Locks::heap_bitmap_lock_) {
     // See if the root is on any space bitmap.
     auto* heap = Runtime::Current()->GetHeap();
@@ -703,10 +723,14 @@ class MarkSweep::MarkStackTask : public Task {
    private:
     ALWAYS_INLINE void Mark(mirror::Object* ref) const REQUIRES_SHARED(Locks::mutator_lock_) {
       if (ref != nullptr && mark_sweep_->MarkObjectParallel(ref)) {
+        // zhang
+        // if(ref!=nullptr)
+        //     leakleak::getInstance()->addedge(ref);
+        // // end
         if (kUseFinger) {
           std::atomic_thread_fence(std::memory_order_seq_cst);
           if (reinterpret_cast<uintptr_t>(ref) >=
-              static_cast<uintptr_t>(mark_sweep_->atomic_finger_.LoadRelaxed())) {
+              static_cast<uintptr_t>(mark_sweep_->atomic_finger_.load(std::memory_order_relaxed))) {
             return;
           }
         }
@@ -768,12 +792,12 @@ class MarkSweep::MarkStackTask : public Task {
     mark_stack_[mark_stack_pos_++].Assign(obj);
   }
 
-  virtual void Finalize() {
+  void Finalize() override {
     delete this;
   }
 
   // Scans all of the objects
-  virtual void Run(Thread* self ATTRIBUTE_UNUSED)
+  void Run(Thread* self ATTRIBUTE_UNUSED) override
       REQUIRES(Locks::heap_bitmap_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_) {
     ScanObjectParallelVisitor visitor(this);
@@ -831,11 +855,11 @@ class MarkSweep::CardScanTask : public MarkStackTask<false> {
   const uint8_t minimum_age_;
   const bool clear_card_;
 
-  virtual void Finalize() {
+  void Finalize() override {
     delete this;
   }
 
-  virtual void Run(Thread* self) NO_THREAD_SAFETY_ANALYSIS {
+  void Run(Thread* self) override NO_THREAD_SAFETY_ANALYSIS {
     ScanObjectParallelVisitor visitor(this);
     accounting::CardTable* card_table = mark_sweep_->GetHeap()->GetCardTable();
     size_t cards_scanned = clear_card_
@@ -988,12 +1012,12 @@ class MarkSweep::RecursiveMarkTask : public MarkStackTask<false> {
   const uintptr_t begin_;
   const uintptr_t end_;
 
-  virtual void Finalize() {
+  void Finalize() override {
     delete this;
   }
 
   // Scans all of the objects
-  virtual void Run(Thread* self) NO_THREAD_SAFETY_ANALYSIS {
+  void Run(Thread* self) override NO_THREAD_SAFETY_ANALYSIS {
     ScanObjectParallelVisitor visitor(this);
     bitmap_->VisitMarkedRange(begin_, end_, visitor);
     // Finish by emptying our local mark stack.
@@ -1028,7 +1052,7 @@ void MarkSweep::RecursiveMark() {
           // This function does not handle heap end increasing, so we must use the space end.
           uintptr_t begin = reinterpret_cast<uintptr_t>(space->Begin());
           uintptr_t end = reinterpret_cast<uintptr_t>(space->End());
-          atomic_finger_.StoreRelaxed(AtomicInteger::MaxValue());
+          atomic_finger_.store(AtomicInteger::MaxValue(), std::memory_order_relaxed);
 
           // Create a few worker tasks.
           const size_t n = thread_count * 2;
@@ -1088,8 +1112,7 @@ class MarkSweep::VerifySystemWeakVisitor : public IsMarkedVisitor {
  public:
   explicit VerifySystemWeakVisitor(MarkSweep* mark_sweep) : mark_sweep_(mark_sweep) {}
 
-  virtual mirror::Object* IsMarked(mirror::Object* obj)
-      OVERRIDE
+  mirror::Object* IsMarked(mirror::Object* obj) override
       REQUIRES_SHARED(Locks::mutator_lock_, Locks::heap_bitmap_lock_) {
     mark_sweep_->VerifyIsLive(obj);
     return obj;
@@ -1123,7 +1146,7 @@ class MarkSweep::CheckpointMarkThreadRoots : public Closure, public RootVisitor 
   }
 
   void VisitRoots(mirror::Object*** roots, size_t count, const RootInfo& info ATTRIBUTE_UNUSED)
-      OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_)
+      override REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(Locks::heap_bitmap_lock_) {
     for (size_t i = 0; i < count; ++i) {
       mark_sweep_->MarkObjectNonNullParallel(*roots[i]);
@@ -1133,20 +1156,20 @@ class MarkSweep::CheckpointMarkThreadRoots : public Closure, public RootVisitor 
   void VisitRoots(mirror::CompressedReference<mirror::Object>** roots,
                   size_t count,
                   const RootInfo& info ATTRIBUTE_UNUSED)
-      OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_)
+      override REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(Locks::heap_bitmap_lock_) {
     for (size_t i = 0; i < count; ++i) {
       mark_sweep_->MarkObjectNonNullParallel(roots[i]->AsMirrorPtr());
     }
   }
 
-  virtual void Run(Thread* thread) OVERRIDE NO_THREAD_SAFETY_ANALYSIS {
+  void Run(Thread* thread) override NO_THREAD_SAFETY_ANALYSIS {
     ScopedTrace trace("Marking thread roots");
     // Note: self is not necessarily equal to thread since thread may be suspended.
     Thread* const self = Thread::Current();
     CHECK(thread == self || thread->IsSuspended() || thread->GetState() == kWaitingPerformingGc)
         << thread->GetState() << " thread " << thread << " self " << self;
-    thread->VisitRoots(this);
+    thread->VisitRoots(this, kVisitRootFlagAllRoots);
     if (revoke_ros_alloc_thread_local_buffers_at_checkpoint_) {
       ScopedTrace trace2("RevokeRosAllocThreadLocalBuffers");
       mark_sweep_->GetHeap()->RevokeRosAllocThreadLocalBuffers(thread);
@@ -1189,7 +1212,7 @@ void MarkSweep::SweepArray(accounting::ObjectStack* allocations, bool swap_bitma
   TimingLogger::ScopedTiming t(__FUNCTION__, GetTimings());
   Thread* self = Thread::Current();
   mirror::Object** chunk_free_buffer = reinterpret_cast<mirror::Object**>(
-      sweep_array_free_buffer_mem_map_->BaseBegin());
+      sweep_array_free_buffer_mem_map_.BaseBegin());
   size_t chunk_free_pos = 0;
   ObjectBytePair freed;
   ObjectBytePair freed_los;
@@ -1210,7 +1233,7 @@ void MarkSweep::SweepArray(accounting::ObjectStack* allocations, bool swap_bitma
       }
     }
   }
-  // Unlikely to sweep a significant amount of non_movable objects, so we do these after the after
+  // Unlikely to sweep a significant amount of non_movable objects, so we do these after
   // the other alloc spaces as an optimization.
   if (non_moving_space != nullptr) {
     sweep_spaces.push_back(non_moving_space);
@@ -1282,7 +1305,7 @@ void MarkSweep::SweepArray(accounting::ObjectStack* allocations, bool swap_bitma
     t2.NewTiming("ResetStack");
     allocations->Reset();
   }
-  sweep_array_free_buffer_mem_map_->MadviseDontNeedAndZero();
+  sweep_array_free_buffer_mem_map_.MadviseDontNeedAndZero();
 }
 
 void MarkSweep::Sweep(bool swap_bitmaps) {
@@ -1291,7 +1314,7 @@ void MarkSweep::Sweep(bool swap_bitmaps) {
   CHECK_GE(live_stack_freeze_size_, GetHeap()->GetLiveStack()->Size());
   {
     TimingLogger::ScopedTiming t2("MarkAllocStackAsLive", GetTimings());
-    // Mark everything allocated since the last as GC live so that we can sweep concurrently,
+    // Mark everything allocated since the last GC as live so that we can sweep concurrently,
     // knowing that new allocations won't be marked as live.
     accounting::ObjectStack* live_stack = heap_->GetLiveStack();
     heap_->MarkAllocStackAsLive(live_stack);
@@ -1387,8 +1410,8 @@ void MarkSweep::ProcessMarkStackParallel(size_t thread_count) {
   thread_pool->Wait(self, true, true);
   thread_pool->StopWorkers(self);
   mark_stack_->Reset();
-  CHECK_EQ(work_chunks_created_.LoadSequentiallyConsistent(),
-           work_chunks_deleted_.LoadSequentiallyConsistent())
+  CHECK_EQ(work_chunks_created_.load(std::memory_order_seq_cst),
+           work_chunks_deleted_.load(std::memory_order_seq_cst))
       << " some of the work chunks were leaked";
 }
 
@@ -1444,28 +1467,32 @@ void MarkSweep::FinishPhase() {
   if (kCountScannedTypes) {
     VLOG(gc)
         << "MarkSweep scanned"
-        << " no reference objects=" << no_reference_class_count_.LoadRelaxed()
-        << " normal objects=" << normal_count_.LoadRelaxed()
-        << " classes=" << class_count_.LoadRelaxed()
-        << " object arrays=" << object_array_count_.LoadRelaxed()
-        << " references=" << reference_count_.LoadRelaxed()
-        << " other=" << other_count_.LoadRelaxed();
+        << " no reference objects=" << no_reference_class_count_.load(std::memory_order_relaxed)
+        << " normal objects=" << normal_count_.load(std::memory_order_relaxed)
+        << " classes=" << class_count_.load(std::memory_order_relaxed)
+        << " object arrays=" << object_array_count_.load(std::memory_order_relaxed)
+        << " references=" << reference_count_.load(std::memory_order_relaxed)
+        << " other=" << other_count_.load(std::memory_order_relaxed);
   }
   if (kCountTasks) {
-    VLOG(gc) << "Total number of work chunks allocated: " << work_chunks_created_.LoadRelaxed();
+    VLOG(gc)
+        << "Total number of work chunks allocated: "
+        << work_chunks_created_.load(std::memory_order_relaxed);
   }
   if (kMeasureOverhead) {
-    VLOG(gc) << "Overhead time " << PrettyDuration(overhead_time_.LoadRelaxed());
+    VLOG(gc) << "Overhead time " << PrettyDuration(overhead_time_.load(std::memory_order_relaxed));
   }
   if (kProfileLargeObjects) {
-    VLOG(gc) << "Large objects tested " << large_object_test_.LoadRelaxed()
-        << " marked " << large_object_mark_.LoadRelaxed();
+    VLOG(gc)
+        << "Large objects tested " << large_object_test_.load(std::memory_order_relaxed)
+        << " marked " << large_object_mark_.load(std::memory_order_relaxed);
   }
   if (kCountMarkedObjects) {
-    VLOG(gc) << "Marked: null=" << mark_null_count_.LoadRelaxed()
-        << " immune=" <<  mark_immune_count_.LoadRelaxed()
-        << " fastpath=" << mark_fastpath_count_.LoadRelaxed()
-        << " slowpath=" << mark_slowpath_count_.LoadRelaxed();
+    VLOG(gc)
+        << "Marked: null=" << mark_null_count_.load(std::memory_order_relaxed)
+        << " immune=" <<  mark_immune_count_.load(std::memory_order_relaxed)
+        << " fastpath=" << mark_fastpath_count_.load(std::memory_order_relaxed)
+        << " slowpath=" << mark_slowpath_count_.load(std::memory_order_relaxed);
   }
   CHECK(mark_stack_->IsEmpty());  // Ensure that the mark stack is empty.
   mark_stack_->Reset();

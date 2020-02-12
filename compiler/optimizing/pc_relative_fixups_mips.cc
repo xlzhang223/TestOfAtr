@@ -52,19 +52,31 @@ class PCRelativeHandlerVisitor : public HGraphVisitor {
     }
     // Insert the base at the start of the entry block, move it to a better
     // position later in MoveBaseIfNeeded().
-    base_ = new (GetGraph()->GetArena()) HMipsComputeBaseMethodAddress();
+    base_ = new (GetGraph()->GetAllocator()) HMipsComputeBaseMethodAddress();
     HBasicBlock* entry_block = GetGraph()->GetEntryBlock();
     entry_block->InsertInstructionBefore(base_, entry_block->GetFirstInstruction());
     DCHECK(base_ != nullptr);
   }
 
-  void VisitLoadClass(HLoadClass* load_class) OVERRIDE {
+  void VisitInvokeStaticOrDirect(HInvokeStaticOrDirect* invoke) override {
+    // If this is an invoke with PC-relative load kind,
+    // we need to add the base as the special input.
+    if (invoke->HasPcRelativeMethodLoadKind() &&
+        !IsCallFreeIntrinsic<IntrinsicLocationsBuilderMIPS>(invoke, codegen_)) {
+      InitializePCRelativeBasePointer();
+      // Add the special argument base to the method.
+      DCHECK(!invoke->HasCurrentMethodInput());
+      invoke->AddSpecialInput(base_);
+    }
+  }
+
+  void VisitLoadClass(HLoadClass* load_class) override {
     HLoadClass::LoadKind load_kind = load_class->GetLoadKind();
     switch (load_kind) {
-      case HLoadClass::LoadKind::kBootImageLinkTimeAddress:
       case HLoadClass::LoadKind::kBootImageLinkTimePcRelative:
-      case HLoadClass::LoadKind::kBootImageAddress:
+      case HLoadClass::LoadKind::kBootImageRelRo:
       case HLoadClass::LoadKind::kBssEntry:
+      case HLoadClass::LoadKind::kJitBootImageAddress:
         // Add a base register for PC-relative literals on R2.
         InitializePCRelativeBasePointer();
         load_class->AddSpecialInput(base_);
@@ -74,13 +86,13 @@ class PCRelativeHandlerVisitor : public HGraphVisitor {
     }
   }
 
-  void VisitLoadString(HLoadString* load_string) OVERRIDE {
+  void VisitLoadString(HLoadString* load_string) override {
     HLoadString::LoadKind load_kind = load_string->GetLoadKind();
     switch (load_kind) {
-      case HLoadString::LoadKind::kBootImageLinkTimeAddress:
-      case HLoadString::LoadKind::kBootImageAddress:
       case HLoadString::LoadKind::kBootImageLinkTimePcRelative:
+      case HLoadString::LoadKind::kBootImageRelRo:
       case HLoadString::LoadKind::kBssEntry:
+      case HLoadString::LoadKind::kJitBootImageAddress:
         // Add a base register for PC-relative literals on R2.
         InitializePCRelativeBasePointer();
         load_string->AddSpecialInput(base_);
@@ -90,7 +102,7 @@ class PCRelativeHandlerVisitor : public HGraphVisitor {
     }
   }
 
-  void VisitPackedSwitch(HPackedSwitch* switch_insn) OVERRIDE {
+  void VisitPackedSwitch(HPackedSwitch* switch_insn) override {
     if (switch_insn->GetNumEntries() <=
         InstructionCodeGeneratorMIPS::kPackedSwitchJumpTableThreshold) {
       return;
@@ -100,7 +112,7 @@ class PCRelativeHandlerVisitor : public HGraphVisitor {
     InitializePCRelativeBasePointer();
     HGraph* graph = GetGraph();
     HBasicBlock* block = switch_insn->GetBlock();
-    HMipsPackedSwitch* mips_switch = new (graph->GetArena()) HMipsPackedSwitch(
+    HMipsPackedSwitch* mips_switch = new (graph->GetAllocator()) HMipsPackedSwitch(
         switch_insn->GetStartValue(),
         switch_insn->GetNumEntries(),
         switch_insn->InputAt(0),
@@ -116,20 +128,21 @@ class PCRelativeHandlerVisitor : public HGraphVisitor {
   HMipsComputeBaseMethodAddress* base_;
 };
 
-void PcRelativeFixups::Run() {
+bool PcRelativeFixups::Run() {
   CodeGeneratorMIPS* mips_codegen = down_cast<CodeGeneratorMIPS*>(codegen_);
   if (mips_codegen->GetInstructionSetFeatures().IsR6()) {
     // Do nothing for R6 because it has PC-relative addressing.
-    return;
+    return false;
   }
   if (graph_->HasIrreducibleLoops()) {
     // Do not run this optimization, as irreducible loops do not work with an instruction
     // that can be live-in at the irreducible loop header.
-    return;
+    return false;
   }
   PCRelativeHandlerVisitor visitor(graph_, codegen_);
   visitor.VisitInsertionOrder();
   visitor.MoveBaseIfNeeded();
+  return true;
 }
 
 }  // namespace mips

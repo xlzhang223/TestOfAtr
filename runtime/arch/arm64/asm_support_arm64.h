@@ -23,11 +23,12 @@
 #define FRAME_SIZE_SAVE_REFS_ONLY 96
 #define FRAME_SIZE_SAVE_REFS_AND_ARGS 224
 #define FRAME_SIZE_SAVE_EVERYTHING 512
+#define FRAME_SIZE_SAVE_EVERYTHING_FOR_CLINIT FRAME_SIZE_SAVE_EVERYTHING
+#define FRAME_SIZE_SAVE_EVERYTHING_FOR_SUSPEND_CHECK FRAME_SIZE_SAVE_EVERYTHING
 
 // Offset of field Thread::tlsPtr_.alloc_site
-#define THREAD_ALLOC_SITE_OFFSET 2432
+#define THREAD_ALLOC_SITE_OFFSET 2576
 // end
-
 // The offset from art_quick_read_barrier_mark_introspection to the array switch cases,
 // i.e. art_quick_read_barrier_mark_introspection_arrays.
 #define BAKER_MARK_INTROSPECTION_ARRAY_SWITCH_OFFSET 0x100

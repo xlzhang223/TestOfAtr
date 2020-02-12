@@ -15,31 +15,42 @@
  */
 
 #include <memory>
+#include <type_traits>
 
 #include "base/arena_allocator.h"
+#include "base/callee_save_type.h"
 #include "base/enums.h"
+#include "base/leb128.h"
+#include "base/malloc_arena_pool.h"
 #include "class_linker.h"
 #include "common_runtime_test.h"
-#include "dex_file.h"
-#include "dex_file-inl.h"
+#include "dex/code_item_accessors-inl.h"
+#include "dex/dex_file-inl.h"
+#include "dex/dex_file.h"
+#include "dex/dex_file_exception_helpers.h"
 #include "gtest/gtest.h"
-#include "leb128.h"
+#include "handle_scope-inl.h"
 #include "mirror/class-inl.h"
-#include "mirror/object_array-inl.h"
 #include "mirror/object-inl.h"
-#include "mirror/stack_trace_element.h"
+#include "mirror/object_array-inl.h"
+#include "mirror/stack_trace_element-inl.h"
 #include "oat_quick_method_header.h"
+#include "obj_ptr-inl.h"
 #include "optimizing/stack_map_stream.h"
 #include "runtime-inl.h"
 #include "scoped_thread_state_change-inl.h"
-#include "handle_scope-inl.h"
 #include "thread.h"
 
 namespace art {
 
 class ExceptionTest : public CommonRuntimeTest {
  protected:
-  virtual void SetUp() {
+  // Since various dexers may differ in bytecode layout, we play
+  // it safe and simply set the dex pc to the start of the method,
+  // which always points to the first source statement.
+  static constexpr const uint32_t kDexPc = 0;
+
+  void SetUp() override {
     CommonRuntimeTest::SetUp();
 
     ScopedObjectAccess soa(Thread::Current());
@@ -59,54 +70,47 @@ class ExceptionTest : public CommonRuntimeTest {
       fake_code_.push_back(0x70 | i);
     }
 
-    ArenaPool pool;
-    ArenaAllocator allocator(&pool);
+    const uint32_t native_pc_offset = 4u;
+    CHECK_ALIGNED_PARAM(native_pc_offset, GetInstructionSetInstructionAlignment(kRuntimeISA));
+
+    MallocArenaPool pool;
+    ArenaStack arena_stack(&pool);
+    ScopedArenaAllocator allocator(&arena_stack);
     StackMapStream stack_maps(&allocator, kRuntimeISA);
-    stack_maps.BeginStackMapEntry(/* dex_pc */ 3u,
-                                  /* native_pc_offset */ 3u,
-                                  /* register_mask */ 0u,
-                                  /* sp_mask */ nullptr,
-                                  /* num_dex_registers */ 0u,
-                                  /* inlining_depth */ 0u);
+    stack_maps.BeginMethod(4 * sizeof(void*), 0u, 0u, 0u);
+    stack_maps.BeginStackMapEntry(kDexPc, native_pc_offset);
     stack_maps.EndStackMapEntry();
-    size_t stack_maps_size = stack_maps.PrepareForFillIn();
-    size_t stack_maps_offset = stack_maps_size +  sizeof(OatQuickMethodHeader);
+    stack_maps.EndMethod();
+    ScopedArenaVector<uint8_t> stack_map = stack_maps.Encode();
 
-    fake_header_code_and_maps_.resize(stack_maps_offset + fake_code_.size());
-    MemoryRegion stack_maps_region(&fake_header_code_and_maps_[0], stack_maps_size);
-    stack_maps.FillInCodeInfo(stack_maps_region);
-    OatQuickMethodHeader method_header(stack_maps_offset, 0u, 4 * sizeof(void*), 0u, 0u, code_size);
-    memcpy(&fake_header_code_and_maps_[stack_maps_size], &method_header, sizeof(method_header));
-    std::copy(fake_code_.begin(),
-              fake_code_.end(),
-              fake_header_code_and_maps_.begin() + stack_maps_offset);
+    const size_t stack_maps_size = stack_map.size();
+    const size_t header_size = sizeof(OatQuickMethodHeader);
+    const size_t code_alignment = GetInstructionSetAlignment(kRuntimeISA);
 
-    // Align the code.
-    const size_t alignment = GetInstructionSetAlignment(kRuntimeISA);
-    fake_header_code_and_maps_.reserve(fake_header_code_and_maps_.size() + alignment);
-    const void* unaligned_code_ptr =
-        fake_header_code_and_maps_.data() + (fake_header_code_and_maps_.size() - code_size);
-    size_t offset = dchecked_integral_cast<size_t>(reinterpret_cast<uintptr_t>(unaligned_code_ptr));
-    size_t padding = RoundUp(offset, alignment) - offset;
-    // Make sure no resizing takes place.
-    CHECK_GE(fake_header_code_and_maps_.capacity(), fake_header_code_and_maps_.size() + padding);
-    fake_header_code_and_maps_.insert(fake_header_code_and_maps_.begin(), padding, 0);
-    const void* code_ptr = reinterpret_cast<const uint8_t*>(unaligned_code_ptr) + padding;
-    CHECK_EQ(code_ptr,
-             static_cast<const void*>(fake_header_code_and_maps_.data() +
-                                          (fake_header_code_and_maps_.size() - code_size)));
+    fake_header_code_and_maps_.resize(stack_maps_size + header_size + code_size + code_alignment);
+    // NB: The start of the vector might not have been allocated the desired alignment.
+    uint8_t* code_ptr =
+      AlignUp(&fake_header_code_and_maps_[stack_maps_size + header_size], code_alignment);
 
-    if (kRuntimeISA == kArm) {
+    memcpy(&fake_header_code_and_maps_[0], stack_map.data(), stack_maps_size);
+    OatQuickMethodHeader method_header(code_ptr - fake_header_code_and_maps_.data(), code_size);
+    static_assert(std::is_trivially_copyable<OatQuickMethodHeader>::value, "Cannot use memcpy");
+    memcpy(code_ptr - header_size, &method_header, header_size);
+    memcpy(code_ptr, fake_code_.data(), fake_code_.size());
+
+    if (kRuntimeISA == InstructionSet::kArm) {
       // Check that the Thumb2 adjustment will be a NOP, see EntryPointToCodePointer().
-      CHECK_ALIGNED(stack_maps_offset, 2);
+      CHECK_ALIGNED(code_ptr, 2);
     }
 
-    method_f_ = my_klass_->FindVirtualMethod("f", "()I", kRuntimePointerSize);
+    method_f_ = my_klass_->FindClassMethod("f", "()I", kRuntimePointerSize);
     ASSERT_TRUE(method_f_ != nullptr);
+    ASSERT_FALSE(method_f_->IsDirect());
     method_f_->SetEntryPointFromQuickCompiledCode(code_ptr);
 
-    method_g_ = my_klass_->FindVirtualMethod("g", "(I)V", kRuntimePointerSize);
+    method_g_ = my_klass_->FindClassMethod("g", "(I)V", kRuntimePointerSize);
     ASSERT_TRUE(method_g_ != nullptr);
+    ASSERT_FALSE(method_g_->IsDirect());
     method_g_->SetEntryPointFromQuickCompiledCode(code_ptr);
   }
 
@@ -119,24 +123,23 @@ class ExceptionTest : public CommonRuntimeTest {
   ArtMethod* method_g_;
 
  private:
-  mirror::Class* my_klass_;
+  ObjPtr<mirror::Class> my_klass_;
 };
 
 TEST_F(ExceptionTest, FindCatchHandler) {
   ScopedObjectAccess soa(Thread::Current());
-  const DexFile::CodeItem* code_item = dex_->GetCodeItem(method_f_->GetCodeItemOffset());
+  CodeItemDataAccessor accessor(*dex_, dex_->GetCodeItem(method_f_->GetCodeItemOffset()));
 
-  ASSERT_TRUE(code_item != nullptr);
+  ASSERT_TRUE(accessor.HasCodeItem());
 
-  ASSERT_EQ(2u, code_item->tries_size_);
-  ASSERT_NE(0u, code_item->insns_size_in_code_units_);
+  ASSERT_EQ(2u, accessor.TriesSize());
+  ASSERT_NE(0u, accessor.InsnsSizeInCodeUnits());
 
-  const DexFile::TryItem *t0, *t1;
-  t0 = dex_->GetTryItems(*code_item, 0);
-  t1 = dex_->GetTryItems(*code_item, 1);
-  EXPECT_LE(t0->start_addr_, t1->start_addr_);
+  const dex::TryItem& t0 = accessor.TryItems().begin()[0];
+  const dex::TryItem& t1 = accessor.TryItems().begin()[1];
+  EXPECT_LE(t0.start_addr_, t1.start_addr_);
   {
-    CatchHandlerIterator iter(*code_item, 4 /* Dex PC in the first try block */);
+    CatchHandlerIterator iter(accessor, 4 /* Dex PC in the first try block */);
     EXPECT_STREQ("Ljava/io/IOException;", dex_->StringByTypeIdx(iter.GetHandlerTypeIndex()));
     ASSERT_TRUE(iter.HasNext());
     iter.Next();
@@ -146,14 +149,14 @@ TEST_F(ExceptionTest, FindCatchHandler) {
     EXPECT_FALSE(iter.HasNext());
   }
   {
-    CatchHandlerIterator iter(*code_item, 8 /* Dex PC in the second try block */);
+    CatchHandlerIterator iter(accessor, 8 /* Dex PC in the second try block */);
     EXPECT_STREQ("Ljava/io/IOException;", dex_->StringByTypeIdx(iter.GetHandlerTypeIndex()));
     ASSERT_TRUE(iter.HasNext());
     iter.Next();
     EXPECT_FALSE(iter.HasNext());
   }
   {
-    CatchHandlerIterator iter(*code_item, 11 /* Dex PC not in any try block */);
+    CatchHandlerIterator iter(accessor, 11 /* Dex PC not in any try block */);
     EXPECT_FALSE(iter.HasNext());
   }
 }
@@ -170,16 +173,11 @@ TEST_F(ExceptionTest, StackTraceElement) {
   Runtime* r = Runtime::Current();
   r->SetInstructionSet(kRuntimeISA);
   ArtMethod* save_method = r->CreateCalleeSaveMethod();
-  r->SetCalleeSaveMethod(save_method, Runtime::kSaveAllCalleeSaves);
+  r->SetCalleeSaveMethod(save_method, CalleeSaveType::kSaveAllCalleeSaves);
   QuickMethodFrameInfo frame_info = r->GetRuntimeMethodFrameInfo(save_method);
 
   ASSERT_EQ(kStackAlignment, 16U);
   // ASSERT_EQ(sizeof(uintptr_t), sizeof(uint32_t));
-
-
-  // Create three fake stack frames with mapping data created in SetUp. We map offset 3 in the
-  // code to dex pc 3.
-  const uint32_t dex_pc = 3;
 
   // Create the stack frame for the callee save method, expected by the runtime.
   fake_stack.push_back(reinterpret_cast<uintptr_t>(save_method));
@@ -189,14 +187,14 @@ TEST_F(ExceptionTest, StackTraceElement) {
   }
 
   fake_stack.push_back(method_g_->GetOatQuickMethodHeader(0)->ToNativeQuickPc(
-      method_g_, dex_pc, /* is_catch_handler */ false));  // return pc
+      method_g_, kDexPc, /* is_for_catch_handler= */ false));  // return pc
 
   // Create/push fake 16byte stack frame for method g
   fake_stack.push_back(reinterpret_cast<uintptr_t>(method_g_));
   fake_stack.push_back(0);
   fake_stack.push_back(0);
   fake_stack.push_back(method_g_->GetOatQuickMethodHeader(0)->ToNativeQuickPc(
-      method_g_, dex_pc, /* is_catch_handler */ false));  // return pc
+      method_g_, kDexPc, /* is_for_catch_handler= */ false));  // return pc
 
   // Create/push fake 16byte stack frame for method f
   fake_stack.push_back(reinterpret_cast<uintptr_t>(method_f_));
@@ -212,7 +210,7 @@ TEST_F(ExceptionTest, StackTraceElement) {
   fake_stack.push_back(0);
   fake_stack.push_back(0);
 
-  // Set up thread to appear as if we called out of method_g_ at pc dex 3
+  // Set up thread to appear as if we called out of method_g_ at given pc dex.
   thread->SetTopOfStack(reinterpret_cast<ArtMethod**>(&fake_stack[0]));
 
   jobject internal = thread->CreateInternalStackTrace<false>(soa);
@@ -228,7 +226,7 @@ TEST_F(ExceptionTest, StackTraceElement) {
   EXPECT_STREQ("ExceptionHandle.java",
                trace_array->Get(0)->GetFileName()->ToModifiedUtf8().c_str());
   EXPECT_STREQ("g", trace_array->Get(0)->GetMethodName()->ToModifiedUtf8().c_str());
-  EXPECT_EQ(37, trace_array->Get(0)->GetLineNumber());
+  EXPECT_EQ(36, trace_array->Get(0)->GetLineNumber());
 
   ASSERT_TRUE(trace_array->Get(1) != nullptr);
   EXPECT_STREQ("ExceptionHandle",

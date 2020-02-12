@@ -18,10 +18,11 @@
 #define ART_RUNTIME_JIT_PROFILE_SAVER_H_
 
 #include "base/mutex.h"
+#include "base/safe_map.h"
+#include "dex/method_reference.h"
 #include "jit_code_cache.h"
-#include "profile_compilation_info.h"
+#include "profile/profile_compilation_info.h"
 #include "profile_saver_options.h"
-#include "safe_map.h"
 
 namespace art {
 
@@ -55,10 +56,11 @@ class ProfileSaver {
   // For testing or manual purposes (SIGUSR1).
   static void ForceProcessProfiles();
 
-  // Just for testing purpose.
-  static bool HasSeenMethod(const std::string& profile,
-                            const DexFile* dex_file,
-                            uint16_t method_idx);
+  // Just for testing purposes.
+  static bool HasSeenMethod(const std::string& profile, bool hot, MethodReference ref);
+
+  // Notify that startup has completed.
+  static void NotifyStartupCompleted();
 
  private:
   ProfileSaver(const ProfileSaverOptions& options,
@@ -97,7 +99,7 @@ class ProfileSaver {
 
   // Fetches the current resolved classes and methods from the ClassLinker and stores them in the
   // profile_cache_ for later save.
-  void FetchAndCacheResolvedClassesAndMethods();
+  void FetchAndCacheResolvedClassesAndMethods(bool startup);
 
   void DumpInfo(std::ostream& os);
 

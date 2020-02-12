@@ -20,15 +20,17 @@
 #include <dirent.h>
 #include <dlfcn.h>
 
-#include "android-base/stringprintf.h"
+#include <android-base/logging.h>
+#include <android-base/stringprintf.h>
 
-#include "base/logging.h"
+#include "base/file_utils.h"
+#include "base/logging.h"  // For VLOG.
 #include "base/macros.h"
+#include "base/os.h"
 #include "base/unix_file/fd_file.h"
-#include "globals.h"
-#include "os.h"
+#include "base/utils.h"
 #include "runtime.h"
-#include "utils.h"
+#include "runtime_globals.h"
 
 namespace art {
 namespace gc {
@@ -88,7 +90,7 @@ static void DeleteDirectoryContents(const std::string& dir, bool recurse) {
 // Adapted from prune_dex_cache(const char* subdir) in frameworks/native/cmds/installd/commands.c
 // Note this should only be used during first boot.
 static void PruneDalvikCache(InstructionSet isa) {
-  CHECK_NE(isa, kNone);
+  CHECK_NE(isa, InstructionSet::kNone);
   // Prune the base /data/dalvik-cache.
   // Note: GetDalvikCache may return the empty string if the directory doesn't
   // exist. It is safe to pass "" to DeleteDirectoryContents, so this is okay.

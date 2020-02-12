@@ -20,18 +20,17 @@
 #include <memory>
 #include <string>
 
-#include "atomic.h"
+#include "base/atomic.h"
+#include "base/locks.h"
 #include "base/macros.h"
-#include "base/mutex.h"
+#include "base/mem_map.h"
 #include "gc/accounting/space_bitmap.h"
-#include "gc/collector/garbage_collector.h"
-#include "globals.h"
-#include "image.h"
-#include "mem_map.h"
+#include "gc/collector/object_byte_pair.h"
+#include "runtime_globals.h"
 
 namespace art {
 namespace mirror {
-  class Object;
+class Object;
 }  // namespace mirror
 
 namespace gc {
@@ -205,7 +204,7 @@ class AllocSpace {
   // Alloc can be called from multiple threads at the same time and must be thread-safe.
   //
   // bytes_tl_bulk_allocated - bytes allocated in bulk ahead of time for a thread local allocation,
-  // if applicable. It can be
+  // if applicable. It is
   // 1) equal to bytes_allocated if it's not a thread local allocation,
   // 2) greater than bytes_allocated if it's a thread local
   //    allocation that required a new buffer, or
@@ -229,7 +228,7 @@ class AllocSpace {
   // Returns how many bytes were freed.
   virtual size_t Free(Thread* self, mirror::Object* ptr) = 0;
 
-  // Returns how many bytes were freed.
+  // Free (deallocate) all objects in a list, and return the number of bytes freed.
   virtual size_t FreeList(Thread* self, size_t num_ptrs, mirror::Object** ptrs) = 0;
 
   // Revoke any sort of thread-local buffers that are used to speed up allocations for the given
@@ -273,7 +272,7 @@ class ContinuousSpace : public Space {
 
   // Current address at which the space ends, which may vary as the space is filled.
   uint8_t* End() const {
-    return end_.LoadRelaxed();
+    return end_.load(std::memory_order_relaxed);
   }
 
   // The end of the address range covered by the space.
@@ -284,7 +283,7 @@ class ContinuousSpace : public Space {
   // Change the end of the space. Be careful with use since changing the end of a space to an
   // invalid value may break the GC.
   void SetEnd(uint8_t* end) {
-    end_.StoreRelaxed(end);
+    end_.store(end, std::memory_order_relaxed);
   }
 
   void SetLimit(uint8_t* limit) {
@@ -353,7 +352,7 @@ class DiscontinuousSpace : public Space {
     return mark_bitmap_.get();
   }
 
-  virtual bool IsDiscontinuousSpace() const OVERRIDE {
+  bool IsDiscontinuousSpace() const override {
     return true;
   }
 
@@ -378,26 +377,30 @@ class MemMapSpace : public ContinuousSpace {
   }
 
   MemMap* GetMemMap() {
-    return mem_map_.get();
+    return &mem_map_;
   }
 
   const MemMap* GetMemMap() const {
-    return mem_map_.get();
+    return &mem_map_;
   }
 
-  MemMap* ReleaseMemMap() {
-    return mem_map_.release();
+  MemMap ReleaseMemMap() {
+    return std::move(mem_map_);
   }
 
  protected:
-  MemMapSpace(const std::string& name, MemMap* mem_map, uint8_t* begin, uint8_t* end, uint8_t* limit,
+  MemMapSpace(const std::string& name,
+              MemMap&& mem_map,
+              uint8_t* begin,
+              uint8_t* end,
+              uint8_t* limit,
               GcRetentionPolicy gc_retention_policy)
       : ContinuousSpace(name, gc_retention_policy, begin, end, limit),
-        mem_map_(mem_map) {
+        mem_map_(std::move(mem_map)) {
   }
 
   // Underlying storage of the space
-  std::unique_ptr<MemMap> mem_map_;
+  MemMap mem_map_;
 
  private:
   DISALLOW_IMPLICIT_CONSTRUCTORS(MemMapSpace);
@@ -406,22 +409,25 @@ class MemMapSpace : public ContinuousSpace {
 // Used by the heap compaction interface to enable copying from one type of alloc space to another.
 class ContinuousMemMapAllocSpace : public MemMapSpace, public AllocSpace {
  public:
-  bool IsAllocSpace() const OVERRIDE {
+  bool IsAllocSpace() const override {
     return true;
   }
-  AllocSpace* AsAllocSpace() OVERRIDE {
+  AllocSpace* AsAllocSpace() override {
     return this;
   }
 
-  bool IsContinuousMemMapAllocSpace() const OVERRIDE {
+  bool IsContinuousMemMapAllocSpace() const override {
     return true;
   }
-  ContinuousMemMapAllocSpace* AsContinuousMemMapAllocSpace() {
+  ContinuousMemMapAllocSpace* AsContinuousMemMapAllocSpace() override {
     return this;
   }
 
   bool HasBoundBitmaps() const REQUIRES(Locks::heap_bitmap_lock_);
+  // Make the mark bitmap an alias of the live bitmap. Save the current mark bitmap into
+  // `temp_bitmap_`, so that we can restore it later in ContinuousMemMapAllocSpace::UnBindBitmaps.
   void BindLiveToMarkBitmap() REQUIRES(Locks::heap_bitmap_lock_);
+  // Unalias the mark bitmap from the live bitmap and restore the old mark bitmap.
   void UnBindBitmaps() REQUIRES(Locks::heap_bitmap_lock_);
   // Swap the live and mark bitmaps of this space. This is used by the GC for concurrent sweeping.
   void SwapBitmaps();
@@ -429,12 +435,16 @@ class ContinuousMemMapAllocSpace : public MemMapSpace, public AllocSpace {
   // Clear the space back to an empty space.
   virtual void Clear() = 0;
 
-  accounting::ContinuousSpaceBitmap* GetLiveBitmap() const OVERRIDE {
+  accounting::ContinuousSpaceBitmap* GetLiveBitmap() const override {
     return live_bitmap_.get();
   }
 
-  accounting::ContinuousSpaceBitmap* GetMarkBitmap() const OVERRIDE {
+  accounting::ContinuousSpaceBitmap* GetMarkBitmap() const override {
     return mark_bitmap_.get();
+  }
+
+  accounting::ContinuousSpaceBitmap* GetTempBitmap() const {
+    return temp_bitmap_.get();
   }
 
   collector::ObjectBytePair Sweep(bool swap_bitmaps);
@@ -445,9 +455,13 @@ class ContinuousMemMapAllocSpace : public MemMapSpace, public AllocSpace {
   std::unique_ptr<accounting::ContinuousSpaceBitmap> mark_bitmap_;
   std::unique_ptr<accounting::ContinuousSpaceBitmap> temp_bitmap_;
 
-  ContinuousMemMapAllocSpace(const std::string& name, MemMap* mem_map, uint8_t* begin,
-                             uint8_t* end, uint8_t* limit, GcRetentionPolicy gc_retention_policy)
-      : MemMapSpace(name, mem_map, begin, end, limit, gc_retention_policy) {
+  ContinuousMemMapAllocSpace(const std::string& name,
+                             MemMap&& mem_map,
+                             uint8_t* begin,
+                             uint8_t* end,
+                             uint8_t* limit,
+                             GcRetentionPolicy gc_retention_policy)
+      : MemMapSpace(name, std::move(mem_map), begin, end, limit, gc_retention_policy) {
   }
 
  private:

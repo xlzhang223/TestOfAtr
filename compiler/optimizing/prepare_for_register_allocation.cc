@@ -16,7 +16,10 @@
 
 #include "prepare_for_register_allocation.h"
 
-#include "jni_internal.h"
+#include "dex/dex_file_types.h"
+#include "driver/compiler_options.h"
+#include "jni/jni_internal.h"
+#include "optimizing_compiler_stats.h"
 #include "well_known_classes.h"
 
 namespace art {
@@ -25,15 +28,42 @@ void PrepareForRegisterAllocation::Run() {
   // Order does not matter.
   for (HBasicBlock* block : GetGraph()->GetReversePostOrder()) {
     // No need to visit the phis.
-    for (HInstructionIterator inst_it(block->GetInstructions()); !inst_it.Done();
+    for (HInstructionIteratorHandleChanges inst_it(block->GetInstructions()); !inst_it.Done();
          inst_it.Advance()) {
       inst_it.Current()->Accept(this);
     }
   }
 }
 
+void PrepareForRegisterAllocation::VisitCheckCast(HCheckCast* check_cast) {
+  // Record only those bitstring type checks that make it to the codegen stage.
+  if (check_cast->GetTypeCheckKind() == TypeCheckKind::kBitstringCheck) {
+    MaybeRecordStat(stats_, MethodCompilationStat::kBitstringTypeCheck);
+  }
+}
+
+void PrepareForRegisterAllocation::VisitInstanceOf(HInstanceOf* instance_of) {
+  // Record only those bitstring type checks that make it to the codegen stage.
+  if (instance_of->GetTypeCheckKind() == TypeCheckKind::kBitstringCheck) {
+    MaybeRecordStat(stats_, MethodCompilationStat::kBitstringTypeCheck);
+  }
+}
+
 void PrepareForRegisterAllocation::VisitNullCheck(HNullCheck* check) {
   check->ReplaceWith(check->InputAt(0));
+  if (compiler_options_.GetImplicitNullChecks()) {
+    HInstruction* next = check->GetNext();
+
+    // The `PrepareForRegisterAllocation` pass removes `HBoundType` from the graph,
+    // so do it ourselves now to not prevent optimizations.
+    while (next->IsBoundType()) {
+      next = next->GetNext();
+      VisitBoundType(next->GetPrevious()->AsBoundType());
+    }
+    if (next->CanDoImplicitNullCheckOn(check->InputAt(0))) {
+      check->MarkEmittedAtUseSite();
+    }
+  }
 }
 
 void PrepareForRegisterAllocation::VisitDivZeroCheck(HDivZeroCheck* check) {
@@ -51,16 +81,18 @@ void PrepareForRegisterAllocation::VisitDeoptimize(HDeoptimize* deoptimize) {
 void PrepareForRegisterAllocation::VisitBoundsCheck(HBoundsCheck* check) {
   check->ReplaceWith(check->InputAt(0));
   if (check->IsStringCharAt()) {
-    // Add a fake environment for String.charAt() inline info as we want
-    // the exception to appear as being thrown from there.
+    // Add a fake environment for String.charAt() inline info as we want the exception
+    // to appear as being thrown from there. Skip if we're compiling String.charAt() itself.
     ArtMethod* char_at_method = jni::DecodeArtMethod(WellKnownClasses::java_lang_String_charAt);
-    ArenaAllocator* arena = GetGraph()->GetArena();
-    HEnvironment* environment = new (arena) HEnvironment(arena,
-                                                         /* number_of_vregs */ 0u,
-                                                         char_at_method,
-                                                         /* dex_pc */ DexFile::kDexNoIndex,
-                                                         check);
-    check->InsertRawEnvironment(environment);
+    if (GetGraph()->GetArtMethod() != char_at_method) {
+      ArenaAllocator* allocator = GetGraph()->GetAllocator();
+      HEnvironment* environment = new (allocator) HEnvironment(allocator,
+                                                               /* number_of_vregs= */ 0u,
+                                                               char_at_method,
+                                                               /* dex_pc= */ dex::kDexNoIndex,
+                                                               check);
+      check->InsertRawEnvironment(environment);
+    }
   }
 }
 
@@ -75,7 +107,7 @@ void PrepareForRegisterAllocation::VisitArraySet(HArraySet* instruction) {
   // BoundType (as value input of this ArraySet) with a NullConstant.
   // If so, this ArraySet no longer needs a type check.
   if (value->IsNullConstant()) {
-    DCHECK_EQ(value->GetType(), Primitive::kPrimNot);
+    DCHECK_EQ(value->GetType(), DataType::Type::kReference);
     if (instruction->NeedsTypeCheck()) {
       instruction->ClearNeedsTypeCheck();
     }
@@ -132,7 +164,9 @@ void PrepareForRegisterAllocation::VisitClinitCheck(HClinitCheck* check) {
     if (can_merge_with_load_class && !load_class->HasUses()) {
       load_class->GetBlock()->RemoveInstruction(load_class);
     }
-  } else if (can_merge_with_load_class && !load_class->NeedsAccessCheck()) {
+  } else if (can_merge_with_load_class &&
+             load_class->GetLoadKind() != HLoadClass::LoadKind::kRuntimeCall) {
+    DCHECK(!load_class->NeedsAccessCheck());
     // Pass the initialization duty to the `HLoadClass` instruction,
     // and remove the instruction from the graph.
     DCHECK(load_class->HasEnvironment());
@@ -167,10 +201,50 @@ void PrepareForRegisterAllocation::VisitCondition(HCondition* condition) {
   }
 }
 
+void PrepareForRegisterAllocation::VisitConstructorFence(HConstructorFence* constructor_fence) {
+  // Trivially remove redundant HConstructorFence when it immediately follows an HNewInstance
+  // to an uninitialized class. In this special case, the art_quick_alloc_object_resolved
+  // will already have the 'dmb' which is strictly stronger than an HConstructorFence.
+  //
+  // The instruction builder always emits "x = HNewInstance; HConstructorFence(x)" so this
+  // is effectively pattern-matching that particular case and undoing the redundancy the builder
+  // had introduced.
+  //
+  // TODO: Move this to a separate pass.
+  HInstruction* allocation_inst = constructor_fence->GetAssociatedAllocation();
+  if (allocation_inst != nullptr && allocation_inst->IsNewInstance()) {
+    HNewInstance* new_inst = allocation_inst->AsNewInstance();
+    // This relies on the entrypoint already being set to the more optimized version;
+    // as that happens in this pass, this redundancy removal also cannot happen any earlier.
+    if (new_inst != nullptr && new_inst->GetEntrypoint() == kQuickAllocObjectResolved) {
+      // If this was done in an earlier pass, we would want to match that `previous` was an input
+      // to the `constructor_fence`. However, since this pass removes the inputs to the fence,
+      // we can ignore the inputs and just remove the instruction from its block.
+      DCHECK_EQ(1u, constructor_fence->InputCount());
+      // TODO: GetAssociatedAllocation should not care about multiple inputs
+      // if we are in prepare_for_register_allocation pass only.
+      constructor_fence->GetBlock()->RemoveInstruction(constructor_fence);
+      MaybeRecordStat(stats_,
+                      MethodCompilationStat::kConstructorFenceRemovedPFRA);
+      return;
+    }
+
+    // HNewArray does not need this check because the art_quick_alloc_array does not itself
+    // have a dmb in any normal situation (i.e. the array class is never exactly in the
+    // "resolved" state). If the array class is not yet loaded, it will always go from
+    // Unloaded->Initialized state.
+  }
+
+  // Remove all the inputs to the constructor fence;
+  // they aren't used by the InstructionCodeGenerator and this lets us avoid creating a
+  // LocationSummary in the LocationsBuilder.
+  constructor_fence->RemoveAllInputs();
+}
+
 void PrepareForRegisterAllocation::VisitInvokeStaticOrDirect(HInvokeStaticOrDirect* invoke) {
   if (invoke->IsStaticWithExplicitClinitCheck()) {
-    HLoadClass* last_input = invoke->GetInputs().back()->AsLoadClass();
-    DCHECK(last_input != nullptr)
+    HInstruction* last_input = invoke->GetInputs().back();
+    DCHECK(last_input->IsLoadClass())
         << "Last input is not HLoadClass. It is " << last_input->DebugName();
 
     // Detach the explicit class initialization check from the invoke.
@@ -228,6 +302,15 @@ bool PrepareForRegisterAllocation::CanMoveClinitCheck(HInstruction* input,
     }
   }
   return true;
+}
+
+void PrepareForRegisterAllocation::VisitTypeConversion(HTypeConversion* instruction) {
+  // For simplicity, our code generators don't handle implicit type conversion, so ensure
+  // there are none before hitting codegen.
+  if (instruction->IsImplicitConversion()) {
+    instruction->ReplaceWith(instruction->GetInput());
+    instruction->GetBlock()->RemoveInstruction(instruction);
+  }
 }
 
 }  // namespace art

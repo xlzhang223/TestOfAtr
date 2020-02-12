@@ -20,13 +20,15 @@
 #include "jni_macro_assembler.h"
 
 #include "assembler_test_base.h"
+#include "base/malloc_arena_pool.h"
 #include "common_runtime_test.h"  // For ScratchFile
+
+#include <sys/stat.h>
 
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
-#include <sys/stat.h>
 
 namespace art {
 
@@ -54,11 +56,11 @@ class JNIMacroAssemblerTest : public testing::Test {
   }
 
  protected:
-  explicit JNIMacroAssemblerTest() {}
+  JNIMacroAssemblerTest() {}
 
-  void SetUp() OVERRIDE {
-    arena_.reset(new ArenaAllocator(&pool_));
-    assembler_.reset(CreateAssembler(arena_.get()));
+  void SetUp() override {
+    allocator_.reset(new ArenaAllocator(&pool_));
+    assembler_.reset(CreateAssembler(allocator_.get()));
     test_helper_.reset(
         new AssemblerTestInfrastructure(GetArchitectureString(),
                                         GetAssemblerCmdName(),
@@ -72,15 +74,15 @@ class JNIMacroAssemblerTest : public testing::Test {
     SetUpHelpers();
   }
 
-  void TearDown() OVERRIDE {
+  void TearDown() override {
     test_helper_.reset();  // Clean up the helper.
     assembler_.reset();
-    arena_.reset();
+    allocator_.reset();
   }
 
   // Override this to set up any architecture-specific things, e.g., CPU revision.
-  virtual Ass* CreateAssembler(ArenaAllocator* arena) {
-    return new (arena) Ass(arena);
+  virtual Ass* CreateAssembler(ArenaAllocator* allocator) {
+    return new (allocator) Ass(allocator);
   }
 
   // Override this to set up any architecture-specific things, e.g., register vectors.
@@ -138,8 +140,8 @@ class JNIMacroAssemblerTest : public testing::Test {
     test_helper_->Driver(*data, assembly_text, test_name);
   }
 
-  ArenaPool pool_;
-  std::unique_ptr<ArenaAllocator> arena_;
+  MallocArenaPool pool_;
+  std::unique_ptr<ArenaAllocator> allocator_;
   std::unique_ptr<Ass> assembler_;
   std::unique_ptr<AssemblerTestInfrastructure> test_helper_;
 

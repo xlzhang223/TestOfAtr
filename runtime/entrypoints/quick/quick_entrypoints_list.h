@@ -28,6 +28,9 @@
   V(AllocObjectResolved, void*, mirror::Class*) \
   V(AllocObjectInitialized, void*, mirror::Class*) \
   V(AllocObjectWithChecks, void*, mirror::Class*) \
+  /* NB Class argument is purely to match the ABI of the other object alloc entrypoints. It is */ \
+  /*    not actually used for anything. */ \
+  V(AllocStringObject, void*, mirror::Class*) \
   V(AllocStringFromBytes, void*, void*, int32_t, int32_t, int32_t) \
   V(AllocStringFromChars, void*, int32_t, int32_t, void*) \
   V(AllocStringFromString, void*, void*) \
@@ -35,9 +38,11 @@
   V(InstanceofNonTrivial, size_t, mirror::Object*, mirror::Class*) \
   V(CheckInstanceOf, void, mirror::Object*, mirror::Class*) \
 \
-  V(InitializeStaticStorage, void*, uint32_t) \
-  V(InitializeTypeAndVerifyAccess, void*, uint32_t) \
-  V(InitializeType, void*, uint32_t) \
+  V(InitializeStaticStorage, void*, mirror::Class*) \
+  V(ResolveTypeAndVerifyAccess, void*, uint32_t) \
+  V(ResolveType, void*, uint32_t) \
+  V(ResolveMethodHandle, void*, uint32_t) \
+  V(ResolveMethodType, void*, uint32_t) \
   V(ResolveString, void*, uint32_t) \
 \
   V(Set8Instance, int, uint32_t, void*, int8_t) \
@@ -91,6 +96,7 @@
   V(Asin, double, double) \
   V(Atan, double, double) \
   V(Atan2, double, double, double) \
+  V(Pow, double, double, double) \
   V(Cbrt, double, double) \
   V(Cosh, double, double) \
   V(Exp, double, double) \
@@ -131,6 +137,7 @@
   V(InvokeSuperTrampolineWithAccessCheck, void, uint32_t, void*) \
   V(InvokeVirtualTrampolineWithAccessCheck, void, uint32_t, void*) \
   V(InvokePolymorphic, void, uint32_t, void*) \
+  V(InvokeCustom, void, uint32_t, void*) \
 \
   V(TestSuspend, void, void) \
 \
@@ -145,22 +152,22 @@
   V(A64Load, int64_t, volatile const int64_t *) \
   V(A64Store, void, volatile int64_t *, int64_t) \
 \
-  V(NewEmptyString, void) \
-  V(NewStringFromBytes_B, void) \
-  V(NewStringFromBytes_BI, void) \
-  V(NewStringFromBytes_BII, void) \
-  V(NewStringFromBytes_BIII, void) \
-  V(NewStringFromBytes_BIIString, void) \
-  V(NewStringFromBytes_BString, void) \
-  V(NewStringFromBytes_BIICharset, void) \
-  V(NewStringFromBytes_BCharset, void) \
-  V(NewStringFromChars_C, void) \
-  V(NewStringFromChars_CII, void) \
-  V(NewStringFromChars_IIC, void) \
-  V(NewStringFromCodePoints, void) \
-  V(NewStringFromString, void) \
-  V(NewStringFromStringBuffer, void) \
-  V(NewStringFromStringBuilder, void) \
+  V(NewEmptyString, void, void) \
+  V(NewStringFromBytes_B, void, void) \
+  V(NewStringFromBytes_BI, void, void) \
+  V(NewStringFromBytes_BII, void, void) \
+  V(NewStringFromBytes_BIII, void, void) \
+  V(NewStringFromBytes_BIIString, void, void) \
+  V(NewStringFromBytes_BString, void, void) \
+  V(NewStringFromBytes_BIICharset, void, void) \
+  V(NewStringFromBytes_BCharset, void, void) \
+  V(NewStringFromChars_C, void, void) \
+  V(NewStringFromChars_CII, void, void) \
+  V(NewStringFromChars_IIC, void, void) \
+  V(NewStringFromCodePoints, void, void) \
+  V(NewStringFromString, void, void) \
+  V(NewStringFromStringBuffer, void, void) \
+  V(NewStringFromStringBuilder, void, void) \
 \
   V(ReadBarrierJni, void, mirror::CompressedReference<mirror::Object>*, Thread*) \
   V(ReadBarrierMarkReg00, mirror::Object*, mirror::Object*) \

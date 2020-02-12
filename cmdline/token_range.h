@@ -18,10 +18,10 @@
 #define ART_CMDLINE_TOKEN_RANGE_H_
 
 #include <assert.h>
-#include <vector>
-#include <string>
 #include <algorithm>
 #include <memory>
+#include <string>
+#include <vector>
 
 #include "android-base/strings.h"
 
@@ -325,7 +325,7 @@ struct TokenRange {
     string_idx += remaining;
     maybe_push_wildcard_token();
 
-    return std::unique_ptr<TokenRange>(new TokenRange(std::move(new_token_list)));
+    return std::make_unique<TokenRange>(std::move(new_token_list));
   }
 
   // Do a quick match token-by-token, and see if they match.

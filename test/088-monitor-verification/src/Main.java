@@ -25,7 +25,7 @@ public class Main {
     /**
      * Drives tests.
      */
-    public static void main(String[] args) {
+    public static void main(String[] args) throws Exception {
         System.loadLibrary(args[0]);
         if (!hasOatFile() || runtimeIsSoftFail() || isInterpreted()) {
             // Some tests ensure that the verifier was able to guarantee balanced locking by
@@ -34,6 +34,17 @@ public class Main {
             disableStackFrameAsserts();
         }
 
+        ensureJitCompiled(Main.class, "recursiveSync");
+        ensureJitCompiled(Main.class, "nestedMayThrow");
+        ensureJitCompiled(Main.class, "constantLock");
+        ensureJitCompiled(Main.class, "notExcessiveNesting");
+        ensureJitCompiled(Main.class, "notNested");
+        ensureJitCompiled(TwoPath.class, "twoPath");
+        ensureJitCompiled(Class.forName("OK"), "runNoMonitors");
+        ensureJitCompiled(Class.forName("OK"), "runStraightLine");
+        ensureJitCompiled(Class.forName("OK"), "runBalancedJoin");
+        ensureJitCompiled(Class.forName("NullLocks"), "run");
+
         Main m = new Main();
 
         m.recursiveSync(0);
@@ -41,7 +52,7 @@ public class Main {
         m.nestedMayThrow(false);
         try {
             m.nestedMayThrow(true);
-            System.err.println("nestedThrow(true) did not throw");
+            System.out.println("nestedThrow(true) did not throw");
         } catch (MyException me) {}
         System.out.println("nestedMayThrow ok");
 
@@ -273,4 +284,5 @@ public class Main {
     public static native boolean runtimeIsSoftFail();
     public static native boolean isInterpreted();
     public static native void disableStackFrameAsserts();
+    private static native void ensureJitCompiled(Class<?> itf, String method_name);
 }

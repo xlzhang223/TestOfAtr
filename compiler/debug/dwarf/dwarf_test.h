@@ -17,20 +17,21 @@
 #ifndef ART_COMPILER_DEBUG_DWARF_DWARF_TEST_H_
 #define ART_COMPILER_DEBUG_DWARF_DWARF_TEST_H_
 
-#include <cstring>
 #include <dirent.h>
-#include <memory>
-#include <set>
 #include <stdio.h>
-#include <string>
 #include <sys/types.h>
 
+#include <cstring>
+#include <memory>
+#include <set>
+#include <string>
+
+#include "base/os.h"
 #include "base/unix_file/fd_file.h"
-#include "common_runtime_test.h"
-#include "elf_builder.h"
+#include "common_compiler_test.h"
+#include "elf/elf_builder.h"
 #include "gtest/gtest.h"
-#include "linker/file_output_stream.h"
-#include "os.h"
+#include "stream/file_output_stream.h"
 
 namespace art {
 namespace dwarf {
@@ -38,7 +39,7 @@ namespace dwarf {
 #define DW_CHECK(substring) Check(substring, false, __FILE__, __LINE__)
 #define DW_CHECK_NEXT(substring) Check(substring, true, __FILE__, __LINE__)
 
-class DwarfTest : public CommonRuntimeTest {
+class DwarfTest : public CommonCompilerTest {
  public:
   static constexpr bool kPrintObjdumpOutput = false;  // debugging.
 
@@ -59,10 +60,11 @@ class DwarfTest : public CommonRuntimeTest {
   template<typename ElfTypes>
   std::vector<std::string> Objdump(const char* args) {
     // Write simple elf file with just the DWARF sections.
-    InstructionSet isa = (sizeof(typename ElfTypes::Addr) == 8) ? kX86_64 : kX86;
+    InstructionSet isa =
+        (sizeof(typename ElfTypes::Addr) == 8) ? InstructionSet::kX86_64 : InstructionSet::kX86;
     ScratchFile file;
     FileOutputStream output_stream(file.GetFile());
-    ElfBuilder<ElfTypes> builder(isa, nullptr, &output_stream);
+    ElfBuilder<ElfTypes> builder(isa, &output_stream);
     builder.Start();
     if (!debug_info_data_.empty()) {
       builder.WriteSection(".debug_info", &debug_info_data_);

@@ -17,34 +17,52 @@
 #ifndef ART_RUNTIME_VERIFIER_REG_TYPE_CACHE_H_
 #define ART_RUNTIME_VERIFIER_REG_TYPE_CACHE_H_
 
+#include <stdint.h>
+#include <string_view>
+#include <vector>
+
 #include "base/casts.h"
 #include "base/macros.h"
 #include "base/scoped_arena_containers.h"
-#include "object_callbacks.h"
-#include "reg_type.h"
-#include "runtime.h"
-
-#include <stdint.h>
-#include <vector>
+#include "dex/primitive.h"
+#include "gc_root.h"
 
 namespace art {
 namespace mirror {
-  class Class;
-  class ClassLoader;
+class Class;
+class ClassLoader;
 }  // namespace mirror
 class ScopedArenaAllocator;
-class StringPiece;
 
 namespace verifier {
 
+class BooleanType;
+class ByteType;
+class CharType;
+class ConflictType;
+class ConstantType;
+class DoubleHiType;
+class DoubleLoType;
+class FloatType;
+class ImpreciseConstType;
+class IntegerType;
+class LongHiType;
+class LongLoType;
+class MethodVerifier;
+class NullType;
+class PreciseConstType;
+class PreciseReferenceType;
 class RegType;
+class ShortType;
+class UndefinedType;
+class UninitializedType;
 
 // Use 8 bytes since that is the default arena allocator alignment.
 static constexpr size_t kDefaultArenaBitVectorBytes = 8;
 
 class RegTypeCache {
  public:
-  explicit RegTypeCache(bool can_load_classes, ScopedArenaAllocator& arena);
+  RegTypeCache(bool can_load_classes, ScopedArenaAllocator& allocator, bool can_suspend = true);
   ~RegTypeCache();
   static void Init() REQUIRES_SHARED(Locks::mutator_lock_) {
     if (!RegTypeCache::primitive_initialized_) {
@@ -56,16 +74,18 @@ class RegTypeCache {
   }
   static void ShutDown();
   const art::verifier::RegType& GetFromId(uint16_t id) const;
-  const RegType& From(mirror::ClassLoader* loader, const char* descriptor, bool precise)
+  const RegType& From(ObjPtr<mirror::ClassLoader> loader, const char* descriptor, bool precise)
       REQUIRES_SHARED(Locks::mutator_lock_);
   // Find a RegType, returns null if not found.
-  const RegType* FindClass(mirror::Class* klass, bool precise) const
+  const RegType* FindClass(ObjPtr<mirror::Class> klass, bool precise) const
       REQUIRES_SHARED(Locks::mutator_lock_);
   // Insert a new class with a specified descriptor, must not already be in the cache.
-  const RegType* InsertClass(const StringPiece& descriptor, mirror::Class* klass, bool precise)
+  const RegType* InsertClass(const std::string_view& descriptor,
+                             ObjPtr<mirror::Class> klass,
+                             bool precise)
       REQUIRES_SHARED(Locks::mutator_lock_);
   // Get or insert a reg type for a description, klass, and precision.
-  const RegType& FromClass(const char* descriptor, mirror::Class* klass, bool precise)
+  const RegType& FromClass(const char* descriptor, ObjPtr<mirror::Class> klass, bool precise)
       REQUIRES_SHARED(Locks::mutator_lock_);
   const ConstantType& FromCat1Const(int32_t value, bool precise)
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -73,7 +93,9 @@ class RegTypeCache {
       REQUIRES_SHARED(Locks::mutator_lock_);
   const ConstantType& FromCat2ConstHi(int32_t value, bool precise)
       REQUIRES_SHARED(Locks::mutator_lock_);
-  const RegType& FromDescriptor(mirror::ClassLoader* loader, const char* descriptor, bool precise)
+  const RegType& FromDescriptor(ObjPtr<mirror::ClassLoader> loader,
+                                const char* descriptor,
+                                bool precise)
       REQUIRES_SHARED(Locks::mutator_lock_);
   const RegType& FromUnresolvedMerge(const RegType& left,
                                      const RegType& right,
@@ -81,6 +103,10 @@ class RegTypeCache {
       REQUIRES_SHARED(Locks::mutator_lock_);
   const RegType& FromUnresolvedSuperClass(const RegType& child)
       REQUIRES_SHARED(Locks::mutator_lock_);
+
+  // Note: this should not be used outside of RegType::ClassJoin!
+  const RegType& MakeUnresolvedReference() REQUIRES_SHARED(Locks::mutator_lock_);
+
   const ConstantType& Zero() REQUIRES_SHARED(Locks::mutator_lock_) {
     return FromCat1Const(0, true);
   }
@@ -90,45 +116,24 @@ class RegTypeCache {
   size_t GetCacheSize() {
     return entries_.size();
   }
-  const BooleanType& Boolean() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return *BooleanType::GetInstance();
-  }
-  const ByteType& Byte() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return *ByteType::GetInstance();
-  }
-  const CharType& Char() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return *CharType::GetInstance();
-  }
-  const ShortType& Short() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return *ShortType::GetInstance();
-  }
-  const IntegerType& Integer() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return *IntegerType::GetInstance();
-  }
-  const FloatType& Float() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return *FloatType::GetInstance();
-  }
-  const LongLoType& LongLo() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return *LongLoType::GetInstance();
-  }
-  const LongHiType& LongHi() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return *LongHiType::GetInstance();
-  }
-  const DoubleLoType& DoubleLo() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return *DoubleLoType::GetInstance();
-  }
-  const DoubleHiType& DoubleHi() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return *DoubleHiType::GetInstance();
-  }
-  const UndefinedType& Undefined() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return *UndefinedType::GetInstance();
-  }
-  const ConflictType& Conflict() {
-    return *ConflictType::GetInstance();
-  }
+  const BooleanType& Boolean() REQUIRES_SHARED(Locks::mutator_lock_);
+  const ByteType& Byte() REQUIRES_SHARED(Locks::mutator_lock_);
+  const CharType& Char() REQUIRES_SHARED(Locks::mutator_lock_);
+  const ShortType& Short() REQUIRES_SHARED(Locks::mutator_lock_);
+  const IntegerType& Integer() REQUIRES_SHARED(Locks::mutator_lock_);
+  const FloatType& Float() REQUIRES_SHARED(Locks::mutator_lock_);
+  const LongLoType& LongLo() REQUIRES_SHARED(Locks::mutator_lock_);
+  const LongHiType& LongHi() REQUIRES_SHARED(Locks::mutator_lock_);
+  const DoubleLoType& DoubleLo() REQUIRES_SHARED(Locks::mutator_lock_);
+  const DoubleHiType& DoubleHi() REQUIRES_SHARED(Locks::mutator_lock_);
+  const UndefinedType& Undefined() REQUIRES_SHARED(Locks::mutator_lock_);
+  const ConflictType& Conflict();
+  const NullType& Null();
 
   const PreciseReferenceType& JavaLangClass() REQUIRES_SHARED(Locks::mutator_lock_);
   const PreciseReferenceType& JavaLangString() REQUIRES_SHARED(Locks::mutator_lock_);
+  const PreciseReferenceType& JavaLangInvokeMethodHandle() REQUIRES_SHARED(Locks::mutator_lock_);
+  const PreciseReferenceType& JavaLangInvokeMethodType() REQUIRES_SHARED(Locks::mutator_lock_);
   const RegType& JavaLangThrowable(bool precise) REQUIRES_SHARED(Locks::mutator_lock_);
   const RegType& JavaLangObject(bool precise) REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -145,7 +150,7 @@ class RegTypeCache {
   const ImpreciseConstType& IntConstant() REQUIRES_SHARED(Locks::mutator_lock_);
   const ImpreciseConstType& PosByteConstant() REQUIRES_SHARED(Locks::mutator_lock_);
   const ImpreciseConstType& PosShortConstant() REQUIRES_SHARED(Locks::mutator_lock_);
-  const RegType& GetComponentType(const RegType& array, mirror::ClassLoader* loader)
+  const RegType& GetComponentType(const RegType& array, ObjPtr<mirror::ClassLoader> loader)
       REQUIRES_SHARED(Locks::mutator_lock_);
   void Dump(std::ostream& os) REQUIRES_SHARED(Locks::mutator_lock_);
   const RegType& RegTypeFromPrimitiveType(Primitive::Type) const;
@@ -157,9 +162,9 @@ class RegTypeCache {
 
  private:
   void FillPrimitiveAndSmallConstantTypes() REQUIRES_SHARED(Locks::mutator_lock_);
-  mirror::Class* ResolveClass(const char* descriptor, mirror::ClassLoader* loader)
+  ObjPtr<mirror::Class> ResolveClass(const char* descriptor, ObjPtr<mirror::ClassLoader> loader)
       REQUIRES_SHARED(Locks::mutator_lock_);
-  bool MatchDescriptor(size_t idx, const StringPiece& descriptor, bool precise)
+  bool MatchDescriptor(size_t idx, const std::string_view& descriptor, bool precise)
       REQUIRES_SHARED(Locks::mutator_lock_);
   const ConstantType& FromCat1NonSmallConstant(int32_t value, bool precise)
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -168,13 +173,10 @@ class RegTypeCache {
   template <class RegTypeType>
   RegTypeType& AddEntry(RegTypeType* new_entry) REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // Add a string piece to the arena allocator so that it stays live for the lifetime of the
-  // verifier.
-  StringPiece AddString(const StringPiece& string_piece);
+  // Add a string to the arena allocator so that it stays live for the lifetime of the
+  // verifier and return a string view.
+  std::string_view AddString(const std::string_view& str);
 
-  template <class Type>
-  static const Type* CreatePrimitiveTypeInstance(const std::string& descriptor)
-      REQUIRES_SHARED(Locks::mutator_lock_);
   static void CreatePrimitiveAndSmallConstantTypes() REQUIRES_SHARED(Locks::mutator_lock_);
 
   // A quick look up for popular small constants.
@@ -184,7 +186,7 @@ class RegTypeCache {
                                                           kMinSmallConstant + 1];
 
   static constexpr size_t kNumPrimitivesAndSmallConstants =
-      12 + (kMaxSmallConstant - kMinSmallConstant + 1);
+      13 + (kMaxSmallConstant - kMinSmallConstant + 1);
 
   // Have the well known global primitives been created?
   static bool primitive_initialized_;
@@ -202,7 +204,7 @@ class RegTypeCache {
   const bool can_load_classes_;
 
   // Arena allocator.
-  ScopedArenaAllocator& arena_;
+  ScopedArenaAllocator& allocator_;
 
   DISALLOW_COPY_AND_ASSIGN(RegTypeCache);
 };

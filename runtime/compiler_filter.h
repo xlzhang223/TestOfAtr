@@ -17,7 +17,7 @@
 #ifndef ART_RUNTIME_COMPILER_FILTER_H_
 #define ART_RUNTIME_COMPILER_FILTER_H_
 
-#include <ostream>
+#include <iosfwd>
 #include <string>
 #include <vector>
 
@@ -25,7 +25,7 @@
 
 namespace art {
 
-class CompilerFilter FINAL {
+class CompilerFilter final {
  public:
   // Note: Order here matters. Later filter choices are considered "as good
   // as" earlier filter choices.
@@ -83,6 +83,11 @@ class CompilerFilter FINAL {
   // For example: kSpeed is as good as kInterpretOnly, but kInterpretOnly is
   // not as good as kSpeed.
   static bool IsAsGoodAs(Filter current, Filter target);
+
+  // Returns true if 'current' compiler filter is better than 'target' compiler
+  // filter. Compared to IsAsGoodAs, this returns false if the compiler filters are
+  // equal.
+  static bool IsBetter(Filter current, Filter target);
 
   // Return the flag name of the given filter.
   // For example: given kVerifyAtRuntime, returns "verify-at-runtime".

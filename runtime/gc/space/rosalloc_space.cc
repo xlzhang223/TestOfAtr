@@ -17,21 +17,20 @@
 
 #include "rosalloc_space-inl.h"
 
+#include "base/logging.h"  // For VLOG.
 #include "base/time_utils.h"
+#include "base/utils.h"
 #include "gc/accounting/card_table.h"
 #include "gc/accounting/space_bitmap-inl.h"
 #include "gc/heap.h"
+#include "memory_tool_malloc_space-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/object-inl.h"
 #include "runtime.h"
+#include "scoped_thread_state_change-inl.h"
 #include "thread.h"
 #include "thread_list.h"
-#include "utils.h"
-#include "memory_tool_malloc_space-inl.h"
 
-//zhangxianlong
-#include "leakleak/leakleak.h"
-//end
 namespace art {
 namespace gc {
 namespace space {
@@ -45,48 +44,88 @@ static constexpr bool kVerifyFreedBytes = false;
 // TODO: Fix
 // template class MemoryToolMallocSpace<RosAllocSpace, allocator::RosAlloc*>;
 
-RosAllocSpace::RosAllocSpace(MemMap* mem_map, size_t initial_size, const std::string& name,
-                             art::gc::allocator::RosAlloc* rosalloc, uint8_t* begin, uint8_t* end,
-                             uint8_t* limit, size_t growth_limit, bool can_move_objects,
-                             size_t starting_size, bool low_memory_mode)
-    : MallocSpace(name, mem_map, begin, end, limit, growth_limit, true, can_move_objects,
+RosAllocSpace::RosAllocSpace(MemMap&& mem_map,
+                             size_t initial_size,
+                             const std::string& name,
+                             art::gc::allocator::RosAlloc* rosalloc,
+                             uint8_t* begin,
+                             uint8_t* end,
+                             uint8_t* limit,
+                             size_t growth_limit,
+                             bool can_move_objects,
+                             size_t starting_size,
+                             bool low_memory_mode)
+    : MallocSpace(name,
+                  std::move(mem_map),
+                  begin,
+                  end,
+                  limit,
+                  growth_limit,
+                  true,
+                  can_move_objects,
                   starting_size, initial_size),
       rosalloc_(rosalloc), low_memory_mode_(low_memory_mode) {
   CHECK(rosalloc != nullptr);
 }
 
-RosAllocSpace* RosAllocSpace::CreateFromMemMap(MemMap* mem_map, const std::string& name,
-                                               size_t starting_size, size_t initial_size,
-                                               size_t growth_limit, size_t capacity,
-                                               bool low_memory_mode, bool can_move_objects) {
-  DCHECK(mem_map != nullptr);
+RosAllocSpace* RosAllocSpace::CreateFromMemMap(MemMap&& mem_map,
+                                               const std::string& name,
+                                               size_t starting_size,
+                                               size_t initial_size,
+                                               size_t growth_limit,
+                                               size_t capacity,
+                                               bool low_memory_mode,
+                                               bool can_move_objects) {
+  DCHECK(mem_map.IsValid());
 
   bool running_on_memory_tool = Runtime::Current()->IsRunningOnMemoryTool();
 
-  allocator::RosAlloc* rosalloc = CreateRosAlloc(mem_map->Begin(), starting_size, initial_size,
-                                                 capacity, low_memory_mode, running_on_memory_tool);
+  allocator::RosAlloc* rosalloc = CreateRosAlloc(mem_map.Begin(),
+                                                 starting_size,
+                                                 initial_size,
+                                                 capacity,
+                                                 low_memory_mode,
+                                                 running_on_memory_tool);
   if (rosalloc == nullptr) {
     LOG(ERROR) << "Failed to initialize rosalloc for alloc space (" << name << ")";
     return nullptr;
   }
 
   // Protect memory beyond the starting size. MoreCore will add r/w permissions when necessory
-  uint8_t* end = mem_map->Begin() + starting_size;
+  uint8_t* end = mem_map.Begin() + starting_size;
   if (capacity - starting_size > 0) {
-    CHECK_MEMORY_CALL(mprotect, (end, capacity - starting_size, PROT_NONE), name);
+    CheckedCall(mprotect, name.c_str(), end, capacity - starting_size, PROT_NONE);
   }
 
   // Everything is set so record in immutable structure and leave
-  uint8_t* begin = mem_map->Begin();
-  // TODO: Fix RosAllocSpace to support Valgrind/ASan. There is currently some issues with
+  uint8_t* begin = mem_map.Begin();
+  // TODO: Fix RosAllocSpace to support ASan. There is currently some issues with
   // AllocationSize caused by redzones. b/12944686
   if (running_on_memory_tool) {
     return new MemoryToolMallocSpace<RosAllocSpace, kDefaultMemoryToolRedZoneBytes, false, true>(
-        mem_map, initial_size, name, rosalloc, begin, end, begin + capacity, growth_limit,
-        can_move_objects, starting_size, low_memory_mode);
+        std::move(mem_map),
+        initial_size,
+        name,
+        rosalloc,
+        begin,
+        end,
+        begin + capacity,
+        growth_limit,
+        can_move_objects,
+        starting_size,
+        low_memory_mode);
   } else {
-    return new RosAllocSpace(mem_map, initial_size, name, rosalloc, begin, end, begin + capacity,
-                             growth_limit, can_move_objects, starting_size, low_memory_mode);
+    return new RosAllocSpace(std::move(mem_map),
+                             initial_size,
+                             name,
+                             rosalloc,
+                             begin,
+                             end,
+                             begin + capacity,
+                             growth_limit,
+                             can_move_objects,
+                             starting_size,
+                             low_memory_mode);
   }
 }
 
@@ -94,17 +133,19 @@ RosAllocSpace::~RosAllocSpace() {
   delete rosalloc_;
 }
 
-RosAllocSpace* RosAllocSpace::Create(const std::string& name, size_t initial_size,
-                                     size_t growth_limit, size_t capacity, uint8_t* requested_begin,
-                                     bool low_memory_mode, bool can_move_objects) {
+RosAllocSpace* RosAllocSpace::Create(const std::string& name,
+                                     size_t initial_size,
+                                     size_t growth_limit,
+                                     size_t capacity,
+                                     bool low_memory_mode,
+                                     bool can_move_objects) {
   uint64_t start_time = 0;
   if (VLOG_IS_ON(heap) || VLOG_IS_ON(startup)) {
     start_time = NanoTime();
     VLOG(startup) << "RosAllocSpace::Create entering " << name
                   << " initial_size=" << PrettySize(initial_size)
                   << " growth_limit=" << PrettySize(growth_limit)
-                  << " capacity=" << PrettySize(capacity)
-                  << " requested_begin=" << reinterpret_cast<void*>(requested_begin);
+                  << " capacity=" << PrettySize(capacity);
   }
 
   // Memory we promise to rosalloc before it asks for morecore.
@@ -112,16 +153,20 @@ RosAllocSpace* RosAllocSpace::Create(const std::string& name, size_t initial_siz
   // will ask for this memory from sys_alloc which will fail as the footprint (this value plus the
   // size of the large allocation) will be greater than the footprint limit.
   size_t starting_size = Heap::kDefaultStartingSize;
-  MemMap* mem_map = CreateMemMap(name, starting_size, &initial_size, &growth_limit, &capacity,
-                                 requested_begin);
-  if (mem_map == nullptr) {
+  MemMap mem_map = CreateMemMap(name, starting_size, &initial_size, &growth_limit, &capacity);
+  if (!mem_map.IsValid()) {
     LOG(ERROR) << "Failed to create mem map for alloc space (" << name << ") of size "
                << PrettySize(capacity);
     return nullptr;
   }
 
-  RosAllocSpace* space = CreateFromMemMap(mem_map, name, starting_size, initial_size,
-                                          growth_limit, capacity, low_memory_mode,
+  RosAllocSpace* space = CreateFromMemMap(std::move(mem_map),
+                                          name,
+                                          starting_size,
+                                          initial_size,
+                                          growth_limit,
+                                          capacity,
+                                          low_memory_mode,
                                           can_move_objects);
   // We start out with only the initial size possibly containing objects.
   if (VLOG_IS_ON(heap) || VLOG_IS_ON(startup)) {
@@ -176,18 +221,39 @@ mirror::Object* RosAllocSpace::AllocWithGrowth(Thread* self, size_t num_bytes,
   return result;
 }
 
-MallocSpace* RosAllocSpace::CreateInstance(MemMap* mem_map, const std::string& name,
-                                           void* allocator, uint8_t* begin, uint8_t* end,
-                                           uint8_t* limit, size_t growth_limit,
+MallocSpace* RosAllocSpace::CreateInstance(MemMap&& mem_map,
+                                           const std::string& name,
+                                           void* allocator,
+                                           uint8_t* begin,
+                                           uint8_t* end,
+                                           uint8_t* limit,
+                                           size_t growth_limit,
                                            bool can_move_objects) {
   if (Runtime::Current()->IsRunningOnMemoryTool()) {
     return new MemoryToolMallocSpace<RosAllocSpace, kDefaultMemoryToolRedZoneBytes, false, true>(
-        mem_map, initial_size_, name, reinterpret_cast<allocator::RosAlloc*>(allocator), begin, end,
-        limit, growth_limit, can_move_objects, starting_size_, low_memory_mode_);
+        std::move(mem_map),
+        initial_size_,
+        name,
+        reinterpret_cast<allocator::RosAlloc*>(allocator),
+        begin,
+        end,
+        limit,
+        growth_limit,
+        can_move_objects,
+        starting_size_,
+        low_memory_mode_);
   } else {
-    return new RosAllocSpace(mem_map, initial_size_, name,
-                             reinterpret_cast<allocator::RosAlloc*>(allocator), begin, end, limit,
-                             growth_limit, can_move_objects, starting_size_, low_memory_mode_);
+    return new RosAllocSpace(std::move(mem_map),
+                             initial_size_,
+                             name,
+                             reinterpret_cast<allocator::RosAlloc*>(allocator),
+                             begin,
+                             end,
+                             limit,
+                             growth_limit,
+                             can_move_objects,
+                             starting_size_,
+                             low_memory_mode_);
   }
 }
 
@@ -205,6 +271,7 @@ size_t RosAllocSpace::Free(Thread* self, mirror::Object* ptr) {
 
 size_t RosAllocSpace::FreeList(Thread* self, size_t num_ptrs, mirror::Object** ptrs) {
   DCHECK(ptrs != nullptr);
+
   size_t verify_bytes = 0;
   for (size_t i = 0; i < num_ptrs; i++) {
     if (kPrefetchDuringRosAllocFreeList && i + kPrefetchLookAhead < num_ptrs) {
@@ -364,8 +431,11 @@ void RosAllocSpace::Clear() {
   mark_bitmap_->Clear();
   SetEnd(begin_ + starting_size_);
   delete rosalloc_;
-  rosalloc_ = CreateRosAlloc(mem_map_->Begin(), starting_size_, initial_size_,
-                             NonGrowthLimitCapacity(), low_memory_mode_,
+  rosalloc_ = CreateRosAlloc(mem_map_.Begin(),
+                             starting_size_,
+                             initial_size_,
+                             NonGrowthLimitCapacity(),
+                             low_memory_mode_,
                              Runtime::Current()->IsRunningOnMemoryTool());
   SetFootprintLimit(footprint_limit);
 }
@@ -373,6 +443,39 @@ void RosAllocSpace::Clear() {
 void RosAllocSpace::DumpStats(std::ostream& os) {
   ScopedSuspendAll ssa(__FUNCTION__);
   rosalloc_->DumpStats(os);
+}
+
+template<bool kMaybeIsRunningOnMemoryTool>
+size_t RosAllocSpace::AllocationSizeNonvirtual(mirror::Object* obj, size_t* usable_size) {
+  // obj is a valid object. Use its class in the header to get the size.
+  // Don't use verification since the object may be dead if we are sweeping.
+  size_t size = obj->SizeOf<kVerifyNone>();
+  bool add_redzones = false;
+  if (kMaybeIsRunningOnMemoryTool) {
+    add_redzones = kRunningOnMemoryTool && kMemoryToolAddsRedzones;
+    if (add_redzones) {
+      size += 2 * kDefaultMemoryToolRedZoneBytes;
+    }
+  } else {
+    DCHECK(!kRunningOnMemoryTool);
+  }
+  size_t size_by_size = rosalloc_->UsableSize(size);
+  if (kIsDebugBuild) {
+    // On memory tool, the red zone has an impact...
+    const uint8_t* obj_ptr = reinterpret_cast<const uint8_t*>(obj);
+    size_t size_by_ptr = rosalloc_->UsableSize(
+        obj_ptr - (add_redzones ? kDefaultMemoryToolRedZoneBytes : 0));
+    if (size_by_size != size_by_ptr) {
+      LOG(INFO) << "Found a bad sized obj of size " << size
+                << " at " << std::hex << reinterpret_cast<intptr_t>(obj_ptr) << std::dec
+                << " size_by_size=" << size_by_size << " size_by_ptr=" << size_by_ptr;
+    }
+    DCHECK_EQ(size_by_size, size_by_ptr);
+  }
+  if (usable_size != nullptr) {
+    *usable_size = size_by_size;
+  }
+  return size_by_size;
 }
 
 }  // namespace space

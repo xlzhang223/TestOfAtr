@@ -19,13 +19,17 @@
 #ifndef ART_DEXLAYOUT_DEX_IR_H_
 #define ART_DEXLAYOUT_DEX_IR_H_
 
-#include <map>
-#include <vector>
 #include <stdint.h>
 
-#include "dex_file-inl.h"
-#include "leb128.h"
-#include "utf.h"
+#include <vector>
+
+#include "base/iteration_range.h"
+#include "base/leb128.h"
+#include "base/safe_map.h"
+#include "base/stl_util.h"
+#include "dex/dex_file-inl.h"
+#include "dex/dex_file_types.h"
+#include "dex/utf.h"
 
 namespace art {
 namespace dex_ir {
@@ -46,6 +50,7 @@ class EncodedValue;
 class FieldId;
 class FieldItem;
 class Header;
+class HiddenapiClassData;
 class MapList;
 class MapItem;
 class MethodHandleItem;
@@ -97,6 +102,7 @@ class AbstractDispatcher {
   virtual void Dispatch(AnnotationSetItem* annotation_set_item) = 0;
   virtual void Dispatch(AnnotationSetRefList* annotation_set_ref_list) = 0;
   virtual void Dispatch(AnnotationsDirectoryItem* annotations_directory_item) = 0;
+  virtual void Dispatch(HiddenapiClassData* hiddenapi_class_data) = 0;
   virtual void Dispatch(MapList* map_list) = 0;
   virtual void Dispatch(MapItem* map_item) = 0;
 
@@ -104,253 +110,196 @@ class AbstractDispatcher {
   DISALLOW_COPY_AND_ASSIGN(AbstractDispatcher);
 };
 
+template<class T> class Iterator : public std::iterator<std::random_access_iterator_tag, T> {
+ public:
+  using value_type = typename std::iterator<std::random_access_iterator_tag, T>::value_type;
+  using difference_type =
+      typename std::iterator<std::random_access_iterator_tag, value_type>::difference_type;
+  using pointer = typename std::iterator<std::random_access_iterator_tag, value_type>::pointer;
+  using reference = typename std::iterator<std::random_access_iterator_tag, value_type>::reference;
+
+  Iterator(const Iterator&) = default;
+  Iterator(Iterator&&) = default;
+  Iterator& operator=(const Iterator&) = default;
+  Iterator& operator=(Iterator&&) = default;
+
+  Iterator(const std::vector<T>& vector,
+           uint32_t position,
+           uint32_t iterator_end)
+      : vector_(&vector),
+        position_(position),
+        iterator_end_(iterator_end) { }
+  Iterator() : vector_(nullptr), position_(0U), iterator_end_(0U) { }
+
+  bool IsValid() const { return position_ < iterator_end_; }
+
+  bool operator==(const Iterator& rhs) const { return position_ == rhs.position_; }
+  bool operator!=(const Iterator& rhs) const { return !(*this == rhs); }
+  bool operator<(const Iterator& rhs) const { return position_ < rhs.position_; }
+  bool operator>(const Iterator& rhs) const { return rhs < *this; }
+  bool operator<=(const Iterator& rhs) const { return !(rhs < *this); }
+  bool operator>=(const Iterator& rhs) const { return !(*this < rhs); }
+
+  Iterator& operator++() {  // Value after modification.
+    ++position_;
+    return *this;
+  }
+
+  Iterator operator++(int) {
+    Iterator temp = *this;
+    ++position_;
+    return temp;
+  }
+
+  Iterator& operator+=(difference_type delta) {
+    position_ += delta;
+    return *this;
+  }
+
+  Iterator operator+(difference_type delta) const {
+    Iterator temp = *this;
+    temp += delta;
+    return temp;
+  }
+
+  Iterator& operator--() {  // Value after modification.
+    --position_;
+    return *this;
+  }
+
+  Iterator operator--(int) {
+    Iterator temp = *this;
+    --position_;
+    return temp;
+  }
+
+  Iterator& operator-=(difference_type delta) {
+    position_ -= delta;
+    return *this;
+  }
+
+  Iterator operator-(difference_type delta) const {
+    Iterator temp = *this;
+    temp -= delta;
+    return temp;
+  }
+
+  difference_type operator-(const Iterator& rhs) {
+    return position_ - rhs.position_;
+  }
+
+  reference operator*() const {
+    return const_cast<reference>((*vector_)[position_]);
+  }
+
+  pointer operator->() const {
+    return const_cast<pointer>(&((*vector_)[position_]));
+  }
+
+  reference operator[](difference_type n) const {
+    return (*vector_)[position_ + n];
+  }
+
+ private:
+  const std::vector<T>* vector_;
+  uint32_t position_;
+  uint32_t iterator_end_;
+
+  template <typename U>
+  friend bool operator<(const Iterator<U>& lhs, const Iterator<U>& rhs);
+};
+
 // Collections become owners of the objects added by moving them into unique pointers.
-template<class T> class CollectionBase {
+class CollectionBase {
  public:
   CollectionBase() = default;
+  virtual ~CollectionBase() { }
 
   uint32_t GetOffset() const { return offset_; }
   void SetOffset(uint32_t new_offset) { offset_ = new_offset; }
+  virtual uint32_t Size() const = 0;
+  bool Empty() const { return Size() == 0u; }
 
  private:
-  uint32_t offset_ = 0;
+  // Start out unassigned.
+  uint32_t offset_ = 0u;
 
   DISALLOW_COPY_AND_ASSIGN(CollectionBase);
 };
 
-template<class T> class CollectionVector : public CollectionBase<T> {
+template<class T> class CollectionVector : public CollectionBase {
  public:
-  CollectionVector() = default;
+  using ElementType = std::unique_ptr<T>;
 
-  void AddIndexedItem(T* object, uint32_t offset, uint32_t index) {
-    object->SetOffset(offset);
-    object->SetIndex(index);
-    collection_.push_back(std::unique_ptr<T>(object));
+  CollectionVector() { }
+  explicit CollectionVector(size_t size) {
+    // Preallocate so that assignment does not invalidate pointers into the vector.
+    collection_.reserve(size);
   }
-  uint32_t Size() const { return collection_.size(); }
-  std::vector<std::unique_ptr<T>>& Collection() { return collection_; }
+  ~CollectionVector() override { }
+
+  template<class... Args>
+  T* CreateAndAddItem(Args&&... args) {
+    T* object = new T(std::forward<Args>(args)...);
+    collection_.push_back(std::unique_ptr<T>(object));
+    return object;
+  }
+
+  uint32_t Size() const override { return collection_.size(); }
+
+  Iterator<ElementType> begin() const { return Iterator<ElementType>(collection_, 0U, Size()); }
+  Iterator<ElementType> end() const { return Iterator<ElementType>(collection_, Size(), Size()); }
+
+  const ElementType& operator[](size_t index) const {
+    DCHECK_LT(index, Size());
+    return collection_[index];
+  }
+  ElementType& operator[](size_t index) {
+    DCHECK_LT(index, Size());
+    return collection_[index];
+  }
+
+  // Sort the vector by copying pointers over.
+  template <typename MapType>
+  void SortByMapOrder(const MapType& map) {
+    auto it = map.begin();
+    CHECK_EQ(map.size(), Size());
+    for (size_t i = 0; i < Size(); ++i) {
+      // There are times when the array will temporarily contain the same pointer twice, doing the
+      // release here sure there is no double free errors.
+      collection_[i].release();
+      collection_[i].reset(it->second);
+      ++it;
+    }
+  }
+
+ protected:
+  std::vector<ElementType> collection_;
 
  private:
-  std::vector<std::unique_ptr<T>> collection_;
-
   DISALLOW_COPY_AND_ASSIGN(CollectionVector);
 };
 
-template<class T> class CollectionMap : public CollectionBase<T> {
+template<class T> class IndexedCollectionVector : public CollectionVector<T> {
  public:
-  CollectionMap() = default;
+  using Vector = std::vector<std::unique_ptr<T>>;
+  IndexedCollectionVector() = default;
+  explicit IndexedCollectionVector(size_t size) : CollectionVector<T>(size) { }
 
-  // Returns the existing item if it is already inserted, null otherwise.
-  T* GetExistingObject(uint32_t offset) {
-    auto it = collection_.find(offset);
-    return it != collection_.end() ? it->second.get() : nullptr;
+  template <class... Args>
+  T* CreateAndAddIndexedItem(uint32_t index, Args&&... args) {
+    T* object = CollectionVector<T>::CreateAndAddItem(std::forward<Args>(args)...);
+    object->SetIndex(index);
+    return object;
   }
 
-  void AddItem(T* object, uint32_t offset) {
-    object->SetOffset(offset);
-    auto it = collection_.emplace(offset, std::unique_ptr<T>(object));
-    CHECK(it.second) << "CollectionMap already has an object with offset " << offset << " "
-                     << " and address " << it.first->second.get();
+  T* operator[](size_t index) const {
+    DCHECK_NE(CollectionVector<T>::collection_[index].get(), static_cast<T*>(nullptr));
+    return CollectionVector<T>::collection_[index].get();
   }
-  uint32_t Size() const { return collection_.size(); }
-  std::map<uint32_t, std::unique_ptr<T>>& Collection() { return collection_; }
 
  private:
-  std::map<uint32_t, std::unique_ptr<T>> collection_;
-
-  DISALLOW_COPY_AND_ASSIGN(CollectionMap);
-};
-
-class Collections {
- public:
-  Collections() = default;
-
-  std::vector<std::unique_ptr<StringId>>& StringIds() { return string_ids_.Collection(); }
-  std::vector<std::unique_ptr<TypeId>>& TypeIds() { return type_ids_.Collection(); }
-  std::vector<std::unique_ptr<ProtoId>>& ProtoIds() { return proto_ids_.Collection(); }
-  std::vector<std::unique_ptr<FieldId>>& FieldIds() { return field_ids_.Collection(); }
-  std::vector<std::unique_ptr<MethodId>>& MethodIds() { return method_ids_.Collection(); }
-  std::vector<std::unique_ptr<ClassDef>>& ClassDefs() { return class_defs_.Collection(); }
-  std::vector<std::unique_ptr<CallSiteId>>& CallSiteIds() { return call_site_ids_.Collection(); }
-  std::vector<std::unique_ptr<MethodHandleItem>>& MethodHandleItems()
-      { return method_handle_items_.Collection(); }
-  std::map<uint32_t, std::unique_ptr<StringData>>& StringDatas()
-      { return string_datas_.Collection(); }
-  std::map<uint32_t, std::unique_ptr<TypeList>>& TypeLists() { return type_lists_.Collection(); }
-  std::map<uint32_t, std::unique_ptr<EncodedArrayItem>>& EncodedArrayItems()
-      { return encoded_array_items_.Collection(); }
-  std::map<uint32_t, std::unique_ptr<AnnotationItem>>& AnnotationItems()
-      { return annotation_items_.Collection(); }
-  std::map<uint32_t, std::unique_ptr<AnnotationSetItem>>& AnnotationSetItems()
-      { return annotation_set_items_.Collection(); }
-  std::map<uint32_t, std::unique_ptr<AnnotationSetRefList>>& AnnotationSetRefLists()
-      { return annotation_set_ref_lists_.Collection(); }
-  std::map<uint32_t, std::unique_ptr<AnnotationsDirectoryItem>>& AnnotationsDirectoryItems()
-      { return annotations_directory_items_.Collection(); }
-  std::map<uint32_t, std::unique_ptr<DebugInfoItem>>& DebugInfoItems()
-      { return debug_info_items_.Collection(); }
-  std::map<uint32_t, std::unique_ptr<CodeItem>>& CodeItems() { return code_items_.Collection(); }
-  std::map<uint32_t, std::unique_ptr<ClassData>>& ClassDatas() { return class_datas_.Collection(); }
-
-  void CreateStringId(const DexFile& dex_file, uint32_t i);
-  void CreateTypeId(const DexFile& dex_file, uint32_t i);
-  void CreateProtoId(const DexFile& dex_file, uint32_t i);
-  void CreateFieldId(const DexFile& dex_file, uint32_t i);
-  void CreateMethodId(const DexFile& dex_file, uint32_t i);
-  void CreateClassDef(const DexFile& dex_file, uint32_t i);
-  void CreateCallSiteId(const DexFile& dex_file, uint32_t i);
-  void CreateMethodHandleItem(const DexFile& dex_file, uint32_t i);
-
-  void CreateCallSitesAndMethodHandles(const DexFile& dex_file);
-
-  TypeList* CreateTypeList(const DexFile::TypeList* type_list, uint32_t offset);
-  EncodedArrayItem* CreateEncodedArrayItem(const uint8_t* static_data, uint32_t offset);
-  AnnotationItem* CreateAnnotationItem(const DexFile::AnnotationItem* annotation, uint32_t offset);
-  AnnotationSetItem* CreateAnnotationSetItem(const DexFile& dex_file,
-      const DexFile::AnnotationSetItem* disk_annotations_item, uint32_t offset);
-  AnnotationsDirectoryItem* CreateAnnotationsDirectoryItem(const DexFile& dex_file,
-      const DexFile::AnnotationsDirectoryItem* disk_annotations_item, uint32_t offset);
-  CodeItem* CreateCodeItem(
-      const DexFile& dex_file, const DexFile::CodeItem& disk_code_item, uint32_t offset);
-  ClassData* CreateClassData(const DexFile& dex_file, const uint8_t* encoded_data, uint32_t offset);
-
-  StringId* GetStringId(uint32_t index) {
-    CHECK_LT(index, StringIdsSize());
-    return StringIds()[index].get();
-  }
-  TypeId* GetTypeId(uint32_t index) {
-    CHECK_LT(index, TypeIdsSize());
-    return TypeIds()[index].get();
-  }
-  ProtoId* GetProtoId(uint32_t index) {
-    CHECK_LT(index, ProtoIdsSize());
-    return ProtoIds()[index].get();
-  }
-  FieldId* GetFieldId(uint32_t index) {
-    CHECK_LT(index, FieldIdsSize());
-    return FieldIds()[index].get();
-  }
-  MethodId* GetMethodId(uint32_t index) {
-    CHECK_LT(index, MethodIdsSize());
-    return MethodIds()[index].get();
-  }
-  ClassDef* GetClassDef(uint32_t index) {
-    CHECK_LT(index, ClassDefsSize());
-    return ClassDefs()[index].get();
-  }
-  CallSiteId* GetCallSiteId(uint32_t index) {
-    CHECK_LT(index, CallSiteIdsSize());
-    return CallSiteIds()[index].get();
-  }
-  MethodHandleItem* GetMethodHandle(uint32_t index) {
-    CHECK_LT(index, MethodHandleItemsSize());
-    return MethodHandleItems()[index].get();
-  }
-
-  StringId* GetStringIdOrNullPtr(uint32_t index) {
-    return index == DexFile::kDexNoIndex ? nullptr : GetStringId(index);
-  }
-  TypeId* GetTypeIdOrNullPtr(uint16_t index) {
-    return index == DexFile::kDexNoIndex16 ? nullptr : GetTypeId(index);
-  }
-
-  uint32_t StringIdsOffset() const { return string_ids_.GetOffset(); }
-  uint32_t TypeIdsOffset() const { return type_ids_.GetOffset(); }
-  uint32_t ProtoIdsOffset() const { return proto_ids_.GetOffset(); }
-  uint32_t FieldIdsOffset() const { return field_ids_.GetOffset(); }
-  uint32_t MethodIdsOffset() const { return method_ids_.GetOffset(); }
-  uint32_t ClassDefsOffset() const { return class_defs_.GetOffset(); }
-  uint32_t CallSiteIdsOffset() const { return call_site_ids_.GetOffset(); }
-  uint32_t MethodHandleItemsOffset() const { return method_handle_items_.GetOffset(); }
-  uint32_t StringDatasOffset() const { return string_datas_.GetOffset(); }
-  uint32_t TypeListsOffset() const { return type_lists_.GetOffset(); }
-  uint32_t EncodedArrayItemsOffset() const { return encoded_array_items_.GetOffset(); }
-  uint32_t AnnotationItemsOffset() const { return annotation_items_.GetOffset(); }
-  uint32_t AnnotationSetItemsOffset() const { return annotation_set_items_.GetOffset(); }
-  uint32_t AnnotationSetRefListsOffset() const { return annotation_set_ref_lists_.GetOffset(); }
-  uint32_t AnnotationsDirectoryItemsOffset() const
-      { return annotations_directory_items_.GetOffset(); }
-  uint32_t DebugInfoItemsOffset() const { return debug_info_items_.GetOffset(); }
-  uint32_t CodeItemsOffset() const { return code_items_.GetOffset(); }
-  uint32_t ClassDatasOffset() const { return class_datas_.GetOffset(); }
-  uint32_t MapListOffset() const { return map_list_offset_; }
-
-  void SetStringIdsOffset(uint32_t new_offset) { string_ids_.SetOffset(new_offset); }
-  void SetTypeIdsOffset(uint32_t new_offset) { type_ids_.SetOffset(new_offset); }
-  void SetProtoIdsOffset(uint32_t new_offset) { proto_ids_.SetOffset(new_offset); }
-  void SetFieldIdsOffset(uint32_t new_offset) { field_ids_.SetOffset(new_offset); }
-  void SetMethodIdsOffset(uint32_t new_offset) { method_ids_.SetOffset(new_offset); }
-  void SetClassDefsOffset(uint32_t new_offset) { class_defs_.SetOffset(new_offset); }
-  void SetCallSiteIdsOffset(uint32_t new_offset) { call_site_ids_.SetOffset(new_offset); }
-  void SetMethodHandleItemsOffset(uint32_t new_offset)
-      { method_handle_items_.SetOffset(new_offset); }
-  void SetStringDatasOffset(uint32_t new_offset) { string_datas_.SetOffset(new_offset); }
-  void SetTypeListsOffset(uint32_t new_offset) { type_lists_.SetOffset(new_offset); }
-  void SetEncodedArrayItemsOffset(uint32_t new_offset)
-      { encoded_array_items_.SetOffset(new_offset); }
-  void SetAnnotationItemsOffset(uint32_t new_offset) { annotation_items_.SetOffset(new_offset); }
-  void SetAnnotationSetItemsOffset(uint32_t new_offset)
-      { annotation_set_items_.SetOffset(new_offset); }
-  void SetAnnotationSetRefListsOffset(uint32_t new_offset)
-      { annotation_set_ref_lists_.SetOffset(new_offset); }
-  void SetAnnotationsDirectoryItemsOffset(uint32_t new_offset)
-      { annotations_directory_items_.SetOffset(new_offset); }
-  void SetDebugInfoItemsOffset(uint32_t new_offset) { debug_info_items_.SetOffset(new_offset); }
-  void SetCodeItemsOffset(uint32_t new_offset) { code_items_.SetOffset(new_offset); }
-  void SetClassDatasOffset(uint32_t new_offset) { class_datas_.SetOffset(new_offset); }
-  void SetMapListOffset(uint32_t new_offset) { map_list_offset_ = new_offset; }
-
-  uint32_t StringIdsSize() const { return string_ids_.Size(); }
-  uint32_t TypeIdsSize() const { return type_ids_.Size(); }
-  uint32_t ProtoIdsSize() const { return proto_ids_.Size(); }
-  uint32_t FieldIdsSize() const { return field_ids_.Size(); }
-  uint32_t MethodIdsSize() const { return method_ids_.Size(); }
-  uint32_t ClassDefsSize() const { return class_defs_.Size(); }
-  uint32_t CallSiteIdsSize() const { return call_site_ids_.Size(); }
-  uint32_t MethodHandleItemsSize() const { return method_handle_items_.Size(); }
-  uint32_t StringDatasSize() const { return string_datas_.Size(); }
-  uint32_t TypeListsSize() const { return type_lists_.Size(); }
-  uint32_t EncodedArrayItemsSize() const { return encoded_array_items_.Size(); }
-  uint32_t AnnotationItemsSize() const { return annotation_items_.Size(); }
-  uint32_t AnnotationSetItemsSize() const { return annotation_set_items_.Size(); }
-  uint32_t AnnotationSetRefListsSize() const { return annotation_set_ref_lists_.Size(); }
-  uint32_t AnnotationsDirectoryItemsSize() const { return annotations_directory_items_.Size(); }
-  uint32_t DebugInfoItemsSize() const { return debug_info_items_.Size(); }
-  uint32_t CodeItemsSize() const { return code_items_.Size(); }
-  uint32_t ClassDatasSize() const { return class_datas_.Size(); }
-
- private:
-  EncodedValue* ReadEncodedValue(const uint8_t** data);
-  EncodedValue* ReadEncodedValue(const uint8_t** data, uint8_t type, uint8_t length);
-  void ReadEncodedValue(const uint8_t** data, uint8_t type, uint8_t length, EncodedValue* item);
-
-  ParameterAnnotation* GenerateParameterAnnotation(const DexFile& dex_file, MethodId* method_id,
-      const DexFile::AnnotationSetRefList* annotation_set_ref_list, uint32_t offset);
-  MethodItem* GenerateMethodItem(const DexFile& dex_file, ClassDataItemIterator& cdii);
-
-  CollectionVector<StringId> string_ids_;
-  CollectionVector<TypeId> type_ids_;
-  CollectionVector<ProtoId> proto_ids_;
-  CollectionVector<FieldId> field_ids_;
-  CollectionVector<MethodId> method_ids_;
-  CollectionVector<ClassDef> class_defs_;
-  CollectionVector<CallSiteId> call_site_ids_;
-  CollectionVector<MethodHandleItem> method_handle_items_;
-
-  CollectionMap<StringData> string_datas_;
-  CollectionMap<TypeList> type_lists_;
-  CollectionMap<EncodedArrayItem> encoded_array_items_;
-  CollectionMap<AnnotationItem> annotation_items_;
-  CollectionMap<AnnotationSetItem> annotation_set_items_;
-  CollectionMap<AnnotationSetRefList> annotation_set_ref_lists_;
-  CollectionMap<AnnotationsDirectoryItem> annotations_directory_items_;
-  CollectionMap<DebugInfoItem> debug_info_items_;
-  CollectionMap<CodeItem> code_items_;
-  CollectionMap<ClassData> class_datas_;
-
-  uint32_t map_list_offset_ = 0;
-
-  DISALLOW_COPY_AND_ASSIGN(Collections);
+  DISALLOW_COPY_AND_ASSIGN(IndexedCollectionVector);
 };
 
 class Item {
@@ -358,15 +307,28 @@ class Item {
   Item() { }
   virtual ~Item() { }
 
-  uint32_t GetOffset() const { return offset_; }
-  uint32_t GetSize() const { return size_; }
+  Item(Item&&) = default;
+
+  // Return the assigned offset.
+  uint32_t GetOffset() const WARN_UNUSED {
+    CHECK(OffsetAssigned());
+    return offset_;
+  }
+  uint32_t GetSize() const WARN_UNUSED { return size_; }
   void SetOffset(uint32_t offset) { offset_ = offset; }
   void SetSize(uint32_t size) { size_ = size; }
+  bool OffsetAssigned() const {
+    return offset_ != kOffsetUnassigned;
+  }
 
  protected:
   Item(uint32_t offset, uint32_t size) : offset_(offset), size_(size) { }
 
-  uint32_t offset_ = 0;
+  // 0 is the dex file header and shouldn't be a valid offset for any part of the dex file.
+  static constexpr uint32_t kOffsetUnassigned = 0u;
+
+  // Start out unassigned.
+  uint32_t offset_ = kOffsetUnassigned;
   uint32_t size_ = 0;
 };
 
@@ -396,20 +358,58 @@ class Header : public Item {
          uint32_t link_size,
          uint32_t link_offset,
          uint32_t data_size,
-         uint32_t data_offset)
-      : Item(0, kHeaderItemSize),
-        checksum_(checksum),
-        endian_tag_(endian_tag),
-        file_size_(file_size),
-        header_size_(header_size),
-        link_size_(link_size),
-        link_offset_(link_offset),
-        data_size_(data_size),
-        data_offset_(data_offset) {
-    memcpy(magic_, magic, sizeof(magic_));
-    memcpy(signature_, signature, sizeof(signature_));
+         uint32_t data_offset,
+         bool support_default_methods)
+      : Item(0, kHeaderItemSize), support_default_methods_(support_default_methods) {
+    ConstructorHelper(magic,
+                      checksum,
+                      signature,
+                      endian_tag,
+                      file_size,
+                      header_size,
+                      link_size,
+                      link_offset,
+                      data_size,
+                      data_offset);
   }
-  ~Header() OVERRIDE { }
+
+  Header(const uint8_t* magic,
+         uint32_t checksum,
+         const uint8_t* signature,
+         uint32_t endian_tag,
+         uint32_t file_size,
+         uint32_t header_size,
+         uint32_t link_size,
+         uint32_t link_offset,
+         uint32_t data_size,
+         uint32_t data_offset,
+         bool support_default_methods,
+         uint32_t num_string_ids,
+         uint32_t num_type_ids,
+         uint32_t num_proto_ids,
+         uint32_t num_field_ids,
+         uint32_t num_method_ids,
+         uint32_t num_class_defs)
+      : Item(0, kHeaderItemSize),
+        support_default_methods_(support_default_methods),
+        string_ids_(num_string_ids),
+        type_ids_(num_type_ids),
+        proto_ids_(num_proto_ids),
+        field_ids_(num_field_ids),
+        method_ids_(num_method_ids),
+        class_defs_(num_class_defs) {
+    ConstructorHelper(magic,
+                      checksum,
+                      signature,
+                      endian_tag,
+                      file_size,
+                      header_size,
+                      link_size,
+                      link_offset,
+                      data_size,
+                      data_offset);
+  }
+  ~Header() override { }
 
   static size_t ItemSize() { return kHeaderItemSize; }
 
@@ -435,9 +435,81 @@ class Header : public Item {
   void SetDataSize(uint32_t new_data_size) { data_size_ = new_data_size; }
   void SetDataOffset(uint32_t new_data_offset) { data_offset_ = new_data_offset; }
 
-  Collections& GetCollections() { return collections_; }
+  IndexedCollectionVector<StringId>& StringIds() { return string_ids_; }
+  const IndexedCollectionVector<StringId>& StringIds() const { return string_ids_; }
+  IndexedCollectionVector<TypeId>& TypeIds() { return type_ids_; }
+  const IndexedCollectionVector<TypeId>& TypeIds() const { return type_ids_; }
+  IndexedCollectionVector<ProtoId>& ProtoIds() { return proto_ids_; }
+  const IndexedCollectionVector<ProtoId>& ProtoIds() const { return proto_ids_; }
+  IndexedCollectionVector<FieldId>& FieldIds() { return field_ids_; }
+  const IndexedCollectionVector<FieldId>& FieldIds() const { return field_ids_; }
+  IndexedCollectionVector<MethodId>& MethodIds() { return method_ids_; }
+  const IndexedCollectionVector<MethodId>& MethodIds() const { return method_ids_; }
+  IndexedCollectionVector<ClassDef>& ClassDefs() { return class_defs_; }
+  const IndexedCollectionVector<ClassDef>& ClassDefs() const { return class_defs_; }
+  IndexedCollectionVector<CallSiteId>& CallSiteIds() { return call_site_ids_; }
+  const IndexedCollectionVector<CallSiteId>& CallSiteIds() const { return call_site_ids_; }
+  IndexedCollectionVector<MethodHandleItem>& MethodHandleItems() { return method_handle_items_; }
+  const IndexedCollectionVector<MethodHandleItem>& MethodHandleItems() const {
+    return method_handle_items_;
+  }
+  CollectionVector<StringData>& StringDatas() { return string_datas_; }
+  const CollectionVector<StringData>& StringDatas() const { return string_datas_; }
+  CollectionVector<TypeList>& TypeLists() { return type_lists_; }
+  const CollectionVector<TypeList>& TypeLists() const { return type_lists_; }
+  CollectionVector<EncodedArrayItem>& EncodedArrayItems() { return encoded_array_items_; }
+  const CollectionVector<EncodedArrayItem>& EncodedArrayItems() const {
+    return encoded_array_items_;
+  }
+  CollectionVector<AnnotationItem>& AnnotationItems() { return annotation_items_; }
+  const CollectionVector<AnnotationItem>& AnnotationItems() const { return annotation_items_; }
+  CollectionVector<AnnotationSetItem>& AnnotationSetItems() { return annotation_set_items_; }
+  const CollectionVector<AnnotationSetItem>& AnnotationSetItems() const {
+    return annotation_set_items_;
+  }
+  CollectionVector<AnnotationSetRefList>& AnnotationSetRefLists() {
+    return annotation_set_ref_lists_;
+  }
+  const CollectionVector<AnnotationSetRefList>& AnnotationSetRefLists() const {
+    return annotation_set_ref_lists_;
+  }
+  CollectionVector<AnnotationsDirectoryItem>& AnnotationsDirectoryItems() {
+    return annotations_directory_items_;
+  }
+  const CollectionVector<AnnotationsDirectoryItem>& AnnotationsDirectoryItems() const {
+    return annotations_directory_items_;
+  }
+  IndexedCollectionVector<HiddenapiClassData>& HiddenapiClassDatas() {
+    return hiddenapi_class_datas_;
+  }
+  const IndexedCollectionVector<HiddenapiClassData>& HiddenapiClassDatas() const {
+    return hiddenapi_class_datas_;
+  }
+  CollectionVector<DebugInfoItem>& DebugInfoItems() { return debug_info_items_; }
+  const CollectionVector<DebugInfoItem>& DebugInfoItems() const { return debug_info_items_; }
+  CollectionVector<CodeItem>& CodeItems() { return code_items_; }
+  const CollectionVector<CodeItem>& CodeItems() const { return code_items_; }
+  CollectionVector<ClassData>& ClassDatas() { return class_datas_; }
+  const CollectionVector<ClassData>& ClassDatas() const { return class_datas_; }
+
+  StringId* GetStringIdOrNullPtr(uint32_t index) {
+    return index == dex::kDexNoIndex ? nullptr : StringIds()[index];
+  }
+  TypeId* GetTypeIdOrNullPtr(uint16_t index) {
+    return index == DexFile::kDexNoIndex16 ? nullptr : TypeIds()[index];
+  }
+
+  uint32_t MapListOffset() const { return map_list_offset_; }
+  void SetMapListOffset(uint32_t new_offset) { map_list_offset_ = new_offset; }
+
+  const std::vector<uint8_t>& LinkData() const { return link_data_; }
+  void SetLinkData(std::vector<uint8_t>&& link_data) { link_data_ = std::move(link_data); }
 
   void Accept(AbstractDispatcher* dispatch) { dispatch->Dispatch(this); }
+
+  bool SupportDefaultMethods() const {
+    return support_default_methods_;
+  }
 
  private:
   uint8_t magic_[8];
@@ -450,8 +522,59 @@ class Header : public Item {
   uint32_t link_offset_;
   uint32_t data_size_;
   uint32_t data_offset_;
+  const bool support_default_methods_;
 
-  Collections collections_;
+  void ConstructorHelper(const uint8_t* magic,
+                         uint32_t checksum,
+                         const uint8_t* signature,
+                         uint32_t endian_tag,
+                         uint32_t file_size,
+                         uint32_t header_size,
+                         uint32_t link_size,
+                         uint32_t link_offset,
+                         uint32_t data_size,
+                         uint32_t data_offset) {
+    checksum_ = checksum;
+    endian_tag_ = endian_tag;
+    file_size_ = file_size;
+    header_size_ = header_size;
+    link_size_ = link_size;
+    link_offset_ = link_offset;
+    data_size_ = data_size;
+    data_offset_ = data_offset;
+    memcpy(magic_, magic, sizeof(magic_));
+    memcpy(signature_, signature, sizeof(signature_));
+  }
+
+  // Collection vectors own the IR data.
+  IndexedCollectionVector<StringId> string_ids_;
+  IndexedCollectionVector<TypeId> type_ids_;
+  IndexedCollectionVector<ProtoId> proto_ids_;
+  IndexedCollectionVector<FieldId> field_ids_;
+  IndexedCollectionVector<MethodId> method_ids_;
+  IndexedCollectionVector<ClassDef> class_defs_;
+  IndexedCollectionVector<CallSiteId> call_site_ids_;
+  IndexedCollectionVector<MethodHandleItem> method_handle_items_;
+  IndexedCollectionVector<StringData> string_datas_;
+  IndexedCollectionVector<TypeList> type_lists_;
+  IndexedCollectionVector<EncodedArrayItem> encoded_array_items_;
+  IndexedCollectionVector<AnnotationItem> annotation_items_;
+  IndexedCollectionVector<AnnotationSetItem> annotation_set_items_;
+  IndexedCollectionVector<AnnotationSetRefList> annotation_set_ref_lists_;
+  IndexedCollectionVector<AnnotationsDirectoryItem> annotations_directory_items_;
+  IndexedCollectionVector<HiddenapiClassData> hiddenapi_class_datas_;
+  // The order of the vectors controls the layout of the output file by index order, to change the
+  // layout just sort the vector. Note that you may only change the order of the non indexed vectors
+  // below. Indexed vectors are accessed by indices in other places, changing the sorting order will
+  // invalidate the existing indices and is not currently supported.
+  CollectionVector<DebugInfoItem> debug_info_items_;
+  CollectionVector<CodeItem> code_items_;
+  CollectionVector<ClassData> class_datas_;
+
+  uint32_t map_list_offset_ = 0;
+
+  // Link data.
+  std::vector<uint8_t> link_data_;
 
   DISALLOW_COPY_AND_ASSIGN(Header);
 };
@@ -477,7 +600,7 @@ class StringId : public IndexedItem {
   explicit StringId(StringData* string_data) : string_data_(string_data) {
     size_ = kStringIdItemSize;
   }
-  ~StringId() OVERRIDE { }
+  ~StringId() override { }
 
   static size_t ItemSize() { return kStringIdItemSize; }
 
@@ -495,7 +618,7 @@ class StringId : public IndexedItem {
 class TypeId : public IndexedItem {
  public:
   explicit TypeId(StringId* string_id) : string_id_(string_id) { size_ = kTypeIdItemSize; }
-  ~TypeId() OVERRIDE { }
+  ~TypeId() override { }
 
   static size_t ItemSize() { return kTypeIdItemSize; }
 
@@ -516,7 +639,7 @@ class TypeList : public Item {
   explicit TypeList(TypeIdVector* type_list) : type_list_(type_list) {
     size_ = sizeof(uint32_t) + (type_list->size() * sizeof(uint16_t));
   }
-  ~TypeList() OVERRIDE { }
+  ~TypeList() override { }
 
   const TypeIdVector* GetTypeList() const { return type_list_.get(); }
 
@@ -531,7 +654,7 @@ class ProtoId : public IndexedItem {
   ProtoId(const StringId* shorty, const TypeId* return_type, TypeList* parameters)
       : shorty_(shorty), return_type_(return_type), parameters_(parameters)
       { size_ = kProtoIdItemSize; }
-  ~ProtoId() OVERRIDE { }
+  ~ProtoId() override { }
 
   static size_t ItemSize() { return kProtoIdItemSize; }
 
@@ -553,7 +676,7 @@ class FieldId : public IndexedItem {
  public:
   FieldId(const TypeId* klass, const TypeId* type, const StringId* name)
       : class_(klass), type_(type), name_(name) { size_ = kFieldIdItemSize; }
-  ~FieldId() OVERRIDE { }
+  ~FieldId() override { }
 
   static size_t ItemSize() { return kFieldIdItemSize; }
 
@@ -575,7 +698,7 @@ class MethodId : public IndexedItem {
  public:
   MethodId(const TypeId* klass, const ProtoId* proto, const StringId* name)
       : class_(klass), proto_(proto), name_(name) { size_ = kMethodIdItemSize; }
-  ~MethodId() OVERRIDE { }
+  ~MethodId() override { }
 
   static size_t ItemSize() { return kMethodIdItemSize; }
 
@@ -597,7 +720,9 @@ class FieldItem : public Item {
  public:
   FieldItem(uint32_t access_flags, const FieldId* field_id)
       : access_flags_(access_flags), field_id_(field_id) { }
-  ~FieldItem() OVERRIDE { }
+  ~FieldItem() override { }
+
+  FieldItem(FieldItem&&) = default;
 
   uint32_t GetAccessFlags() const { return access_flags_; }
   const FieldId* GetFieldId() const { return field_id_; }
@@ -611,13 +736,15 @@ class FieldItem : public Item {
   DISALLOW_COPY_AND_ASSIGN(FieldItem);
 };
 
-using FieldItemVector = std::vector<std::unique_ptr<FieldItem>>;
+using FieldItemVector = std::vector<FieldItem>;
 
 class MethodItem : public Item {
  public:
   MethodItem(uint32_t access_flags, const MethodId* method_id, CodeItem* code)
       : access_flags_(access_flags), method_id_(method_id), code_(code) { }
-  ~MethodItem() OVERRIDE { }
+  ~MethodItem() override { }
+
+  MethodItem(MethodItem&&) = default;
 
   uint32_t GetAccessFlags() const { return access_flags_; }
   const MethodId* GetMethodId() const { return method_id_; }
@@ -633,7 +760,7 @@ class MethodItem : public Item {
   DISALLOW_COPY_AND_ASSIGN(MethodItem);
 };
 
-using MethodItemVector = std::vector<std::unique_ptr<MethodItem>>;
+using MethodItemVector = std::vector<MethodItem>;
 
 class EncodedValue {
  public:
@@ -759,7 +886,7 @@ class ClassData : public Item {
         direct_methods_(direct_methods),
         virtual_methods_(virtual_methods) { }
 
-  ~ClassData() OVERRIDE = default;
+  ~ClassData() override = default;
   FieldItemVector* StaticFields() { return static_fields_.get(); }
   FieldItemVector* InstanceFields() { return instance_fields_.get(); }
   MethodItemVector* DirectMethods() { return direct_methods_.get(); }
@@ -795,7 +922,7 @@ class ClassDef : public IndexedItem {
         class_data_(class_data),
         static_values_(static_values) { size_ = kClassDefItemSize; }
 
-  ~ClassDef() OVERRIDE { }
+  ~ClassDef() override { }
 
   static size_t ItemSize() { return kClassDefItemSize; }
 
@@ -808,8 +935,6 @@ class ClassDef : public IndexedItem {
   AnnotationsDirectoryItem* Annotations() const { return annotations_; }
   ClassData* GetClassData() { return class_data_; }
   EncodedArrayItem* StaticValues() { return static_values_; }
-
-  MethodItem* GenerateMethodItem(Header& header, ClassDataItemIterator& cdii);
 
   void Accept(AbstractDispatcher* dispatch) { dispatch->Dispatch(this); }
 
@@ -865,7 +990,7 @@ class TryItem : public Item {
  public:
   TryItem(uint32_t start_addr, uint16_t insn_count, const CatchHandler* handlers)
       : start_addr_(start_addr), insn_count_(insn_count), handlers_(handlers) { }
-  ~TryItem() OVERRIDE { }
+  ~TryItem() override { }
 
   uint32_t StartAddr() const { return start_addr_; }
   uint16_t InsnCount() const { return insn_count_; }
@@ -885,25 +1010,25 @@ using TryItemVector = std::vector<std::unique_ptr<const TryItem>>;
 
 class CodeFixups {
  public:
-  CodeFixups(std::vector<TypeId*>* type_ids,
-             std::vector<StringId*>* string_ids,
-             std::vector<MethodId*>* method_ids,
-             std::vector<FieldId*>* field_ids)
-      : type_ids_(type_ids),
-        string_ids_(string_ids),
-        method_ids_(method_ids),
-        field_ids_(field_ids) { }
+  CodeFixups(std::vector<TypeId*> type_ids,
+             std::vector<StringId*> string_ids,
+             std::vector<MethodId*> method_ids,
+             std::vector<FieldId*> field_ids)
+      : type_ids_(std::move(type_ids)),
+        string_ids_(std::move(string_ids)),
+        method_ids_(std::move(method_ids)),
+        field_ids_(std::move(field_ids)) { }
 
-  std::vector<TypeId*>* TypeIds() const { return type_ids_.get(); }
-  std::vector<StringId*>* StringIds() const { return string_ids_.get(); }
-  std::vector<MethodId*>* MethodIds() const { return method_ids_.get(); }
-  std::vector<FieldId*>* FieldIds() const { return field_ids_.get(); }
+  const std::vector<TypeId*>& TypeIds() const { return type_ids_; }
+  const std::vector<StringId*>& StringIds() const { return string_ids_; }
+  const std::vector<MethodId*>& MethodIds() const { return method_ids_; }
+  const std::vector<FieldId*>& FieldIds() const { return field_ids_; }
 
  private:
-  std::unique_ptr<std::vector<TypeId*>> type_ids_;
-  std::unique_ptr<std::vector<StringId*>> string_ids_;
-  std::unique_ptr<std::vector<MethodId*>> method_ids_;
-  std::unique_ptr<std::vector<FieldId*>> field_ids_;
+  std::vector<TypeId*> type_ids_;
+  std::vector<StringId*> string_ids_;
+  std::vector<MethodId*> method_ids_;
+  std::vector<FieldId*> field_ids_;
 
   DISALLOW_COPY_AND_ASSIGN(CodeFixups);
 };
@@ -927,7 +1052,7 @@ class CodeItem : public Item {
         tries_(tries),
         handlers_(handlers) { }
 
-  ~CodeItem() OVERRIDE { }
+  ~CodeItem() override { }
 
   uint16_t RegistersSize() const { return registers_size_; }
   uint16_t InsSize() const { return ins_size_; }
@@ -944,6 +1069,11 @@ class CodeItem : public Item {
 
   void Accept(AbstractDispatcher* dispatch) { dispatch->Dispatch(this); }
 
+  IterationRange<DexInstructionIterator> Instructions() const {
+    return MakeIterationRange(DexInstructionIterator(Insns(), 0u),
+                              DexInstructionIterator(Insns(), InsnsSize()));
+  }
+
  private:
   uint16_t registers_size_;
   uint16_t ins_size_;
@@ -958,39 +1088,6 @@ class CodeItem : public Item {
   DISALLOW_COPY_AND_ASSIGN(CodeItem);
 };
 
-struct PositionInfo {
-  PositionInfo(uint32_t address, uint32_t line) : address_(address), line_(line) { }
-
-  uint32_t address_;
-  uint32_t line_;
-};
-
-using PositionInfoVector = std::vector<std::unique_ptr<PositionInfo>>;
-
-struct LocalInfo {
-  LocalInfo(const char* name,
-            const char* descriptor,
-            const char* signature,
-            uint32_t start_address,
-            uint32_t end_address,
-            uint16_t reg)
-      : name_(name),
-        descriptor_(descriptor),
-        signature_(signature),
-        start_address_(start_address),
-        end_address_(end_address),
-        reg_(reg) { }
-
-  std::string name_;
-  std::string descriptor_;
-  std::string signature_;
-  uint32_t start_address_;
-  uint32_t end_address_;
-  uint16_t reg_;
-};
-
-using LocalInfoVector = std::vector<std::unique_ptr<LocalInfo>>;
-
 class DebugInfoItem : public Item {
  public:
   DebugInfoItem(uint32_t debug_info_size, uint8_t* debug_info)
@@ -999,15 +1096,9 @@ class DebugInfoItem : public Item {
   uint32_t GetDebugInfoSize() const { return debug_info_size_; }
   uint8_t* GetDebugInfo() const { return debug_info_.get(); }
 
-  PositionInfoVector& GetPositionInfo() { return positions_; }
-  LocalInfoVector& GetLocalInfo() { return locals_; }
-
  private:
   uint32_t debug_info_size_;
   std::unique_ptr<uint8_t[]> debug_info_;
-
-  PositionInfoVector positions_;
-  LocalInfoVector locals_;
 
   DISALLOW_COPY_AND_ASSIGN(DebugInfoItem);
 };
@@ -1034,7 +1125,7 @@ class AnnotationSetItem : public Item {
   explicit AnnotationSetItem(std::vector<AnnotationItem*>* items) : items_(items) {
     size_ = sizeof(uint32_t) + items->size() * sizeof(uint32_t);
   }
-  ~AnnotationSetItem() OVERRIDE { }
+  ~AnnotationSetItem() override { }
 
   std::vector<AnnotationItem*>* GetItems() { return items_.get(); }
 
@@ -1051,7 +1142,7 @@ class AnnotationSetRefList : public Item {
   explicit AnnotationSetRefList(std::vector<AnnotationSetItem*>* items) : items_(items) {
     size_ = sizeof(uint32_t) + items->size() * sizeof(uint32_t);
   }
-  ~AnnotationSetRefList() OVERRIDE { }
+  ~AnnotationSetRefList() override { }
 
   std::vector<AnnotationSetItem*>* GetItems() { return items_.get(); }
 
@@ -1146,7 +1237,7 @@ class CallSiteId : public IndexedItem {
   explicit CallSiteId(EncodedArrayItem* call_site_item) : call_site_item_(call_site_item) {
     size_ = kCallSiteIdItemSize;
   }
-  ~CallSiteId() OVERRIDE { }
+  ~CallSiteId() override { }
 
   static size_t ItemSize() { return kCallSiteIdItemSize; }
 
@@ -1167,7 +1258,7 @@ class MethodHandleItem : public IndexedItem {
         field_or_method_id_(field_or_method_id) {
     size_ = kMethodHandleItemSize;
   }
-  ~MethodHandleItem() OVERRIDE { }
+  ~MethodHandleItem() override { }
 
   static size_t ItemSize() { return kMethodHandleItemSize; }
 
@@ -1181,6 +1272,49 @@ class MethodHandleItem : public IndexedItem {
   IndexedItem* field_or_method_id_;
 
   DISALLOW_COPY_AND_ASSIGN(MethodHandleItem);
+};
+
+using HiddenapiFlagsMap = SafeMap<const Item*, uint32_t>;
+
+class HiddenapiClassData : public IndexedItem {
+ public:
+  HiddenapiClassData(const ClassDef* class_def, std::unique_ptr<HiddenapiFlagsMap> flags)
+      : class_def_(class_def), flags_(std::move(flags)) { }
+  ~HiddenapiClassData() override { }
+
+  const ClassDef* GetClassDef() const { return class_def_; }
+
+  uint32_t GetFlags(const Item* field_or_method_item) const {
+    return (flags_ == nullptr) ? 0u : flags_->Get(field_or_method_item);
+  }
+
+  static uint32_t GetFlags(Header* header, ClassDef* class_def, const Item* field_or_method_item) {
+    DCHECK(header != nullptr);
+    DCHECK(class_def != nullptr);
+    return (header->HiddenapiClassDatas().Empty())
+        ? 0u
+        : header->HiddenapiClassDatas()[class_def->GetIndex()]->GetFlags(field_or_method_item);
+  }
+
+  uint32_t ItemSize() const {
+    uint32_t size = 0u;
+    bool has_non_zero_entries = false;
+    if (flags_ != nullptr) {
+      for (const auto& entry : *flags_) {
+        size += UnsignedLeb128Size(entry.second);
+        has_non_zero_entries |= (entry.second != 0u);
+      }
+    }
+    return has_non_zero_entries ? size : 0u;
+  }
+
+  void Accept(AbstractDispatcher* dispatch) { dispatch->Dispatch(this); }
+
+ private:
+  const ClassDef* class_def_;
+  std::unique_ptr<HiddenapiFlagsMap> flags_;
+
+  DISALLOW_COPY_AND_ASSIGN(HiddenapiClassData);
 };
 
 // TODO(sehr): implement MapList.

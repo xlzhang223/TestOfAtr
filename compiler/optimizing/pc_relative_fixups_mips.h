@@ -29,12 +29,12 @@ namespace mips {
 class PcRelativeFixups : public HOptimization {
  public:
   PcRelativeFixups(HGraph* graph, CodeGenerator* codegen, OptimizingCompilerStats* stats)
-      : HOptimization(graph, "pc_relative_fixups_mips", stats),
+      : HOptimization(graph, kPcRelativeFixupsMipsPassName, stats),
         codegen_(codegen) {}
 
   static constexpr const char* kPcRelativeFixupsMipsPassName = "pc_relative_fixups_mips";
 
-  void Run() OVERRIDE;
+  bool Run() override;
 
  private:
   CodeGenerator* codegen_;

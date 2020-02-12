@@ -27,13 +27,11 @@ public class Main {
   //
 
   /// CHECK-START: void Main.add(double) loop_optimization (before)
-  /// CHECK-DAG: Phi      loop:<<Loop:B\d+>> outer_loop:none
-  /// CHECK-DAG: ArrayGet loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: ArrayGet loop:<<Loop:B\d+>> outer_loop:none
   /// CHECK-DAG: ArraySet loop:<<Loop>>      outer_loop:none
   //
-  /// CHECK-START-ARM64: void Main.add(double) loop_optimization (after)
-  /// CHECK-DAG: Phi      loop:<<Loop:B\d+>> outer_loop:none
-  /// CHECK-DAG: VecLoad  loop:<<Loop>>      outer_loop:none
+  /// CHECK-START-{ARM64,MIPS64}: void Main.add(double) loop_optimization (after)
+  /// CHECK-DAG: VecLoad  loop:<<Loop:B\d+>> outer_loop:none
   /// CHECK-DAG: VecAdd   loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG: VecStore loop:<<Loop>>      outer_loop:none
   static void add(double x) {
@@ -42,13 +40,11 @@ public class Main {
   }
 
   /// CHECK-START: void Main.sub(double) loop_optimization (before)
-  /// CHECK-DAG: Phi      loop:<<Loop:B\d+>> outer_loop:none
-  /// CHECK-DAG: ArrayGet loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: ArrayGet loop:<<Loop:B\d+>> outer_loop:none
   /// CHECK-DAG: ArraySet loop:<<Loop>>      outer_loop:none
   //
-  /// CHECK-START-ARM64: void Main.sub(double) loop_optimization (after)
-  /// CHECK-DAG: Phi      loop:<<Loop:B\d+>> outer_loop:none
-  /// CHECK-DAG: VecLoad  loop:<<Loop>>      outer_loop:none
+  /// CHECK-START-{ARM64,MIPS64}: void Main.sub(double) loop_optimization (after)
+  /// CHECK-DAG: VecLoad  loop:<<Loop:B\d+>> outer_loop:none
   /// CHECK-DAG: VecSub   loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG: VecStore loop:<<Loop>>      outer_loop:none
   static void sub(double x) {
@@ -57,13 +53,11 @@ public class Main {
   }
 
   /// CHECK-START: void Main.mul(double) loop_optimization (before)
-  /// CHECK-DAG: Phi      loop:<<Loop:B\d+>> outer_loop:none
-  /// CHECK-DAG: ArrayGet loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: ArrayGet loop:<<Loop:B\d+>> outer_loop:none
   /// CHECK-DAG: ArraySet loop:<<Loop>>      outer_loop:none
   //
-  /// CHECK-START-ARM64: void Main.mul(double) loop_optimization (after)
-  /// CHECK-DAG: Phi      loop:<<Loop:B\d+>> outer_loop:none
-  /// CHECK-DAG: VecLoad  loop:<<Loop>>      outer_loop:none
+  /// CHECK-START-{ARM64,MIPS64}: void Main.mul(double) loop_optimization (after)
+  /// CHECK-DAG: VecLoad  loop:<<Loop:B\d+>> outer_loop:none
   /// CHECK-DAG: VecMul   loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG: VecStore loop:<<Loop>>      outer_loop:none
   static void mul(double x) {
@@ -72,13 +66,11 @@ public class Main {
   }
 
   /// CHECK-START: void Main.div(double) loop_optimization (before)
-  /// CHECK-DAG: Phi      loop:<<Loop:B\d+>> outer_loop:none
-  /// CHECK-DAG: ArrayGet loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: ArrayGet loop:<<Loop:B\d+>> outer_loop:none
   /// CHECK-DAG: ArraySet loop:<<Loop>>      outer_loop:none
   //
-  /// CHECK-START-ARM64: void Main.div(double) loop_optimization (after)
-  /// CHECK-DAG: Phi      loop:<<Loop:B\d+>> outer_loop:none
-  /// CHECK-DAG: VecLoad  loop:<<Loop>>      outer_loop:none
+  /// CHECK-START-{ARM64,MIPS64}: void Main.div(double) loop_optimization (after)
+  /// CHECK-DAG: VecLoad  loop:<<Loop:B\d+>> outer_loop:none
   /// CHECK-DAG: VecDiv   loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG: VecStore loop:<<Loop>>      outer_loop:none
   static void div(double x) {
@@ -87,13 +79,11 @@ public class Main {
   }
 
   /// CHECK-START: void Main.neg() loop_optimization (before)
-  /// CHECK-DAG: Phi      loop:<<Loop:B\d+>> outer_loop:none
-  /// CHECK-DAG: ArrayGet loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: ArrayGet loop:<<Loop:B\d+>> outer_loop:none
   /// CHECK-DAG: ArraySet loop:<<Loop>>      outer_loop:none
   //
-  /// CHECK-START-ARM64: void Main.neg() loop_optimization (after)
-  /// CHECK-DAG: Phi      loop:<<Loop:B\d+>> outer_loop:none
-  /// CHECK-DAG: VecLoad  loop:<<Loop>>      outer_loop:none
+  /// CHECK-START-{ARM64,MIPS64}: void Main.neg() loop_optimization (after)
+  /// CHECK-DAG: VecLoad  loop:<<Loop:B\d+>> outer_loop:none
   /// CHECK-DAG: VecNeg   loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG: VecStore loop:<<Loop>>      outer_loop:none
   static void neg() {
@@ -102,13 +92,11 @@ public class Main {
   }
 
   /// CHECK-START: void Main.abs() loop_optimization (before)
-  /// CHECK-DAG: Phi      loop:<<Loop:B\d+>> outer_loop:none
-  /// CHECK-DAG: ArrayGet loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: ArrayGet loop:<<Loop:B\d+>> outer_loop:none
   /// CHECK-DAG: ArraySet loop:<<Loop>>      outer_loop:none
   //
-  /// CHECK-START-ARM64: void Main.abs() loop_optimization (after)
-  /// CHECK-DAG: Phi      loop:<<Loop:B\d+>> outer_loop:none
-  /// CHECK-DAG: VecLoad  loop:<<Loop>>      outer_loop:none
+  /// CHECK-START-{ARM64,MIPS64}: void Main.abs() loop_optimization (after)
+  /// CHECK-DAG: VecLoad  loop:<<Loop:B\d+>> outer_loop:none
   /// CHECK-DAG: VecAbs   loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG: VecStore loop:<<Loop>>      outer_loop:none
   static void abs() {
@@ -117,13 +105,14 @@ public class Main {
   }
 
   /// CHECK-START: void Main.conv(long[]) loop_optimization (before)
-  /// CHECK-DAG: Phi      loop:<<Loop:B\d+>> outer_loop:none
-  /// CHECK-DAG: ArrayGet loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: ArrayGet loop:<<Loop:B\d+>> outer_loop:none
   /// CHECK-DAG: ArraySet loop:<<Loop>>      outer_loop:none
   //
-  /// CHECK-START-ARM64: void Main.conv(long[]) loop_optimization (after)
+  /// CHECK-START: void Main.conv(long[]) loop_optimization (after)
+  /// CHECK-NOT: VecLoad
+  /// CHECK-NOT: VecStore
   //
-  // TODO: fill in when supported
+  // TODO: fill in when long2double is supported
   static void conv(long[] b) {
     for (int i = 0; i < 128; i++)
       a[i] = b[i];

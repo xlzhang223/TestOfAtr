@@ -18,9 +18,11 @@
 #define ART_RUNTIME_BASE_TIMING_LOGGER_H_
 
 #include "base/histogram.h"
+#include "base/locks.h"
 #include "base/macros.h"
-#include "base/mutex.h"
+#include "base/time_utils.h"
 
+#include <memory>
 #include <set>
 #include <string>
 #include <vector>
@@ -33,17 +35,17 @@ class CumulativeLogger {
   explicit CumulativeLogger(const std::string& name);
   ~CumulativeLogger();
   void Start();
-  void End() REQUIRES(!lock_);
-  void Reset() REQUIRES(!lock_);
-  void Dump(std::ostream& os) const REQUIRES(!lock_);
+  void End() REQUIRES(!GetLock());
+  void Reset() REQUIRES(!GetLock());
+  void Dump(std::ostream& os) const REQUIRES(!GetLock());
   uint64_t GetTotalNs() const {
     return GetTotalTime() * kAdjust;
   }
   // Allow the name to be modified, particularly when the cumulative logger is a field within a
   // parent class that is unable to determine the "name" of a sub-class.
-  void SetName(const std::string& name) REQUIRES(!lock_);
-  void AddLogger(const TimingLogger& logger) REQUIRES(!lock_);
-  size_t GetIterations() const REQUIRES(!lock_);
+  void SetName(const std::string& name) REQUIRES(!GetLock());
+  void AddLogger(const TimingLogger& logger) REQUIRES(!GetLock());
+  size_t GetIterations() const REQUIRES(!GetLock());
 
  private:
   class HistogramComparator {
@@ -57,18 +59,22 @@ class CumulativeLogger {
   static constexpr size_t kDefaultBucketCount = 100;
   static constexpr size_t kInitialBucketSize = 50;  // 50 microseconds.
 
-  void AddPair(const std::string &label, uint64_t delta_time)
-      REQUIRES(lock_);
-  void DumpHistogram(std::ostream &os) const REQUIRES(lock_);
+  void AddPair(const std::string &label, uint64_t delta_time) REQUIRES(GetLock());
+  void DumpHistogram(std::ostream &os) const REQUIRES(GetLock());
   uint64_t GetTotalTime() const {
     return total_time_;
   }
+
+  Mutex* GetLock() const {
+    return lock_.get();
+  }
+
   static const uint64_t kAdjust = 1000;
-  std::set<Histogram<uint64_t>*, HistogramComparator> histograms_ GUARDED_BY(lock_);
+  std::set<Histogram<uint64_t>*, HistogramComparator> histograms_ GUARDED_BY(GetLock());
   std::string name_;
   const std::string lock_name_;
-  mutable Mutex lock_ DEFAULT_MUTEX_ACQUIRED_AFTER;
-  size_t iterations_ GUARDED_BY(lock_);
+  mutable std::unique_ptr<Mutex> lock_ DEFAULT_MUTEX_ACQUIRED_AFTER;
+  size_t iterations_ GUARDED_BY(GetLock());
   uint64_t total_time_;
 
   DISALLOW_COPY_AND_ASSIGN(CumulativeLogger);
@@ -79,9 +85,23 @@ class TimingLogger {
  public:
   static constexpr size_t kIndexNotFound = static_cast<size_t>(-1);
 
+  // Kind of timing we are going to do. We collect time at the nano second.
+  enum class TimingKind {
+    kMonotonic,
+    kThreadCpu,
+  };
+
   class Timing {
    public:
-    Timing(uint64_t time, const char* name) : time_(time), name_(name) {
+    Timing(TimingKind kind, const char* name) : name_(name) {
+       switch (kind) {
+        case TimingKind::kMonotonic:
+          time_ = NanoTime();
+          break;
+        case TimingKind::kThreadCpu:
+          time_ = ThreadCpuNanoTime();
+          break;
+       }
     }
     bool IsStartTiming() const {
       return !IsEndTiming();
@@ -131,7 +151,10 @@ class TimingLogger {
     friend class TimingLogger;
   };
 
-  TimingLogger(const char* name, bool precise, bool verbose);
+  TimingLogger(const char* name,
+               bool precise,
+               bool verbose,
+               TimingKind kind = TimingKind::kMonotonic);
   ~TimingLogger();
   // Verify that all open timings have related closed timings.
   void Verify();
@@ -187,6 +210,8 @@ class TimingLogger {
   const bool precise_;
   // Verbose logging.
   const bool verbose_;
+  // The kind of timing we want.
+  const TimingKind kind_;
   // Timing points that are either start or end points. For each starting point ret[i] = location
   // of end split associated with i. If it is and end split ret[i] = i.
   std::vector<Timing> timings_;

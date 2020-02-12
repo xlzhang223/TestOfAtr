@@ -19,8 +19,8 @@
 
 #include "base/arena_containers.h"
 #include "base/value_object.h"
+#include "data_type.h"
 #include "locations.h"
-#include "primitive.h"
 
 namespace art {
 
@@ -58,7 +58,7 @@ class ParallelMoveResolverWithSwap : public ParallelMoveResolver {
   virtual ~ParallelMoveResolverWithSwap() {}
 
   // Resolve a set of parallel moves, emitting assembler instructions.
-  void EmitNativeCode(HParallelMove* parallel_move) OVERRIDE;
+  void EmitNativeCode(HParallelMove* parallel_move) override;
 
  protected:
   class ScratchRegisterScope : public ValueObject {
@@ -133,7 +133,7 @@ class ParallelMoveResolverNoSwap : public ParallelMoveResolver {
   virtual ~ParallelMoveResolverNoSwap() {}
 
   // Resolve a set of parallel moves, emitting assembler instructions.
-  void EmitNativeCode(HParallelMove* parallel_move) OVERRIDE;
+  void EmitNativeCode(HParallelMove* parallel_move) override;
 
  protected:
   // Called at the beginning of EmitNativeCode(). A subclass may put some architecture dependent
@@ -177,7 +177,7 @@ class ParallelMoveResolverNoSwap : public ParallelMoveResolver {
 
   void UpdateMoveSource(Location from, Location to);
 
-  void AddPendingMove(Location source, Location destination, Primitive::Type type);
+  void AddPendingMove(Location source, Location destination, DataType::Type type);
 
   void DeletePendingMove(MoveOperands* move);
 

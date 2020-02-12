@@ -20,9 +20,12 @@
 #include "art_method.h"
 #include "code_generator_mips64.h"
 #include "entrypoints/quick/quick_entrypoints.h"
+#include "heap_poisoning.h"
 #include "intrinsics.h"
 #include "mirror/array-inl.h"
+#include "mirror/object_array-inl.h"
 #include "mirror/string.h"
+#include "scoped_thread_state_change-inl.h"
 #include "thread.h"
 #include "utils/mips64/assembler_mips64.h"
 #include "utils/mips64/constants_mips64.h"
@@ -32,7 +35,7 @@ namespace art {
 namespace mips64 {
 
 IntrinsicLocationsBuilderMIPS64::IntrinsicLocationsBuilderMIPS64(CodeGeneratorMIPS64* codegen)
-  : arena_(codegen->GetGraph()->GetArena()) {
+  : codegen_(codegen), allocator_(codegen->GetGraph()->GetAllocator()) {
 }
 
 Mips64Assembler* IntrinsicCodeGeneratorMIPS64::GetAssembler() {
@@ -40,22 +43,26 @@ Mips64Assembler* IntrinsicCodeGeneratorMIPS64::GetAssembler() {
 }
 
 ArenaAllocator* IntrinsicCodeGeneratorMIPS64::GetAllocator() {
-  return codegen_->GetGraph()->GetArena();
+  return codegen_->GetGraph()->GetAllocator();
+}
+
+inline bool IntrinsicCodeGeneratorMIPS64::HasMsa() const {
+  return codegen_->GetInstructionSetFeatures().HasMsa();
 }
 
 #define __ codegen->GetAssembler()->
 
 static void MoveFromReturnRegister(Location trg,
-                                   Primitive::Type type,
+                                   DataType::Type type,
                                    CodeGeneratorMIPS64* codegen) {
   if (!trg.IsValid()) {
-    DCHECK_EQ(type, Primitive::kPrimVoid);
+    DCHECK_EQ(type, DataType::Type::kVoid);
     return;
   }
 
-  DCHECK_NE(type, Primitive::kPrimVoid);
+  DCHECK_NE(type, DataType::Type::kVoid);
 
-  if (Primitive::IsIntegralType(type) || type == Primitive::kPrimNot) {
+  if (DataType::IsIntegralType(type) || type == DataType::Type::kReference) {
     GpuRegister trg_reg = trg.AsRegister<GpuRegister>();
     if (trg_reg != V0) {
       __ Move(V0, trg_reg);
@@ -63,7 +70,7 @@ static void MoveFromReturnRegister(Location trg,
   } else {
     FpuRegister trg_reg = trg.AsFpuRegister<FpuRegister>();
     if (trg_reg != F0) {
-      if (type == Primitive::kPrimFloat) {
+      if (type == DataType::Type::kFloat32) {
         __ MovS(F0, trg_reg);
       } else {
         __ MovD(F0, trg_reg);
@@ -90,7 +97,7 @@ class IntrinsicSlowPathMIPS64 : public SlowPathCodeMIPS64 {
   explicit IntrinsicSlowPathMIPS64(HInvoke* invoke)
      : SlowPathCodeMIPS64(invoke), invoke_(invoke) { }
 
-  void EmitNativeCode(CodeGenerator* codegen_in) OVERRIDE {
+  void EmitNativeCode(CodeGenerator* codegen_in) override {
     CodeGeneratorMIPS64* codegen = down_cast<CodeGeneratorMIPS64*>(codegen_in);
 
     __ Bind(GetEntryLabel());
@@ -100,12 +107,12 @@ class IntrinsicSlowPathMIPS64 : public SlowPathCodeMIPS64 {
     MoveArguments(invoke_, codegen);
 
     if (invoke_->IsInvokeStaticOrDirect()) {
-      codegen->GenerateStaticOrDirectCall(invoke_->AsInvokeStaticOrDirect(),
-                                          Location::RegisterLocation(A0));
+      codegen->GenerateStaticOrDirectCall(
+          invoke_->AsInvokeStaticOrDirect(), Location::RegisterLocation(A0), this);
     } else {
-      codegen->GenerateVirtualCall(invoke_->AsInvokeVirtual(), Location::RegisterLocation(A0));
+      codegen->GenerateVirtualCall(
+          invoke_->AsInvokeVirtual(), Location::RegisterLocation(A0), this);
     }
-    codegen->RecordPcInfo(invoke_, invoke_->GetDexPc(), this);
 
     // Copy the result back to the expected output.
     Location out = invoke_->GetLocations()->Out();
@@ -119,7 +126,7 @@ class IntrinsicSlowPathMIPS64 : public SlowPathCodeMIPS64 {
     __ Bc(GetExitLabel());
   }
 
-  const char* GetDescription() const OVERRIDE { return "IntrinsicSlowPathMIPS64"; }
+  const char* GetDescription() const override { return "IntrinsicSlowPathMIPS64"; }
 
  private:
   // The instruction where this slow path is happening.
@@ -138,10 +145,9 @@ bool IntrinsicLocationsBuilderMIPS64::TryDispatch(HInvoke* invoke) {
 
 #define __ assembler->
 
-static void CreateFPToIntLocations(ArenaAllocator* arena, HInvoke* invoke) {
-  LocationSummary* locations = new (arena) LocationSummary(invoke,
-                                                           LocationSummary::kNoCall,
-                                                           kIntrinsified);
+static void CreateFPToIntLocations(ArenaAllocator* allocator, HInvoke* invoke) {
+  LocationSummary* locations =
+      new (allocator) LocationSummary(invoke, LocationSummary::kNoCall, kIntrinsified);
   locations->SetInAt(0, Location::RequiresFpuRegister());
   locations->SetOut(Location::RequiresRegister());
 }
@@ -159,26 +165,25 @@ static void MoveFPToInt(LocationSummary* locations, bool is64bit, Mips64Assemble
 
 // long java.lang.Double.doubleToRawLongBits(double)
 void IntrinsicLocationsBuilderMIPS64::VisitDoubleDoubleToRawLongBits(HInvoke* invoke) {
-  CreateFPToIntLocations(arena_, invoke);
+  CreateFPToIntLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitDoubleDoubleToRawLongBits(HInvoke* invoke) {
-  MoveFPToInt(invoke->GetLocations(), /* is64bit */ true, GetAssembler());
+  MoveFPToInt(invoke->GetLocations(), /* is64bit= */ true, GetAssembler());
 }
 
 // int java.lang.Float.floatToRawIntBits(float)
 void IntrinsicLocationsBuilderMIPS64::VisitFloatFloatToRawIntBits(HInvoke* invoke) {
-  CreateFPToIntLocations(arena_, invoke);
+  CreateFPToIntLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitFloatFloatToRawIntBits(HInvoke* invoke) {
-  MoveFPToInt(invoke->GetLocations(), /* is64bit */ false, GetAssembler());
+  MoveFPToInt(invoke->GetLocations(), /* is64bit= */ false, GetAssembler());
 }
 
-static void CreateIntToFPLocations(ArenaAllocator* arena, HInvoke* invoke) {
-  LocationSummary* locations = new (arena) LocationSummary(invoke,
-                                                           LocationSummary::kNoCall,
-                                                           kIntrinsified);
+static void CreateIntToFPLocations(ArenaAllocator* allocator, HInvoke* invoke) {
+  LocationSummary* locations =
+      new (allocator) LocationSummary(invoke, LocationSummary::kNoCall, kIntrinsified);
   locations->SetInAt(0, Location::RequiresRegister());
   locations->SetOut(Location::RequiresFpuRegister());
 }
@@ -196,46 +201,45 @@ static void MoveIntToFP(LocationSummary* locations, bool is64bit, Mips64Assemble
 
 // double java.lang.Double.longBitsToDouble(long)
 void IntrinsicLocationsBuilderMIPS64::VisitDoubleLongBitsToDouble(HInvoke* invoke) {
-  CreateIntToFPLocations(arena_, invoke);
+  CreateIntToFPLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitDoubleLongBitsToDouble(HInvoke* invoke) {
-  MoveIntToFP(invoke->GetLocations(), /* is64bit */ true, GetAssembler());
+  MoveIntToFP(invoke->GetLocations(), /* is64bit= */ true, GetAssembler());
 }
 
 // float java.lang.Float.intBitsToFloat(int)
 void IntrinsicLocationsBuilderMIPS64::VisitFloatIntBitsToFloat(HInvoke* invoke) {
-  CreateIntToFPLocations(arena_, invoke);
+  CreateIntToFPLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitFloatIntBitsToFloat(HInvoke* invoke) {
-  MoveIntToFP(invoke->GetLocations(), /* is64bit */ false, GetAssembler());
+  MoveIntToFP(invoke->GetLocations(), /* is64bit= */ false, GetAssembler());
 }
 
-static void CreateIntToIntLocations(ArenaAllocator* arena, HInvoke* invoke) {
-  LocationSummary* locations = new (arena) LocationSummary(invoke,
-                                                           LocationSummary::kNoCall,
-                                                           kIntrinsified);
+static void CreateIntToIntLocations(ArenaAllocator* allocator, HInvoke* invoke) {
+  LocationSummary* locations =
+      new (allocator) LocationSummary(invoke, LocationSummary::kNoCall, kIntrinsified);
   locations->SetInAt(0, Location::RequiresRegister());
   locations->SetOut(Location::RequiresRegister(), Location::kNoOutputOverlap);
 }
 
 static void GenReverseBytes(LocationSummary* locations,
-                            Primitive::Type type,
+                            DataType::Type type,
                             Mips64Assembler* assembler) {
   GpuRegister in  = locations->InAt(0).AsRegister<GpuRegister>();
   GpuRegister out = locations->Out().AsRegister<GpuRegister>();
 
   switch (type) {
-    case Primitive::kPrimShort:
+    case DataType::Type::kInt16:
       __ Dsbh(out, in);
       __ Seh(out, out);
       break;
-    case Primitive::kPrimInt:
+    case DataType::Type::kInt32:
       __ Rotr(out, in, 16);
       __ Wsbh(out, out);
       break;
-    case Primitive::kPrimLong:
+    case DataType::Type::kInt64:
       __ Dsbh(out, in);
       __ Dshd(out, out);
       break;
@@ -247,29 +251,29 @@ static void GenReverseBytes(LocationSummary* locations,
 
 // int java.lang.Integer.reverseBytes(int)
 void IntrinsicLocationsBuilderMIPS64::VisitIntegerReverseBytes(HInvoke* invoke) {
-  CreateIntToIntLocations(arena_, invoke);
+  CreateIntToIntLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitIntegerReverseBytes(HInvoke* invoke) {
-  GenReverseBytes(invoke->GetLocations(), Primitive::kPrimInt, GetAssembler());
+  GenReverseBytes(invoke->GetLocations(), DataType::Type::kInt32, GetAssembler());
 }
 
 // long java.lang.Long.reverseBytes(long)
 void IntrinsicLocationsBuilderMIPS64::VisitLongReverseBytes(HInvoke* invoke) {
-  CreateIntToIntLocations(arena_, invoke);
+  CreateIntToIntLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitLongReverseBytes(HInvoke* invoke) {
-  GenReverseBytes(invoke->GetLocations(), Primitive::kPrimLong, GetAssembler());
+  GenReverseBytes(invoke->GetLocations(), DataType::Type::kInt64, GetAssembler());
 }
 
 // short java.lang.Short.reverseBytes(short)
 void IntrinsicLocationsBuilderMIPS64::VisitShortReverseBytes(HInvoke* invoke) {
-  CreateIntToIntLocations(arena_, invoke);
+  CreateIntToIntLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitShortReverseBytes(HInvoke* invoke) {
-  GenReverseBytes(invoke->GetLocations(), Primitive::kPrimShort, GetAssembler());
+  GenReverseBytes(invoke->GetLocations(), DataType::Type::kInt16, GetAssembler());
 }
 
 static void GenNumberOfLeadingZeroes(LocationSummary* locations,
@@ -287,20 +291,20 @@ static void GenNumberOfLeadingZeroes(LocationSummary* locations,
 
 // int java.lang.Integer.numberOfLeadingZeros(int i)
 void IntrinsicLocationsBuilderMIPS64::VisitIntegerNumberOfLeadingZeros(HInvoke* invoke) {
-  CreateIntToIntLocations(arena_, invoke);
+  CreateIntToIntLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitIntegerNumberOfLeadingZeros(HInvoke* invoke) {
-  GenNumberOfLeadingZeroes(invoke->GetLocations(), /* is64bit */ false, GetAssembler());
+  GenNumberOfLeadingZeroes(invoke->GetLocations(), /* is64bit= */ false, GetAssembler());
 }
 
 // int java.lang.Long.numberOfLeadingZeros(long i)
 void IntrinsicLocationsBuilderMIPS64::VisitLongNumberOfLeadingZeros(HInvoke* invoke) {
-  CreateIntToIntLocations(arena_, invoke);
+  CreateIntToIntLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitLongNumberOfLeadingZeros(HInvoke* invoke) {
-  GenNumberOfLeadingZeroes(invoke->GetLocations(), /* is64bit */ true, GetAssembler());
+  GenNumberOfLeadingZeroes(invoke->GetLocations(), /* is64bit= */ true, GetAssembler());
 }
 
 static void GenNumberOfTrailingZeroes(LocationSummary* locations,
@@ -324,31 +328,31 @@ static void GenNumberOfTrailingZeroes(LocationSummary* locations,
 
 // int java.lang.Integer.numberOfTrailingZeros(int i)
 void IntrinsicLocationsBuilderMIPS64::VisitIntegerNumberOfTrailingZeros(HInvoke* invoke) {
-  CreateIntToIntLocations(arena_, invoke);
+  CreateIntToIntLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitIntegerNumberOfTrailingZeros(HInvoke* invoke) {
-  GenNumberOfTrailingZeroes(invoke->GetLocations(), /* is64bit */ false, GetAssembler());
+  GenNumberOfTrailingZeroes(invoke->GetLocations(), /* is64bit= */ false, GetAssembler());
 }
 
 // int java.lang.Long.numberOfTrailingZeros(long i)
 void IntrinsicLocationsBuilderMIPS64::VisitLongNumberOfTrailingZeros(HInvoke* invoke) {
-  CreateIntToIntLocations(arena_, invoke);
+  CreateIntToIntLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitLongNumberOfTrailingZeros(HInvoke* invoke) {
-  GenNumberOfTrailingZeroes(invoke->GetLocations(), /* is64bit */ true, GetAssembler());
+  GenNumberOfTrailingZeroes(invoke->GetLocations(), /* is64bit= */ true, GetAssembler());
 }
 
 static void GenReverse(LocationSummary* locations,
-                       Primitive::Type type,
+                       DataType::Type type,
                        Mips64Assembler* assembler) {
-  DCHECK(type == Primitive::kPrimInt || type == Primitive::kPrimLong);
+  DCHECK(type == DataType::Type::kInt32 || type == DataType::Type::kInt64);
 
   GpuRegister in  = locations->InAt(0).AsRegister<GpuRegister>();
   GpuRegister out = locations->Out().AsRegister<GpuRegister>();
 
-  if (type == Primitive::kPrimInt) {
+  if (type == DataType::Type::kInt32) {
     __ Rotr(out, in, 16);
     __ Wsbh(out, out);
     __ Bitswap(out, out);
@@ -361,37 +365,37 @@ static void GenReverse(LocationSummary* locations,
 
 // int java.lang.Integer.reverse(int)
 void IntrinsicLocationsBuilderMIPS64::VisitIntegerReverse(HInvoke* invoke) {
-  CreateIntToIntLocations(arena_, invoke);
+  CreateIntToIntLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitIntegerReverse(HInvoke* invoke) {
-  GenReverse(invoke->GetLocations(), Primitive::kPrimInt, GetAssembler());
+  GenReverse(invoke->GetLocations(), DataType::Type::kInt32, GetAssembler());
 }
 
 // long java.lang.Long.reverse(long)
 void IntrinsicLocationsBuilderMIPS64::VisitLongReverse(HInvoke* invoke) {
-  CreateIntToIntLocations(arena_, invoke);
+  CreateIntToIntLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitLongReverse(HInvoke* invoke) {
-  GenReverse(invoke->GetLocations(), Primitive::kPrimLong, GetAssembler());
+  GenReverse(invoke->GetLocations(), DataType::Type::kInt64, GetAssembler());
 }
 
-static void CreateFPToFPLocations(ArenaAllocator* arena, HInvoke* invoke) {
-  LocationSummary* locations = new (arena) LocationSummary(invoke,
-                                                           LocationSummary::kNoCall,
-                                                           kIntrinsified);
+static void CreateFPToFPLocations(ArenaAllocator* allocator, HInvoke* invoke) {
+  LocationSummary* locations =
+      new (allocator) LocationSummary(invoke, LocationSummary::kNoCall, kIntrinsified);
   locations->SetInAt(0, Location::RequiresFpuRegister());
   locations->SetOut(Location::RequiresFpuRegister(), Location::kNoOutputOverlap);
 }
 
 static void GenBitCount(LocationSummary* locations,
-                        const Primitive::Type type,
+                        const DataType::Type type,
+                        const bool hasMsa,
                         Mips64Assembler* assembler) {
   GpuRegister out = locations->Out().AsRegister<GpuRegister>();
   GpuRegister in = locations->InAt(0).AsRegister<GpuRegister>();
 
-  DCHECK(type == Primitive::kPrimInt || type == Primitive::kPrimLong);
+  DCHECK(type == DataType::Type::kInt32 || type == DataType::Type::kInt64);
 
   // https://graphics.stanford.edu/~seander/bithacks.html#CountBitsSetParallel
   //
@@ -415,352 +419,76 @@ static void GenBitCount(LocationSummary* locations,
   // bits are set but the algorithm here attempts to minimize the total
   // number of instructions executed even when a large number of bits
   // are set.
-
-  if (type == Primitive::kPrimInt) {
-    __ Srl(TMP, in, 1);
-    __ LoadConst32(AT, 0x55555555);
-    __ And(TMP, TMP, AT);
-    __ Subu(TMP, in, TMP);
-    __ LoadConst32(AT, 0x33333333);
-    __ And(out, TMP, AT);
-    __ Srl(TMP, TMP, 2);
-    __ And(TMP, TMP, AT);
-    __ Addu(TMP, out, TMP);
-    __ Srl(out, TMP, 4);
-    __ Addu(out, out, TMP);
-    __ LoadConst32(AT, 0x0F0F0F0F);
-    __ And(out, out, AT);
-    __ LoadConst32(TMP, 0x01010101);
-    __ MulR6(out, out, TMP);
-    __ Srl(out, out, 24);
-  } else if (type == Primitive::kPrimLong) {
-    __ Dsrl(TMP, in, 1);
-    __ LoadConst64(AT, 0x5555555555555555L);
-    __ And(TMP, TMP, AT);
-    __ Dsubu(TMP, in, TMP);
-    __ LoadConst64(AT, 0x3333333333333333L);
-    __ And(out, TMP, AT);
-    __ Dsrl(TMP, TMP, 2);
-    __ And(TMP, TMP, AT);
-    __ Daddu(TMP, out, TMP);
-    __ Dsrl(out, TMP, 4);
-    __ Daddu(out, out, TMP);
-    __ LoadConst64(AT, 0x0F0F0F0F0F0F0F0FL);
-    __ And(out, out, AT);
-    __ LoadConst64(TMP, 0x0101010101010101L);
-    __ Dmul(out, out, TMP);
-    __ Dsrl32(out, out, 24);
+  if (hasMsa) {
+    if (type == DataType::Type::kInt32) {
+      __ Mtc1(in, FTMP);
+      __ PcntW(static_cast<VectorRegister>(FTMP), static_cast<VectorRegister>(FTMP));
+      __ Mfc1(out, FTMP);
+    } else {
+      __ Dmtc1(in, FTMP);
+      __ PcntD(static_cast<VectorRegister>(FTMP), static_cast<VectorRegister>(FTMP));
+      __ Dmfc1(out, FTMP);
+    }
+  } else {
+    if (type == DataType::Type::kInt32) {
+      __ Srl(TMP, in, 1);
+      __ LoadConst32(AT, 0x55555555);
+      __ And(TMP, TMP, AT);
+      __ Subu(TMP, in, TMP);
+      __ LoadConst32(AT, 0x33333333);
+      __ And(out, TMP, AT);
+      __ Srl(TMP, TMP, 2);
+      __ And(TMP, TMP, AT);
+      __ Addu(TMP, out, TMP);
+      __ Srl(out, TMP, 4);
+      __ Addu(out, out, TMP);
+      __ LoadConst32(AT, 0x0F0F0F0F);
+      __ And(out, out, AT);
+      __ LoadConst32(TMP, 0x01010101);
+      __ MulR6(out, out, TMP);
+      __ Srl(out, out, 24);
+    } else {
+      __ Dsrl(TMP, in, 1);
+      __ LoadConst64(AT, 0x5555555555555555L);
+      __ And(TMP, TMP, AT);
+      __ Dsubu(TMP, in, TMP);
+      __ LoadConst64(AT, 0x3333333333333333L);
+      __ And(out, TMP, AT);
+      __ Dsrl(TMP, TMP, 2);
+      __ And(TMP, TMP, AT);
+      __ Daddu(TMP, out, TMP);
+      __ Dsrl(out, TMP, 4);
+      __ Daddu(out, out, TMP);
+      __ LoadConst64(AT, 0x0F0F0F0F0F0F0F0FL);
+      __ And(out, out, AT);
+      __ LoadConst64(TMP, 0x0101010101010101L);
+      __ Dmul(out, out, TMP);
+      __ Dsrl32(out, out, 24);
+    }
   }
 }
 
 // int java.lang.Integer.bitCount(int)
 void IntrinsicLocationsBuilderMIPS64::VisitIntegerBitCount(HInvoke* invoke) {
-  CreateIntToIntLocations(arena_, invoke);
+  CreateIntToIntLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitIntegerBitCount(HInvoke* invoke) {
-  GenBitCount(invoke->GetLocations(), Primitive::kPrimInt, GetAssembler());
+  GenBitCount(invoke->GetLocations(), DataType::Type::kInt32, HasMsa(), GetAssembler());
 }
 
 // int java.lang.Long.bitCount(long)
 void IntrinsicLocationsBuilderMIPS64::VisitLongBitCount(HInvoke* invoke) {
-  CreateIntToIntLocations(arena_, invoke);
+  CreateIntToIntLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitLongBitCount(HInvoke* invoke) {
-  GenBitCount(invoke->GetLocations(), Primitive::kPrimLong, GetAssembler());
-}
-
-static void MathAbsFP(LocationSummary* locations, bool is64bit, Mips64Assembler* assembler) {
-  FpuRegister in = locations->InAt(0).AsFpuRegister<FpuRegister>();
-  FpuRegister out = locations->Out().AsFpuRegister<FpuRegister>();
-
-  if (is64bit) {
-    __ AbsD(out, in);
-  } else {
-    __ AbsS(out, in);
-  }
-}
-
-// double java.lang.Math.abs(double)
-void IntrinsicLocationsBuilderMIPS64::VisitMathAbsDouble(HInvoke* invoke) {
-  CreateFPToFPLocations(arena_, invoke);
-}
-
-void IntrinsicCodeGeneratorMIPS64::VisitMathAbsDouble(HInvoke* invoke) {
-  MathAbsFP(invoke->GetLocations(), /* is64bit */ true, GetAssembler());
-}
-
-// float java.lang.Math.abs(float)
-void IntrinsicLocationsBuilderMIPS64::VisitMathAbsFloat(HInvoke* invoke) {
-  CreateFPToFPLocations(arena_, invoke);
-}
-
-void IntrinsicCodeGeneratorMIPS64::VisitMathAbsFloat(HInvoke* invoke) {
-  MathAbsFP(invoke->GetLocations(), /* is64bit */ false, GetAssembler());
-}
-
-static void CreateIntToInt(ArenaAllocator* arena, HInvoke* invoke) {
-  LocationSummary* locations = new (arena) LocationSummary(invoke,
-                                                           LocationSummary::kNoCall,
-                                                           kIntrinsified);
-  locations->SetInAt(0, Location::RequiresRegister());
-  locations->SetOut(Location::RequiresRegister(), Location::kNoOutputOverlap);
-}
-
-static void GenAbsInteger(LocationSummary* locations, bool is64bit, Mips64Assembler* assembler) {
-  GpuRegister in  = locations->InAt(0).AsRegister<GpuRegister>();
-  GpuRegister out = locations->Out().AsRegister<GpuRegister>();
-
-  if (is64bit) {
-    __ Dsra32(AT, in, 31);
-    __ Xor(out, in, AT);
-    __ Dsubu(out, out, AT);
-  } else {
-    __ Sra(AT, in, 31);
-    __ Xor(out, in, AT);
-    __ Subu(out, out, AT);
-  }
-}
-
-// int java.lang.Math.abs(int)
-void IntrinsicLocationsBuilderMIPS64::VisitMathAbsInt(HInvoke* invoke) {
-  CreateIntToInt(arena_, invoke);
-}
-
-void IntrinsicCodeGeneratorMIPS64::VisitMathAbsInt(HInvoke* invoke) {
-  GenAbsInteger(invoke->GetLocations(), /* is64bit */ false, GetAssembler());
-}
-
-// long java.lang.Math.abs(long)
-void IntrinsicLocationsBuilderMIPS64::VisitMathAbsLong(HInvoke* invoke) {
-  CreateIntToInt(arena_, invoke);
-}
-
-void IntrinsicCodeGeneratorMIPS64::VisitMathAbsLong(HInvoke* invoke) {
-  GenAbsInteger(invoke->GetLocations(), /* is64bit */ true, GetAssembler());
-}
-
-static void GenMinMaxFP(LocationSummary* locations,
-                        bool is_min,
-                        Primitive::Type type,
-                        Mips64Assembler* assembler) {
-  FpuRegister a = locations->InAt(0).AsFpuRegister<FpuRegister>();
-  FpuRegister b = locations->InAt(1).AsFpuRegister<FpuRegister>();
-  FpuRegister out = locations->Out().AsFpuRegister<FpuRegister>();
-
-  Mips64Label noNaNs;
-  Mips64Label done;
-  FpuRegister ftmp = ((out != a) && (out != b)) ? out : FTMP;
-
-  // When Java computes min/max it prefers a NaN to a number; the
-  // behavior of MIPSR6 is to prefer numbers to NaNs, i.e., if one of
-  // the inputs is a NaN and the other is a valid number, the MIPS
-  // instruction will return the number; Java wants the NaN value
-  // returned. This is why there is extra logic preceding the use of
-  // the MIPS min.fmt/max.fmt instructions. If either a, or b holds a
-  // NaN, return the NaN, otherwise return the min/max.
-  if (type == Primitive::kPrimDouble) {
-    __ CmpUnD(FTMP, a, b);
-    __ Bc1eqz(FTMP, &noNaNs);
-
-    // One of the inputs is a NaN
-    __ CmpEqD(ftmp, a, a);
-    // If a == a then b is the NaN, otherwise a is the NaN.
-    __ SelD(ftmp, a, b);
-
-    if (ftmp != out) {
-      __ MovD(out, ftmp);
-    }
-
-    __ Bc(&done);
-
-    __ Bind(&noNaNs);
-
-    if (is_min) {
-      __ MinD(out, a, b);
-    } else {
-      __ MaxD(out, a, b);
-    }
-  } else {
-    DCHECK_EQ(type, Primitive::kPrimFloat);
-    __ CmpUnS(FTMP, a, b);
-    __ Bc1eqz(FTMP, &noNaNs);
-
-    // One of the inputs is a NaN
-    __ CmpEqS(ftmp, a, a);
-    // If a == a then b is the NaN, otherwise a is the NaN.
-    __ SelS(ftmp, a, b);
-
-    if (ftmp != out) {
-      __ MovS(out, ftmp);
-    }
-
-    __ Bc(&done);
-
-    __ Bind(&noNaNs);
-
-    if (is_min) {
-      __ MinS(out, a, b);
-    } else {
-      __ MaxS(out, a, b);
-    }
-  }
-
-  __ Bind(&done);
-}
-
-static void CreateFPFPToFPLocations(ArenaAllocator* arena, HInvoke* invoke) {
-  LocationSummary* locations = new (arena) LocationSummary(invoke,
-                                                           LocationSummary::kNoCall,
-                                                           kIntrinsified);
-  locations->SetInAt(0, Location::RequiresFpuRegister());
-  locations->SetInAt(1, Location::RequiresFpuRegister());
-  locations->SetOut(Location::RequiresFpuRegister(), Location::kNoOutputOverlap);
-}
-
-// double java.lang.Math.min(double, double)
-void IntrinsicLocationsBuilderMIPS64::VisitMathMinDoubleDouble(HInvoke* invoke) {
-  CreateFPFPToFPLocations(arena_, invoke);
-}
-
-void IntrinsicCodeGeneratorMIPS64::VisitMathMinDoubleDouble(HInvoke* invoke) {
-  GenMinMaxFP(invoke->GetLocations(), /* is_min */ true, Primitive::kPrimDouble, GetAssembler());
-}
-
-// float java.lang.Math.min(float, float)
-void IntrinsicLocationsBuilderMIPS64::VisitMathMinFloatFloat(HInvoke* invoke) {
-  CreateFPFPToFPLocations(arena_, invoke);
-}
-
-void IntrinsicCodeGeneratorMIPS64::VisitMathMinFloatFloat(HInvoke* invoke) {
-  GenMinMaxFP(invoke->GetLocations(), /* is_min */ true, Primitive::kPrimFloat, GetAssembler());
-}
-
-// double java.lang.Math.max(double, double)
-void IntrinsicLocationsBuilderMIPS64::VisitMathMaxDoubleDouble(HInvoke* invoke) {
-  CreateFPFPToFPLocations(arena_, invoke);
-}
-
-void IntrinsicCodeGeneratorMIPS64::VisitMathMaxDoubleDouble(HInvoke* invoke) {
-  GenMinMaxFP(invoke->GetLocations(), /* is_min */ false, Primitive::kPrimDouble, GetAssembler());
-}
-
-// float java.lang.Math.max(float, float)
-void IntrinsicLocationsBuilderMIPS64::VisitMathMaxFloatFloat(HInvoke* invoke) {
-  CreateFPFPToFPLocations(arena_, invoke);
-}
-
-void IntrinsicCodeGeneratorMIPS64::VisitMathMaxFloatFloat(HInvoke* invoke) {
-  GenMinMaxFP(invoke->GetLocations(), /* is_min */ false, Primitive::kPrimFloat, GetAssembler());
-}
-
-static void GenMinMax(LocationSummary* locations,
-                      bool is_min,
-                      Mips64Assembler* assembler) {
-  GpuRegister lhs = locations->InAt(0).AsRegister<GpuRegister>();
-  GpuRegister rhs = locations->InAt(1).AsRegister<GpuRegister>();
-  GpuRegister out = locations->Out().AsRegister<GpuRegister>();
-
-  if (lhs == rhs) {
-    if (out != lhs) {
-      __ Move(out, lhs);
-    }
-  } else {
-    // Some architectures, such as ARM and MIPS (prior to r6), have a
-    // conditional move instruction which only changes the target
-    // (output) register if the condition is true (MIPS prior to r6 had
-    // MOVF, MOVT, and MOVZ). The SELEQZ and SELNEZ instructions always
-    // change the target (output) register.  If the condition is true the
-    // output register gets the contents of the "rs" register; otherwise,
-    // the output register is set to zero. One consequence of this is
-    // that to implement something like "rd = c==0 ? rs : rt" MIPS64r6
-    // needs to use a pair of SELEQZ/SELNEZ instructions.  After
-    // executing this pair of instructions one of the output registers
-    // from the pair will necessarily contain zero. Then the code ORs the
-    // output registers from the SELEQZ/SELNEZ instructions to get the
-    // final result.
-    //
-    // The initial test to see if the output register is same as the
-    // first input register is needed to make sure that value in the
-    // first input register isn't clobbered before we've finished
-    // computing the output value. The logic in the corresponding else
-    // clause performs the same task but makes sure the second input
-    // register isn't clobbered in the event that it's the same register
-    // as the output register; the else clause also handles the case
-    // where the output register is distinct from both the first, and the
-    // second input registers.
-    if (out == lhs) {
-      __ Slt(AT, rhs, lhs);
-      if (is_min) {
-        __ Seleqz(out, lhs, AT);
-        __ Selnez(AT, rhs, AT);
-      } else {
-        __ Selnez(out, lhs, AT);
-        __ Seleqz(AT, rhs, AT);
-      }
-    } else {
-      __ Slt(AT, lhs, rhs);
-      if (is_min) {
-        __ Seleqz(out, rhs, AT);
-        __ Selnez(AT, lhs, AT);
-      } else {
-        __ Selnez(out, rhs, AT);
-        __ Seleqz(AT, lhs, AT);
-      }
-    }
-    __ Or(out, out, AT);
-  }
-}
-
-static void CreateIntIntToIntLocations(ArenaAllocator* arena, HInvoke* invoke) {
-  LocationSummary* locations = new (arena) LocationSummary(invoke,
-                                                           LocationSummary::kNoCall,
-                                                           kIntrinsified);
-  locations->SetInAt(0, Location::RequiresRegister());
-  locations->SetInAt(1, Location::RequiresRegister());
-  locations->SetOut(Location::RequiresRegister(), Location::kNoOutputOverlap);
-}
-
-// int java.lang.Math.min(int, int)
-void IntrinsicLocationsBuilderMIPS64::VisitMathMinIntInt(HInvoke* invoke) {
-  CreateIntIntToIntLocations(arena_, invoke);
-}
-
-void IntrinsicCodeGeneratorMIPS64::VisitMathMinIntInt(HInvoke* invoke) {
-  GenMinMax(invoke->GetLocations(), /* is_min */ true, GetAssembler());
-}
-
-// long java.lang.Math.min(long, long)
-void IntrinsicLocationsBuilderMIPS64::VisitMathMinLongLong(HInvoke* invoke) {
-  CreateIntIntToIntLocations(arena_, invoke);
-}
-
-void IntrinsicCodeGeneratorMIPS64::VisitMathMinLongLong(HInvoke* invoke) {
-  GenMinMax(invoke->GetLocations(), /* is_min */ true, GetAssembler());
-}
-
-// int java.lang.Math.max(int, int)
-void IntrinsicLocationsBuilderMIPS64::VisitMathMaxIntInt(HInvoke* invoke) {
-  CreateIntIntToIntLocations(arena_, invoke);
-}
-
-void IntrinsicCodeGeneratorMIPS64::VisitMathMaxIntInt(HInvoke* invoke) {
-  GenMinMax(invoke->GetLocations(), /* is_min */ false, GetAssembler());
-}
-
-// long java.lang.Math.max(long, long)
-void IntrinsicLocationsBuilderMIPS64::VisitMathMaxLongLong(HInvoke* invoke) {
-  CreateIntIntToIntLocations(arena_, invoke);
-}
-
-void IntrinsicCodeGeneratorMIPS64::VisitMathMaxLongLong(HInvoke* invoke) {
-  GenMinMax(invoke->GetLocations(), /* is_min */ false, GetAssembler());
+  GenBitCount(invoke->GetLocations(), DataType::Type::kInt64, HasMsa(), GetAssembler());
 }
 
 // double java.lang.Math.sqrt(double)
 void IntrinsicLocationsBuilderMIPS64::VisitMathSqrt(HInvoke* invoke) {
-  CreateFPToFPLocations(arena_, invoke);
+  CreateFPToFPLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitMathSqrt(HInvoke* invoke) {
@@ -772,19 +500,18 @@ void IntrinsicCodeGeneratorMIPS64::VisitMathSqrt(HInvoke* invoke) {
   __ SqrtD(out, in);
 }
 
-static void CreateFPToFP(ArenaAllocator* arena,
+static void CreateFPToFP(ArenaAllocator* allocator,
                          HInvoke* invoke,
                          Location::OutputOverlap overlaps = Location::kOutputOverlap) {
-  LocationSummary* locations = new (arena) LocationSummary(invoke,
-                                                           LocationSummary::kNoCall,
-                                                           kIntrinsified);
+  LocationSummary* locations =
+      new (allocator) LocationSummary(invoke, LocationSummary::kNoCall, kIntrinsified);
   locations->SetInAt(0, Location::RequiresFpuRegister());
   locations->SetOut(Location::RequiresFpuRegister(), overlaps);
 }
 
 // double java.lang.Math.rint(double)
 void IntrinsicLocationsBuilderMIPS64::VisitMathRint(HInvoke* invoke) {
-  CreateFPToFP(arena_, invoke, Location::kNoOutputOverlap);
+  CreateFPToFP(allocator_, invoke, Location::kNoOutputOverlap);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitMathRint(HInvoke* invoke) {
@@ -798,7 +525,7 @@ void IntrinsicCodeGeneratorMIPS64::VisitMathRint(HInvoke* invoke) {
 
 // double java.lang.Math.floor(double)
 void IntrinsicLocationsBuilderMIPS64::VisitMathFloor(HInvoke* invoke) {
-  CreateFPToFP(arena_, invoke);
+  CreateFPToFP(allocator_, invoke);
 }
 
 const constexpr uint16_t kFPLeaveUnchanged = kPositiveZero |
@@ -875,72 +602,32 @@ void IntrinsicCodeGeneratorMIPS64::VisitMathFloor(HInvoke* invoke) {
 
 // double java.lang.Math.ceil(double)
 void IntrinsicLocationsBuilderMIPS64::VisitMathCeil(HInvoke* invoke) {
-  CreateFPToFP(arena_, invoke);
+  CreateFPToFP(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitMathCeil(HInvoke* invoke) {
   GenRoundingMode(invoke->GetLocations(), kCeil, GetAssembler());
 }
 
-static void GenRound(LocationSummary* locations, Mips64Assembler* assembler, Primitive::Type type) {
+static void GenRound(LocationSummary* locations, Mips64Assembler* assembler, DataType::Type type) {
   FpuRegister in = locations->InAt(0).AsFpuRegister<FpuRegister>();
   FpuRegister half = locations->GetTemp(0).AsFpuRegister<FpuRegister>();
   GpuRegister out = locations->Out().AsRegister<GpuRegister>();
 
-  DCHECK(type == Primitive::kPrimFloat || type == Primitive::kPrimDouble);
+  DCHECK(type == DataType::Type::kFloat32 || type == DataType::Type::kFloat64);
 
   Mips64Label done;
-  Mips64Label finite;
-  Mips64Label add;
 
-  // if (in.isNaN) {
-  //   return 0;
-  // }
-  //
   // out = floor(in);
   //
-  // /*
-  //  * TODO: Amend this code when emulator FCSR.NAN2008=1 bug is fixed.
-  //  *
-  //  * Starting with MIPSR6, which always sets FCSR.NAN2008=1, negative
-  //  * numbers which are too large to be represented in a 32-/64-bit
-  //  * signed integer will be processed by floor.X.Y to output
-  //  * Integer.MIN_VALUE/Long.MIN_VALUE, and will no longer be
-  //  * processed by this "if" statement.
-  //  *
-  //  * However, this bug in the 64-bit MIPS emulator causes the
-  //  * behavior of floor.X.Y to be the same as pre-R6 implementations
-  //  * of MIPS64.  When that bug is fixed this logic should be amended.
-  //  */
-  // if (out == MAX_VALUE) {
-  //   TMP = (in < 0.0) ? 1 : 0;
-  //   /*
-  //    * If TMP is 1, then adding it to out will wrap its value from
-  //    * MAX_VALUE to MIN_VALUE.
-  //    */
+  // if (out != MAX_VALUE && out != MIN_VALUE) {
+  //   TMP = ((in - out) >= 0.5) ? 1 : 0;
   //   return out += TMP;
   // }
-  //
-  // /*
-  //  * For negative values not handled by the previous "if" statement the
-  //  * test here will correctly set the value of TMP.
-  //  */
-  // TMP = ((in - out) >= 0.5) ? 1 : 0;
-  // return out += TMP;
-
-  // Test for NaN.
-  if (type == Primitive::kPrimDouble) {
-    __ CmpUnD(FTMP, in, in);
-  } else {
-    __ CmpUnS(FTMP, in, in);
-  }
-
-  // Return zero for NaN.
-  __ Move(out, ZERO);
-  __ Bc1nez(FTMP, &done);
+  // return out;
 
   // out = floor(in);
-  if (type == Primitive::kPrimDouble) {
+  if (type == DataType::Type::kFloat64) {
     __ FloorLD(FTMP, in);
     __ Dmfc1(out, FTMP);
   } else {
@@ -948,52 +635,49 @@ static void GenRound(LocationSummary* locations, Mips64Assembler* assembler, Pri
     __ Mfc1(out, FTMP);
   }
 
-  // TMP = (out = java.lang.Integer.MAX_VALUE) ? 1 : 0;
-  if (type == Primitive::kPrimDouble) {
-    __ LoadConst64(AT, std::numeric_limits<int64_t>::max());
+  // if (out != MAX_VALUE && out != MIN_VALUE)
+  if (type == DataType::Type::kFloat64) {
+    __ Daddiu(TMP, out, 1);
+    __ Dati(TMP, 0x8000);  // TMP = out + 0x8000 0000 0000 0001
+                           // or    out - 0x7FFF FFFF FFFF FFFF.
+                           // IOW, TMP = 1 if out = Long.MIN_VALUE
+                           // or   TMP = 0 if out = Long.MAX_VALUE.
+    __ Dsrl(TMP, TMP, 1);  // TMP = 0 if out = Long.MIN_VALUE
+                           //         or out = Long.MAX_VALUE.
+    __ Beqzc(TMP, &done);
   } else {
-    __ LoadConst32(AT, std::numeric_limits<int32_t>::max());
+    __ Addiu(TMP, out, 1);
+    __ Aui(TMP, TMP, 0x8000);  // TMP = out + 0x8000 0001
+                               // or    out - 0x7FFF FFFF.
+                               // IOW, TMP = 1 if out = Int.MIN_VALUE
+                               // or   TMP = 0 if out = Int.MAX_VALUE.
+    __ Srl(TMP, TMP, 1);       // TMP = 0 if out = Int.MIN_VALUE
+                               //         or out = Int.MAX_VALUE.
+    __ Beqzc(TMP, &done);
   }
-  __ Bnec(AT, out, &finite);
-
-  if (type == Primitive::kPrimDouble) {
-    __ Dmtc1(ZERO, FTMP);
-    __ CmpLtD(FTMP, in, FTMP);
-    __ Dmfc1(AT, FTMP);
-  } else {
-    __ Mtc1(ZERO, FTMP);
-    __ CmpLtS(FTMP, in, FTMP);
-    __ Mfc1(AT, FTMP);
-  }
-
-  __ Bc(&add);
-
-  __ Bind(&finite);
 
   // TMP = (0.5 <= (in - out)) ? -1 : 0;
-  if (type == Primitive::kPrimDouble) {
+  if (type == DataType::Type::kFloat64) {
     __ Cvtdl(FTMP, FTMP);  // Convert output of floor.l.d back to "double".
     __ LoadConst64(AT, bit_cast<int64_t, double>(0.5));
     __ SubD(FTMP, in, FTMP);
     __ Dmtc1(AT, half);
     __ CmpLeD(FTMP, half, FTMP);
-    __ Dmfc1(AT, FTMP);
+    __ Dmfc1(TMP, FTMP);
   } else {
     __ Cvtsw(FTMP, FTMP);  // Convert output of floor.w.s back to "float".
     __ LoadConst32(AT, bit_cast<int32_t, float>(0.5f));
     __ SubS(FTMP, in, FTMP);
     __ Mtc1(AT, half);
     __ CmpLeS(FTMP, half, FTMP);
-    __ Mfc1(AT, FTMP);
+    __ Mfc1(TMP, FTMP);
   }
 
-  __ Bind(&add);
-
   // Return out -= TMP.
-  if (type == Primitive::kPrimDouble) {
-    __ Dsubu(out, out, AT);
+  if (type == DataType::Type::kFloat64) {
+    __ Dsubu(out, out, TMP);
   } else {
-    __ Subu(out, out, AT);
+    __ Subu(out, out, TMP);
   }
 
   __ Bind(&done);
@@ -1001,35 +685,33 @@ static void GenRound(LocationSummary* locations, Mips64Assembler* assembler, Pri
 
 // int java.lang.Math.round(float)
 void IntrinsicLocationsBuilderMIPS64::VisitMathRoundFloat(HInvoke* invoke) {
-  LocationSummary* locations = new (arena_) LocationSummary(invoke,
-                                                           LocationSummary::kNoCall,
-                                                           kIntrinsified);
+  LocationSummary* locations =
+      new (allocator_) LocationSummary(invoke, LocationSummary::kNoCall, kIntrinsified);
   locations->SetInAt(0, Location::RequiresFpuRegister());
   locations->AddTemp(Location::RequiresFpuRegister());
   locations->SetOut(Location::RequiresRegister());
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitMathRoundFloat(HInvoke* invoke) {
-  GenRound(invoke->GetLocations(), GetAssembler(), Primitive::kPrimFloat);
+  GenRound(invoke->GetLocations(), GetAssembler(), DataType::Type::kFloat32);
 }
 
 // long java.lang.Math.round(double)
 void IntrinsicLocationsBuilderMIPS64::VisitMathRoundDouble(HInvoke* invoke) {
-  LocationSummary* locations = new (arena_) LocationSummary(invoke,
-                                                           LocationSummary::kNoCall,
-                                                           kIntrinsified);
+  LocationSummary* locations =
+      new (allocator_) LocationSummary(invoke, LocationSummary::kNoCall, kIntrinsified);
   locations->SetInAt(0, Location::RequiresFpuRegister());
   locations->AddTemp(Location::RequiresFpuRegister());
   locations->SetOut(Location::RequiresRegister());
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitMathRoundDouble(HInvoke* invoke) {
-  GenRound(invoke->GetLocations(), GetAssembler(), Primitive::kPrimDouble);
+  GenRound(invoke->GetLocations(), GetAssembler(), DataType::Type::kFloat64);
 }
 
 // byte libcore.io.Memory.peekByte(long address)
 void IntrinsicLocationsBuilderMIPS64::VisitMemoryPeekByte(HInvoke* invoke) {
-  CreateIntToIntLocations(arena_, invoke);
+  CreateIntToIntLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitMemoryPeekByte(HInvoke* invoke) {
@@ -1042,7 +724,7 @@ void IntrinsicCodeGeneratorMIPS64::VisitMemoryPeekByte(HInvoke* invoke) {
 
 // short libcore.io.Memory.peekShort(long address)
 void IntrinsicLocationsBuilderMIPS64::VisitMemoryPeekShortNative(HInvoke* invoke) {
-  CreateIntToIntLocations(arena_, invoke);
+  CreateIntToIntLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitMemoryPeekShortNative(HInvoke* invoke) {
@@ -1055,7 +737,7 @@ void IntrinsicCodeGeneratorMIPS64::VisitMemoryPeekShortNative(HInvoke* invoke) {
 
 // int libcore.io.Memory.peekInt(long address)
 void IntrinsicLocationsBuilderMIPS64::VisitMemoryPeekIntNative(HInvoke* invoke) {
-  CreateIntToIntLocations(arena_, invoke);
+  CreateIntToIntLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitMemoryPeekIntNative(HInvoke* invoke) {
@@ -1068,7 +750,7 @@ void IntrinsicCodeGeneratorMIPS64::VisitMemoryPeekIntNative(HInvoke* invoke) {
 
 // long libcore.io.Memory.peekLong(long address)
 void IntrinsicLocationsBuilderMIPS64::VisitMemoryPeekLongNative(HInvoke* invoke) {
-  CreateIntToIntLocations(arena_, invoke);
+  CreateIntToIntLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitMemoryPeekLongNative(HInvoke* invoke) {
@@ -1079,17 +761,16 @@ void IntrinsicCodeGeneratorMIPS64::VisitMemoryPeekLongNative(HInvoke* invoke) {
   __ Ld(out, adr, 0);
 }
 
-static void CreateIntIntToVoidLocations(ArenaAllocator* arena, HInvoke* invoke) {
-  LocationSummary* locations = new (arena) LocationSummary(invoke,
-                                                           LocationSummary::kNoCall,
-                                                           kIntrinsified);
+static void CreateIntIntToVoidLocations(ArenaAllocator* allocator, HInvoke* invoke) {
+  LocationSummary* locations =
+      new (allocator) LocationSummary(invoke, LocationSummary::kNoCall, kIntrinsified);
   locations->SetInAt(0, Location::RequiresRegister());
   locations->SetInAt(1, Location::RequiresRegister());
 }
 
 // void libcore.io.Memory.pokeByte(long address, byte value)
 void IntrinsicLocationsBuilderMIPS64::VisitMemoryPokeByte(HInvoke* invoke) {
-  CreateIntIntToVoidLocations(arena_, invoke);
+  CreateIntIntToVoidLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitMemoryPokeByte(HInvoke* invoke) {
@@ -1102,7 +783,7 @@ void IntrinsicCodeGeneratorMIPS64::VisitMemoryPokeByte(HInvoke* invoke) {
 
 // void libcore.io.Memory.pokeShort(long address, short value)
 void IntrinsicLocationsBuilderMIPS64::VisitMemoryPokeShortNative(HInvoke* invoke) {
-  CreateIntIntToVoidLocations(arena_, invoke);
+  CreateIntIntToVoidLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitMemoryPokeShortNative(HInvoke* invoke) {
@@ -1115,7 +796,7 @@ void IntrinsicCodeGeneratorMIPS64::VisitMemoryPokeShortNative(HInvoke* invoke) {
 
 // void libcore.io.Memory.pokeInt(long address, int value)
 void IntrinsicLocationsBuilderMIPS64::VisitMemoryPokeIntNative(HInvoke* invoke) {
-  CreateIntIntToVoidLocations(arena_, invoke);
+  CreateIntIntToVoidLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitMemoryPokeIntNative(HInvoke* invoke) {
@@ -1128,7 +809,7 @@ void IntrinsicCodeGeneratorMIPS64::VisitMemoryPokeIntNative(HInvoke* invoke) {
 
 // void libcore.io.Memory.pokeLong(long address, long value)
 void IntrinsicLocationsBuilderMIPS64::VisitMemoryPokeLongNative(HInvoke* invoke) {
-  CreateIntIntToVoidLocations(arena_, invoke);
+  CreateIntIntToVoidLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitMemoryPokeLongNative(HInvoke* invoke) {
@@ -1141,9 +822,8 @@ void IntrinsicCodeGeneratorMIPS64::VisitMemoryPokeLongNative(HInvoke* invoke) {
 
 // Thread java.lang.Thread.currentThread()
 void IntrinsicLocationsBuilderMIPS64::VisitThreadCurrentThread(HInvoke* invoke) {
-  LocationSummary* locations = new (arena_) LocationSummary(invoke,
-                                                            LocationSummary::kNoCall,
-                                                            kIntrinsified);
+  LocationSummary* locations =
+      new (allocator_) LocationSummary(invoke, LocationSummary::kNoCall, kIntrinsified);
   locations->SetOut(Location::RequiresRegister());
 }
 
@@ -1157,23 +837,27 @@ void IntrinsicCodeGeneratorMIPS64::VisitThreadCurrentThread(HInvoke* invoke) {
                     Thread::PeerOffset<kMips64PointerSize>().Int32Value());
 }
 
-static void CreateIntIntIntToIntLocations(ArenaAllocator* arena,
+static void CreateIntIntIntToIntLocations(ArenaAllocator* allocator,
                                           HInvoke* invoke,
-                                          Primitive::Type type) {
+                                          DataType::Type type) {
   bool can_call = kEmitCompilerReadBarrier &&
       (invoke->GetIntrinsic() == Intrinsics::kUnsafeGetObject ||
        invoke->GetIntrinsic() == Intrinsics::kUnsafeGetObjectVolatile);
-  LocationSummary* locations = new (arena) LocationSummary(invoke,
-                                                           (can_call
-                                                                ? LocationSummary::kCallOnSlowPath
-                                                                : LocationSummary::kNoCall),
-                                                           kIntrinsified);
+  LocationSummary* locations =
+      new (allocator) LocationSummary(invoke,
+                                      can_call
+                                          ? LocationSummary::kCallOnSlowPath
+                                          : LocationSummary::kNoCall,
+                                      kIntrinsified);
+  if (can_call && kUseBakerReadBarrier) {
+    locations->SetCustomSlowPathCallerSaves(RegisterSet::Empty());  // No caller-save registers.
+  }
   locations->SetInAt(0, Location::NoLocation());        // Unused receiver.
   locations->SetInAt(1, Location::RequiresRegister());
   locations->SetInAt(2, Location::RequiresRegister());
   locations->SetOut(Location::RequiresRegister(),
                     (can_call ? Location::kOutputOverlap : Location::kNoOutputOverlap));
-  if (type == Primitive::kPrimNot && kEmitCompilerReadBarrier && kUseBakerReadBarrier) {
+  if (type == DataType::Type::kReference && kEmitCompilerReadBarrier && kUseBakerReadBarrier) {
     // We need a temporary register for the read barrier marking slow
     // path in InstructionCodeGeneratorMIPS64::GenerateReferenceLoadWithBakerReadBarrier.
     locations->AddTemp(Location::RequiresRegister());
@@ -1183,13 +867,13 @@ static void CreateIntIntIntToIntLocations(ArenaAllocator* arena,
 // Note that the caller must supply a properly aligned memory address.
 // If they do not, the behavior is undefined (atomicity not guaranteed, exception may occur).
 static void GenUnsafeGet(HInvoke* invoke,
-                         Primitive::Type type,
+                         DataType::Type type,
                          bool is_volatile,
                          CodeGeneratorMIPS64* codegen) {
   LocationSummary* locations = invoke->GetLocations();
-  DCHECK((type == Primitive::kPrimInt) ||
-         (type == Primitive::kPrimLong) ||
-         (type == Primitive::kPrimNot)) << type;
+  DCHECK((type == DataType::Type::kInt32) ||
+         (type == DataType::Type::kInt64) ||
+         (type == DataType::Type::kReference)) << type;
   Mips64Assembler* assembler = codegen->GetAssembler();
   // Target register.
   Location trg_loc = locations->Out();
@@ -1201,37 +885,37 @@ static void GenUnsafeGet(HInvoke* invoke,
   Location offset_loc = locations->InAt(2);
   GpuRegister offset = offset_loc.AsRegister<GpuRegister>();
 
-  if (!(kEmitCompilerReadBarrier && kUseBakerReadBarrier && (type == Primitive::kPrimNot))) {
+  if (!(kEmitCompilerReadBarrier && kUseBakerReadBarrier && (type == DataType::Type::kReference))) {
     __ Daddu(TMP, base, offset);
   }
 
   switch (type) {
-    case Primitive::kPrimLong:
+    case DataType::Type::kInt64:
       __ Ld(trg, TMP, 0);
       if (is_volatile) {
         __ Sync(0);
       }
       break;
 
-    case Primitive::kPrimInt:
+    case DataType::Type::kInt32:
       __ Lw(trg, TMP, 0);
       if (is_volatile) {
         __ Sync(0);
       }
       break;
 
-    case Primitive::kPrimNot:
+    case DataType::Type::kReference:
       if (kEmitCompilerReadBarrier) {
         if (kUseBakerReadBarrier) {
           Location temp = locations->GetTemp(0);
           codegen->GenerateReferenceLoadWithBakerReadBarrier(invoke,
                                                              trg_loc,
                                                              base,
-                                                             /* offset */ 0U,
-                                                             /* index */ offset_loc,
+                                                             /* offset= */ 0U,
+                                                             /* index= */ offset_loc,
                                                              TIMES_1,
                                                              temp,
-                                                             /* needs_null_check */ false);
+                                                             /* needs_null_check= */ false);
           if (is_volatile) {
             __ Sync(0);
           }
@@ -1244,8 +928,8 @@ static void GenUnsafeGet(HInvoke* invoke,
                                            trg_loc,
                                            trg_loc,
                                            base_loc,
-                                           /* offset */ 0U,
-                                           /* index */ offset_loc);
+                                           /* offset= */ 0U,
+                                           /* index= */ offset_loc);
         }
       } else {
         __ Lwu(trg, TMP, 0);
@@ -1264,62 +948,61 @@ static void GenUnsafeGet(HInvoke* invoke,
 
 // int sun.misc.Unsafe.getInt(Object o, long offset)
 void IntrinsicLocationsBuilderMIPS64::VisitUnsafeGet(HInvoke* invoke) {
-  CreateIntIntIntToIntLocations(arena_, invoke, Primitive::kPrimInt);
+  CreateIntIntIntToIntLocations(allocator_, invoke, DataType::Type::kInt32);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitUnsafeGet(HInvoke* invoke) {
-  GenUnsafeGet(invoke, Primitive::kPrimInt, /* is_volatile */ false, codegen_);
+  GenUnsafeGet(invoke, DataType::Type::kInt32, /* is_volatile= */ false, codegen_);
 }
 
 // int sun.misc.Unsafe.getIntVolatile(Object o, long offset)
 void IntrinsicLocationsBuilderMIPS64::VisitUnsafeGetVolatile(HInvoke* invoke) {
-  CreateIntIntIntToIntLocations(arena_, invoke, Primitive::kPrimInt);
+  CreateIntIntIntToIntLocations(allocator_, invoke, DataType::Type::kInt32);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitUnsafeGetVolatile(HInvoke* invoke) {
-  GenUnsafeGet(invoke, Primitive::kPrimInt, /* is_volatile */ true, codegen_);
+  GenUnsafeGet(invoke, DataType::Type::kInt32, /* is_volatile= */ true, codegen_);
 }
 
 // long sun.misc.Unsafe.getLong(Object o, long offset)
 void IntrinsicLocationsBuilderMIPS64::VisitUnsafeGetLong(HInvoke* invoke) {
-  CreateIntIntIntToIntLocations(arena_, invoke, Primitive::kPrimLong);
+  CreateIntIntIntToIntLocations(allocator_, invoke, DataType::Type::kInt64);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitUnsafeGetLong(HInvoke* invoke) {
-  GenUnsafeGet(invoke, Primitive::kPrimLong, /* is_volatile */ false, codegen_);
+  GenUnsafeGet(invoke, DataType::Type::kInt64, /* is_volatile= */ false, codegen_);
 }
 
 // long sun.misc.Unsafe.getLongVolatile(Object o, long offset)
 void IntrinsicLocationsBuilderMIPS64::VisitUnsafeGetLongVolatile(HInvoke* invoke) {
-  CreateIntIntIntToIntLocations(arena_, invoke, Primitive::kPrimLong);
+  CreateIntIntIntToIntLocations(allocator_, invoke, DataType::Type::kInt64);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitUnsafeGetLongVolatile(HInvoke* invoke) {
-  GenUnsafeGet(invoke, Primitive::kPrimLong, /* is_volatile */ true, codegen_);
+  GenUnsafeGet(invoke, DataType::Type::kInt64, /* is_volatile= */ true, codegen_);
 }
 
 // Object sun.misc.Unsafe.getObject(Object o, long offset)
 void IntrinsicLocationsBuilderMIPS64::VisitUnsafeGetObject(HInvoke* invoke) {
-  CreateIntIntIntToIntLocations(arena_, invoke, Primitive::kPrimNot);
+  CreateIntIntIntToIntLocations(allocator_, invoke, DataType::Type::kReference);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitUnsafeGetObject(HInvoke* invoke) {
-  GenUnsafeGet(invoke, Primitive::kPrimNot, /* is_volatile */ false, codegen_);
+  GenUnsafeGet(invoke, DataType::Type::kReference, /* is_volatile= */ false, codegen_);
 }
 
 // Object sun.misc.Unsafe.getObjectVolatile(Object o, long offset)
 void IntrinsicLocationsBuilderMIPS64::VisitUnsafeGetObjectVolatile(HInvoke* invoke) {
-  CreateIntIntIntToIntLocations(arena_, invoke, Primitive::kPrimNot);
+  CreateIntIntIntToIntLocations(allocator_, invoke, DataType::Type::kReference);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitUnsafeGetObjectVolatile(HInvoke* invoke) {
-  GenUnsafeGet(invoke, Primitive::kPrimNot, /* is_volatile */ true, codegen_);
+  GenUnsafeGet(invoke, DataType::Type::kReference, /* is_volatile= */ true, codegen_);
 }
 
-static void CreateIntIntIntIntToVoid(ArenaAllocator* arena, HInvoke* invoke) {
-  LocationSummary* locations = new (arena) LocationSummary(invoke,
-                                                           LocationSummary::kNoCall,
-                                                           kIntrinsified);
+static void CreateIntIntIntIntToVoid(ArenaAllocator* allocator, HInvoke* invoke) {
+  LocationSummary* locations =
+      new (allocator) LocationSummary(invoke, LocationSummary::kNoCall, kIntrinsified);
   locations->SetInAt(0, Location::NoLocation());        // Unused receiver.
   locations->SetInAt(1, Location::RequiresRegister());
   locations->SetInAt(2, Location::RequiresRegister());
@@ -1329,13 +1012,13 @@ static void CreateIntIntIntIntToVoid(ArenaAllocator* arena, HInvoke* invoke) {
 // Note that the caller must supply a properly aligned memory address.
 // If they do not, the behavior is undefined (atomicity not guaranteed, exception may occur).
 static void GenUnsafePut(LocationSummary* locations,
-                         Primitive::Type type,
+                         DataType::Type type,
                          bool is_volatile,
                          bool is_ordered,
                          CodeGeneratorMIPS64* codegen) {
-  DCHECK((type == Primitive::kPrimInt) ||
-         (type == Primitive::kPrimLong) ||
-         (type == Primitive::kPrimNot));
+  DCHECK((type == DataType::Type::kInt32) ||
+         (type == DataType::Type::kInt64) ||
+         (type == DataType::Type::kReference));
   Mips64Assembler* assembler = codegen->GetAssembler();
   // Object pointer.
   GpuRegister base = locations->InAt(1).AsRegister<GpuRegister>();
@@ -1348,9 +1031,9 @@ static void GenUnsafePut(LocationSummary* locations,
     __ Sync(0);
   }
   switch (type) {
-    case Primitive::kPrimInt:
-    case Primitive::kPrimNot:
-      if (kPoisonHeapReferences && type == Primitive::kPrimNot) {
+    case DataType::Type::kInt32:
+    case DataType::Type::kReference:
+      if (kPoisonHeapReferences && type == DataType::Type::kReference) {
         __ PoisonHeapReference(AT, value);
         __ Sw(AT, TMP, 0);
       } else {
@@ -1358,7 +1041,7 @@ static void GenUnsafePut(LocationSummary* locations,
       }
       break;
 
-    case Primitive::kPrimLong:
+    case DataType::Type::kInt64:
       __ Sd(value, TMP, 0);
       break;
 
@@ -1370,7 +1053,7 @@ static void GenUnsafePut(LocationSummary* locations,
     __ Sync(0);
   }
 
-  if (type == Primitive::kPrimNot) {
+  if (type == DataType::Type::kReference) {
     bool value_can_be_null = true;  // TODO: Worth finding out this information?
     codegen->MarkGCCard(base, value, value_can_be_null);
   }
@@ -1378,130 +1061,131 @@ static void GenUnsafePut(LocationSummary* locations,
 
 // void sun.misc.Unsafe.putInt(Object o, long offset, int x)
 void IntrinsicLocationsBuilderMIPS64::VisitUnsafePut(HInvoke* invoke) {
-  CreateIntIntIntIntToVoid(arena_, invoke);
+  CreateIntIntIntIntToVoid(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitUnsafePut(HInvoke* invoke) {
   GenUnsafePut(invoke->GetLocations(),
-               Primitive::kPrimInt,
-               /* is_volatile */ false,
-               /* is_ordered */ false,
+               DataType::Type::kInt32,
+               /* is_volatile= */ false,
+               /* is_ordered= */ false,
                codegen_);
 }
 
 // void sun.misc.Unsafe.putOrderedInt(Object o, long offset, int x)
 void IntrinsicLocationsBuilderMIPS64::VisitUnsafePutOrdered(HInvoke* invoke) {
-  CreateIntIntIntIntToVoid(arena_, invoke);
+  CreateIntIntIntIntToVoid(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitUnsafePutOrdered(HInvoke* invoke) {
   GenUnsafePut(invoke->GetLocations(),
-               Primitive::kPrimInt,
-               /* is_volatile */ false,
-               /* is_ordered */ true,
+               DataType::Type::kInt32,
+               /* is_volatile= */ false,
+               /* is_ordered= */ true,
                codegen_);
 }
 
 // void sun.misc.Unsafe.putIntVolatile(Object o, long offset, int x)
 void IntrinsicLocationsBuilderMIPS64::VisitUnsafePutVolatile(HInvoke* invoke) {
-  CreateIntIntIntIntToVoid(arena_, invoke);
+  CreateIntIntIntIntToVoid(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitUnsafePutVolatile(HInvoke* invoke) {
   GenUnsafePut(invoke->GetLocations(),
-               Primitive::kPrimInt,
-               /* is_volatile */ true,
-               /* is_ordered */ false,
+               DataType::Type::kInt32,
+               /* is_volatile= */ true,
+               /* is_ordered= */ false,
                codegen_);
 }
 
 // void sun.misc.Unsafe.putObject(Object o, long offset, Object x)
 void IntrinsicLocationsBuilderMIPS64::VisitUnsafePutObject(HInvoke* invoke) {
-  CreateIntIntIntIntToVoid(arena_, invoke);
+  CreateIntIntIntIntToVoid(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitUnsafePutObject(HInvoke* invoke) {
   GenUnsafePut(invoke->GetLocations(),
-               Primitive::kPrimNot,
-               /* is_volatile */ false,
-               /* is_ordered */ false,
+               DataType::Type::kReference,
+               /* is_volatile= */ false,
+               /* is_ordered= */ false,
                codegen_);
 }
 
 // void sun.misc.Unsafe.putOrderedObject(Object o, long offset, Object x)
 void IntrinsicLocationsBuilderMIPS64::VisitUnsafePutObjectOrdered(HInvoke* invoke) {
-  CreateIntIntIntIntToVoid(arena_, invoke);
+  CreateIntIntIntIntToVoid(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitUnsafePutObjectOrdered(HInvoke* invoke) {
   GenUnsafePut(invoke->GetLocations(),
-               Primitive::kPrimNot,
-               /* is_volatile */ false,
-               /* is_ordered */ true,
+               DataType::Type::kReference,
+               /* is_volatile= */ false,
+               /* is_ordered= */ true,
                codegen_);
 }
 
 // void sun.misc.Unsafe.putObjectVolatile(Object o, long offset, Object x)
 void IntrinsicLocationsBuilderMIPS64::VisitUnsafePutObjectVolatile(HInvoke* invoke) {
-  CreateIntIntIntIntToVoid(arena_, invoke);
+  CreateIntIntIntIntToVoid(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitUnsafePutObjectVolatile(HInvoke* invoke) {
   GenUnsafePut(invoke->GetLocations(),
-               Primitive::kPrimNot,
-               /* is_volatile */ true,
-               /* is_ordered */ false,
+               DataType::Type::kReference,
+               /* is_volatile= */ true,
+               /* is_ordered= */ false,
                codegen_);
 }
 
 // void sun.misc.Unsafe.putLong(Object o, long offset, long x)
 void IntrinsicLocationsBuilderMIPS64::VisitUnsafePutLong(HInvoke* invoke) {
-  CreateIntIntIntIntToVoid(arena_, invoke);
+  CreateIntIntIntIntToVoid(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitUnsafePutLong(HInvoke* invoke) {
   GenUnsafePut(invoke->GetLocations(),
-               Primitive::kPrimLong,
-               /* is_volatile */ false,
-               /* is_ordered */ false,
+               DataType::Type::kInt64,
+               /* is_volatile= */ false,
+               /* is_ordered= */ false,
                codegen_);
 }
 
 // void sun.misc.Unsafe.putOrderedLong(Object o, long offset, long x)
 void IntrinsicLocationsBuilderMIPS64::VisitUnsafePutLongOrdered(HInvoke* invoke) {
-  CreateIntIntIntIntToVoid(arena_, invoke);
+  CreateIntIntIntIntToVoid(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitUnsafePutLongOrdered(HInvoke* invoke) {
   GenUnsafePut(invoke->GetLocations(),
-               Primitive::kPrimLong,
-               /* is_volatile */ false,
-               /* is_ordered */ true,
+               DataType::Type::kInt64,
+               /* is_volatile= */ false,
+               /* is_ordered= */ true,
                codegen_);
 }
 
 // void sun.misc.Unsafe.putLongVolatile(Object o, long offset, long x)
 void IntrinsicLocationsBuilderMIPS64::VisitUnsafePutLongVolatile(HInvoke* invoke) {
-  CreateIntIntIntIntToVoid(arena_, invoke);
+  CreateIntIntIntIntToVoid(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitUnsafePutLongVolatile(HInvoke* invoke) {
   GenUnsafePut(invoke->GetLocations(),
-               Primitive::kPrimLong,
-               /* is_volatile */ true,
-               /* is_ordered */ false,
+               DataType::Type::kInt64,
+               /* is_volatile= */ true,
+               /* is_ordered= */ false,
                codegen_);
 }
 
-static void CreateIntIntIntIntIntToIntPlusTemps(ArenaAllocator* arena, HInvoke* invoke) {
+static void CreateIntIntIntIntIntToIntPlusTemps(ArenaAllocator* allocator, HInvoke* invoke) {
   bool can_call = kEmitCompilerReadBarrier &&
       kUseBakerReadBarrier &&
       (invoke->GetIntrinsic() == Intrinsics::kUnsafeCASObject);
-  LocationSummary* locations = new (arena) LocationSummary(invoke,
-                                                           (can_call
-                                                                ? LocationSummary::kCallOnSlowPath
-                                                                : LocationSummary::kNoCall),
-                                                           kIntrinsified);
+  LocationSummary* locations =
+      new (allocator) LocationSummary(invoke,
+                                      can_call
+                                          ? LocationSummary::kCallOnSlowPath
+                                          : LocationSummary::kNoCall,
+                                      kIntrinsified);
   locations->SetInAt(0, Location::NoLocation());        // Unused receiver.
   locations->SetInAt(1, Location::RequiresRegister());
   locations->SetInAt(2, Location::RequiresRegister());
@@ -1517,7 +1201,7 @@ static void CreateIntIntIntIntIntToIntPlusTemps(ArenaAllocator* arena, HInvoke* 
 
 // Note that the caller must supply a properly aligned memory address.
 // If they do not, the behavior is undefined (atomicity not guaranteed, exception may occur).
-static void GenCas(HInvoke* invoke, Primitive::Type type, CodeGeneratorMIPS64* codegen) {
+static void GenCas(HInvoke* invoke, DataType::Type type, CodeGeneratorMIPS64* codegen) {
   Mips64Assembler* assembler = codegen->GetAssembler();
   LocationSummary* locations = invoke->GetLocations();
   GpuRegister base = locations->InAt(1).AsRegister<GpuRegister>();
@@ -1532,7 +1216,7 @@ static void GenCas(HInvoke* invoke, Primitive::Type type, CodeGeneratorMIPS64* c
   DCHECK_NE(offset, out);
   DCHECK_NE(expected, out);
 
-  if (type == Primitive::kPrimNot) {
+  if (type == DataType::Type::kReference) {
     // The only read barrier implementation supporting the
     // UnsafeCASObject intrinsic is the Baker-style read barriers.
     DCHECK(!kEmitCompilerReadBarrier || kUseBakerReadBarrier);
@@ -1550,19 +1234,19 @@ static void GenCas(HInvoke* invoke, Primitive::Type type, CodeGeneratorMIPS64* c
           invoke,
           out_loc,  // Unused, used only as a "temporary" within the read barrier.
           base,
-          /* offset */ 0u,
-          /* index */ offset_loc,
+          /* offset= */ 0u,
+          /* index= */ offset_loc,
           ScaleFactor::TIMES_1,
           temp,
-          /* needs_null_check */ false,
-          /* always_update_field */ true);
+          /* needs_null_check= */ false,
+          /* always_update_field= */ true);
     }
   }
 
   Mips64Label loop_head, exit_loop;
   __ Daddu(TMP, base, offset);
 
-  if (kPoisonHeapReferences && type == Primitive::kPrimNot) {
+  if (kPoisonHeapReferences && type == DataType::Type::kReference) {
     __ PoisonHeapReference(expected);
     // Do not poison `value`, if it is the same register as
     // `expected`, which has just been poisoned.
@@ -1578,13 +1262,13 @@ static void GenCas(HInvoke* invoke, Primitive::Type type, CodeGeneratorMIPS64* c
 
   __ Sync(0);
   __ Bind(&loop_head);
-  if (type == Primitive::kPrimLong) {
+  if (type == DataType::Type::kInt64) {
     __ Lld(out, TMP);
   } else {
     // Note: We will need a read barrier here, when read barrier
     // support is added to the MIPS64 back end.
     __ Ll(out, TMP);
-    if (type == Primitive::kPrimNot) {
+    if (type == DataType::Type::kReference) {
       // The LL instruction sign-extends the 32-bit value, but
       // 32-bit references must be zero-extended. Zero-extend `out`.
       __ Dext(out, out, 0, 32);
@@ -1598,7 +1282,7 @@ static void GenCas(HInvoke* invoke, Primitive::Type type, CodeGeneratorMIPS64* c
                         // in the case that the store fails.  Whether the
                         // store succeeds, or fails, it will load the
                         // correct Boolean value into the 'out' register.
-  if (type == Primitive::kPrimLong) {
+  if (type == DataType::Type::kInt64) {
     __ Scd(out, TMP);
   } else {
     __ Sc(out, TMP);
@@ -1608,7 +1292,7 @@ static void GenCas(HInvoke* invoke, Primitive::Type type, CodeGeneratorMIPS64* c
   __ Bind(&exit_loop);
   __ Sync(0);
 
-  if (kPoisonHeapReferences && type == Primitive::kPrimNot) {
+  if (kPoisonHeapReferences && type == DataType::Type::kReference) {
     __ UnpoisonHeapReference(expected);
     // Do not unpoison `value`, if it is the same register as
     // `expected`, which has just been unpoisoned.
@@ -1620,20 +1304,20 @@ static void GenCas(HInvoke* invoke, Primitive::Type type, CodeGeneratorMIPS64* c
 
 // boolean sun.misc.Unsafe.compareAndSwapInt(Object o, long offset, int expected, int x)
 void IntrinsicLocationsBuilderMIPS64::VisitUnsafeCASInt(HInvoke* invoke) {
-  CreateIntIntIntIntIntToIntPlusTemps(arena_, invoke);
+  CreateIntIntIntIntIntToIntPlusTemps(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitUnsafeCASInt(HInvoke* invoke) {
-  GenCas(invoke, Primitive::kPrimInt, codegen_);
+  GenCas(invoke, DataType::Type::kInt32, codegen_);
 }
 
 // boolean sun.misc.Unsafe.compareAndSwapLong(Object o, long offset, long expected, long x)
 void IntrinsicLocationsBuilderMIPS64::VisitUnsafeCASLong(HInvoke* invoke) {
-  CreateIntIntIntIntIntToIntPlusTemps(arena_, invoke);
+  CreateIntIntIntIntIntToIntPlusTemps(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitUnsafeCASLong(HInvoke* invoke) {
-  GenCas(invoke, Primitive::kPrimLong, codegen_);
+  GenCas(invoke, DataType::Type::kInt64, codegen_);
 }
 
 // boolean sun.misc.Unsafe.compareAndSwapObject(Object o, long offset, Object expected, Object x)
@@ -1644,7 +1328,7 @@ void IntrinsicLocationsBuilderMIPS64::VisitUnsafeCASObject(HInvoke* invoke) {
     return;
   }
 
-  CreateIntIntIntIntIntToIntPlusTemps(arena_, invoke);
+  CreateIntIntIntIntIntToIntPlusTemps(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitUnsafeCASObject(HInvoke* invoke) {
@@ -1652,18 +1336,17 @@ void IntrinsicCodeGeneratorMIPS64::VisitUnsafeCASObject(HInvoke* invoke) {
   // UnsafeCASObject intrinsic is the Baker-style read barriers.
   DCHECK(!kEmitCompilerReadBarrier || kUseBakerReadBarrier);
 
-  GenCas(invoke, Primitive::kPrimNot, codegen_);
+  GenCas(invoke, DataType::Type::kReference, codegen_);
 }
 
 // int java.lang.String.compareTo(String anotherString)
 void IntrinsicLocationsBuilderMIPS64::VisitStringCompareTo(HInvoke* invoke) {
-  LocationSummary* locations = new (arena_) LocationSummary(invoke,
-                                                            LocationSummary::kCallOnMainAndSlowPath,
-                                                            kIntrinsified);
+  LocationSummary* locations = new (allocator_) LocationSummary(
+      invoke, LocationSummary::kCallOnMainAndSlowPath, kIntrinsified);
   InvokeRuntimeCallingConvention calling_convention;
   locations->SetInAt(0, Location::RegisterLocation(calling_convention.GetRegisterAt(0)));
   locations->SetInAt(1, Location::RegisterLocation(calling_convention.GetRegisterAt(1)));
-  Location outLocation = calling_convention.GetReturnLocation(Primitive::kPrimInt);
+  Location outLocation = calling_convention.GetReturnLocation(DataType::Type::kInt32);
   locations->SetOut(Location::RegisterLocation(outLocation.AsRegister<GpuRegister>()));
 }
 
@@ -1675,7 +1358,8 @@ void IntrinsicCodeGeneratorMIPS64::VisitStringCompareTo(HInvoke* invoke) {
   DCHECK(!invoke->CanDoImplicitNullCheckOn(invoke->InputAt(0)));
 
   GpuRegister argument = locations->InAt(1).AsRegister<GpuRegister>();
-  SlowPathCodeMIPS64* slow_path = new (GetAllocator()) IntrinsicSlowPathMIPS64(invoke);
+  SlowPathCodeMIPS64* slow_path =
+      new (codegen_->GetScopedAllocator()) IntrinsicSlowPathMIPS64(invoke);
   codegen_->AddSlowPath(slow_path);
   __ Beqzc(argument, slow_path->GetEntryLabel());
 
@@ -1685,9 +1369,8 @@ void IntrinsicCodeGeneratorMIPS64::VisitStringCompareTo(HInvoke* invoke) {
 
 // boolean java.lang.String.equals(Object anObject)
 void IntrinsicLocationsBuilderMIPS64::VisitStringEquals(HInvoke* invoke) {
-  LocationSummary* locations = new (arena_) LocationSummary(invoke,
-                                                            LocationSummary::kNoCall,
-                                                            kIntrinsified);
+  LocationSummary* locations =
+      new (allocator_) LocationSummary(invoke, LocationSummary::kNoCall, kIntrinsified);
   locations->SetInAt(0, Location::RequiresRegister());
   locations->SetInAt(1, Location::RequiresRegister());
   locations->SetOut(Location::RequiresRegister());
@@ -1746,8 +1429,16 @@ void IntrinsicCodeGeneratorMIPS64::VisitStringEquals(HInvoke* invoke) {
     // All string objects must have the same type since String cannot be subclassed.
     // Receiver must be a string object, so its class field is equal to all strings' class fields.
     // If the argument is a string object, its class field must be equal to receiver's class field.
+    //
+    // As the String class is expected to be non-movable, we can read the class
+    // field from String.equals' arguments without read barriers.
+    AssertNonMovableStringClass();
+    // /* HeapReference<Class> */ temp1 = str->klass_
     __ Lw(temp1, str, class_offset);
+    // /* HeapReference<Class> */ temp2 = arg->klass_
     __ Lw(temp2, arg, class_offset);
+    // Also, because we use the previously loaded class references only in the
+    // following comparison, we don't need to unpoison them.
     __ Bnec(temp1, temp2, &return_false);
   }
 
@@ -1804,7 +1495,6 @@ void IntrinsicCodeGeneratorMIPS64::VisitStringEquals(HInvoke* invoke) {
 static void GenerateStringIndexOf(HInvoke* invoke,
                                   Mips64Assembler* assembler,
                                   CodeGeneratorMIPS64* codegen,
-                                  ArenaAllocator* allocator,
                                   bool start_at_zero) {
   LocationSummary* locations = invoke->GetLocations();
   GpuRegister tmp_reg = start_at_zero ? locations->GetTemp(0).AsRegister<GpuRegister>() : TMP;
@@ -1821,16 +1511,16 @@ static void GenerateStringIndexOf(HInvoke* invoke,
       // Always needs the slow-path. We could directly dispatch to it,
       // but this case should be rare, so for simplicity just put the
       // full slow-path down and branch unconditionally.
-      slow_path = new (allocator) IntrinsicSlowPathMIPS64(invoke);
+      slow_path = new (codegen->GetScopedAllocator()) IntrinsicSlowPathMIPS64(invoke);
       codegen->AddSlowPath(slow_path);
       __ Bc(slow_path->GetEntryLabel());
       __ Bind(slow_path->GetExitLabel());
       return;
     }
-  } else if (code_point->GetType() != Primitive::kPrimChar) {
+  } else if (code_point->GetType() != DataType::Type::kUint16) {
     GpuRegister char_reg = locations->InAt(1).AsRegister<GpuRegister>();
     __ LoadConst32(tmp_reg, std::numeric_limits<uint16_t>::max());
-    slow_path = new (allocator) IntrinsicSlowPathMIPS64(invoke);
+    slow_path = new (codegen->GetScopedAllocator()) IntrinsicSlowPathMIPS64(invoke);
     codegen->AddSlowPath(slow_path);
     __ Bltuc(tmp_reg, char_reg, slow_path->GetEntryLabel());    // UTF-16 required
   }
@@ -1851,15 +1541,14 @@ static void GenerateStringIndexOf(HInvoke* invoke,
 
 // int java.lang.String.indexOf(int ch)
 void IntrinsicLocationsBuilderMIPS64::VisitStringIndexOf(HInvoke* invoke) {
-  LocationSummary* locations = new (arena_) LocationSummary(invoke,
-                                                            LocationSummary::kCallOnMainAndSlowPath,
-                                                            kIntrinsified);
+  LocationSummary* locations = new (allocator_) LocationSummary(
+      invoke, LocationSummary::kCallOnMainAndSlowPath, kIntrinsified);
   // We have a hand-crafted assembly stub that follows the runtime
   // calling convention. So it's best to align the inputs accordingly.
   InvokeRuntimeCallingConvention calling_convention;
   locations->SetInAt(0, Location::RegisterLocation(calling_convention.GetRegisterAt(0)));
   locations->SetInAt(1, Location::RegisterLocation(calling_convention.GetRegisterAt(1)));
-  Location outLocation = calling_convention.GetReturnLocation(Primitive::kPrimInt);
+  Location outLocation = calling_convention.GetReturnLocation(DataType::Type::kInt32);
   locations->SetOut(Location::RegisterLocation(outLocation.AsRegister<GpuRegister>()));
 
   // Need a temp for slow-path codepoint compare, and need to send start-index=0.
@@ -1867,40 +1556,37 @@ void IntrinsicLocationsBuilderMIPS64::VisitStringIndexOf(HInvoke* invoke) {
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitStringIndexOf(HInvoke* invoke) {
-  GenerateStringIndexOf(invoke, GetAssembler(), codegen_, GetAllocator(), /* start_at_zero */ true);
+  GenerateStringIndexOf(invoke, GetAssembler(), codegen_, /* start_at_zero= */ true);
 }
 
 // int java.lang.String.indexOf(int ch, int fromIndex)
 void IntrinsicLocationsBuilderMIPS64::VisitStringIndexOfAfter(HInvoke* invoke) {
-  LocationSummary* locations = new (arena_) LocationSummary(invoke,
-                                                            LocationSummary::kCallOnMainAndSlowPath,
-                                                            kIntrinsified);
+  LocationSummary* locations = new (allocator_) LocationSummary(
+      invoke, LocationSummary::kCallOnMainAndSlowPath, kIntrinsified);
   // We have a hand-crafted assembly stub that follows the runtime
   // calling convention. So it's best to align the inputs accordingly.
   InvokeRuntimeCallingConvention calling_convention;
   locations->SetInAt(0, Location::RegisterLocation(calling_convention.GetRegisterAt(0)));
   locations->SetInAt(1, Location::RegisterLocation(calling_convention.GetRegisterAt(1)));
   locations->SetInAt(2, Location::RegisterLocation(calling_convention.GetRegisterAt(2)));
-  Location outLocation = calling_convention.GetReturnLocation(Primitive::kPrimInt);
+  Location outLocation = calling_convention.GetReturnLocation(DataType::Type::kInt32);
   locations->SetOut(Location::RegisterLocation(outLocation.AsRegister<GpuRegister>()));
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitStringIndexOfAfter(HInvoke* invoke) {
-  GenerateStringIndexOf(
-      invoke, GetAssembler(), codegen_, GetAllocator(), /* start_at_zero */ false);
+  GenerateStringIndexOf(invoke, GetAssembler(), codegen_, /* start_at_zero= */ false);
 }
 
 // java.lang.StringFactory.newStringFromBytes(byte[] data, int high, int offset, int byteCount)
 void IntrinsicLocationsBuilderMIPS64::VisitStringNewStringFromBytes(HInvoke* invoke) {
-  LocationSummary* locations = new (arena_) LocationSummary(invoke,
-                                                            LocationSummary::kCallOnMainAndSlowPath,
-                                                            kIntrinsified);
+  LocationSummary* locations = new (allocator_) LocationSummary(
+      invoke, LocationSummary::kCallOnMainAndSlowPath, kIntrinsified);
   InvokeRuntimeCallingConvention calling_convention;
   locations->SetInAt(0, Location::RegisterLocation(calling_convention.GetRegisterAt(0)));
   locations->SetInAt(1, Location::RegisterLocation(calling_convention.GetRegisterAt(1)));
   locations->SetInAt(2, Location::RegisterLocation(calling_convention.GetRegisterAt(2)));
   locations->SetInAt(3, Location::RegisterLocation(calling_convention.GetRegisterAt(3)));
-  Location outLocation = calling_convention.GetReturnLocation(Primitive::kPrimInt);
+  Location outLocation = calling_convention.GetReturnLocation(DataType::Type::kInt32);
   locations->SetOut(Location::RegisterLocation(outLocation.AsRegister<GpuRegister>()));
 }
 
@@ -1909,7 +1595,8 @@ void IntrinsicCodeGeneratorMIPS64::VisitStringNewStringFromBytes(HInvoke* invoke
   LocationSummary* locations = invoke->GetLocations();
 
   GpuRegister byte_array = locations->InAt(0).AsRegister<GpuRegister>();
-  SlowPathCodeMIPS64* slow_path = new (GetAllocator()) IntrinsicSlowPathMIPS64(invoke);
+  SlowPathCodeMIPS64* slow_path =
+      new (codegen_->GetScopedAllocator()) IntrinsicSlowPathMIPS64(invoke);
   codegen_->AddSlowPath(slow_path);
   __ Beqzc(byte_array, slow_path->GetEntryLabel());
 
@@ -1920,14 +1607,13 @@ void IntrinsicCodeGeneratorMIPS64::VisitStringNewStringFromBytes(HInvoke* invoke
 
 // java.lang.StringFactory.newStringFromChars(int offset, int charCount, char[] data)
 void IntrinsicLocationsBuilderMIPS64::VisitStringNewStringFromChars(HInvoke* invoke) {
-  LocationSummary* locations = new (arena_) LocationSummary(invoke,
-                                                            LocationSummary::kCallOnMainOnly,
-                                                            kIntrinsified);
+  LocationSummary* locations =
+      new (allocator_) LocationSummary(invoke, LocationSummary::kCallOnMainOnly, kIntrinsified);
   InvokeRuntimeCallingConvention calling_convention;
   locations->SetInAt(0, Location::RegisterLocation(calling_convention.GetRegisterAt(0)));
   locations->SetInAt(1, Location::RegisterLocation(calling_convention.GetRegisterAt(1)));
   locations->SetInAt(2, Location::RegisterLocation(calling_convention.GetRegisterAt(2)));
-  Location outLocation = calling_convention.GetReturnLocation(Primitive::kPrimInt);
+  Location outLocation = calling_convention.GetReturnLocation(DataType::Type::kInt32);
   locations->SetOut(Location::RegisterLocation(outLocation.AsRegister<GpuRegister>()));
 }
 
@@ -1944,12 +1630,11 @@ void IntrinsicCodeGeneratorMIPS64::VisitStringNewStringFromChars(HInvoke* invoke
 
 // java.lang.StringFactory.newStringFromString(String toCopy)
 void IntrinsicLocationsBuilderMIPS64::VisitStringNewStringFromString(HInvoke* invoke) {
-  LocationSummary* locations = new (arena_) LocationSummary(invoke,
-                                                            LocationSummary::kCallOnMainAndSlowPath,
-                                                            kIntrinsified);
+  LocationSummary* locations = new (allocator_) LocationSummary(
+      invoke, LocationSummary::kCallOnMainAndSlowPath, kIntrinsified);
   InvokeRuntimeCallingConvention calling_convention;
   locations->SetInAt(0, Location::RegisterLocation(calling_convention.GetRegisterAt(0)));
-  Location outLocation = calling_convention.GetReturnLocation(Primitive::kPrimInt);
+  Location outLocation = calling_convention.GetReturnLocation(DataType::Type::kInt32);
   locations->SetOut(Location::RegisterLocation(outLocation.AsRegister<GpuRegister>()));
 }
 
@@ -1958,7 +1643,8 @@ void IntrinsicCodeGeneratorMIPS64::VisitStringNewStringFromString(HInvoke* invok
   LocationSummary* locations = invoke->GetLocations();
 
   GpuRegister string_to_copy = locations->InAt(0).AsRegister<GpuRegister>();
-  SlowPathCodeMIPS64* slow_path = new (GetAllocator()) IntrinsicSlowPathMIPS64(invoke);
+  SlowPathCodeMIPS64* slow_path =
+      new (codegen_->GetScopedAllocator()) IntrinsicSlowPathMIPS64(invoke);
   codegen_->AddSlowPath(slow_path);
   __ Beqzc(string_to_copy, slow_path->GetEntryLabel());
 
@@ -1985,27 +1671,26 @@ static void GenIsInfinite(LocationSummary* locations,
 
 // boolean java.lang.Float.isInfinite(float)
 void IntrinsicLocationsBuilderMIPS64::VisitFloatIsInfinite(HInvoke* invoke) {
-  CreateFPToIntLocations(arena_, invoke);
+  CreateFPToIntLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitFloatIsInfinite(HInvoke* invoke) {
-  GenIsInfinite(invoke->GetLocations(), /* is64bit */ false, GetAssembler());
+  GenIsInfinite(invoke->GetLocations(), /* is64bit= */ false, GetAssembler());
 }
 
 // boolean java.lang.Double.isInfinite(double)
 void IntrinsicLocationsBuilderMIPS64::VisitDoubleIsInfinite(HInvoke* invoke) {
-  CreateFPToIntLocations(arena_, invoke);
+  CreateFPToIntLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitDoubleIsInfinite(HInvoke* invoke) {
-  GenIsInfinite(invoke->GetLocations(), /* is64bit */ true, GetAssembler());
+  GenIsInfinite(invoke->GetLocations(), /* is64bit= */ true, GetAssembler());
 }
 
 // void java.lang.String.getChars(int srcBegin, int srcEnd, char[] dst, int dstBegin)
 void IntrinsicLocationsBuilderMIPS64::VisitStringGetCharsNoCheck(HInvoke* invoke) {
-  LocationSummary* locations = new (arena_) LocationSummary(invoke,
-                                                            LocationSummary::kNoCall,
-                                                            kIntrinsified);
+  LocationSummary* locations =
+      new (allocator_) LocationSummary(invoke, LocationSummary::kNoCall, kIntrinsified);
   locations->SetInAt(0, Location::RequiresRegister());
   locations->SetInAt(1, Location::RequiresRegister());
   locations->SetInAt(2, Location::RequiresRegister());
@@ -2022,9 +1707,9 @@ void IntrinsicCodeGeneratorMIPS64::VisitStringGetCharsNoCheck(HInvoke* invoke) {
   LocationSummary* locations = invoke->GetLocations();
 
   // Check assumption that sizeof(Char) is 2 (used in scaling below).
-  const size_t char_size = Primitive::ComponentSize(Primitive::kPrimChar);
+  const size_t char_size = DataType::Size(DataType::Type::kUint16);
   DCHECK_EQ(char_size, 2u);
-  const size_t char_shift = Primitive::ComponentSizeShift(Primitive::kPrimChar);
+  const size_t char_shift = DataType::SizeShift(DataType::Type::kUint16);
 
   GpuRegister srcObj = locations->InAt(0).AsRegister<GpuRegister>();
   GpuRegister srcBegin = locations->InAt(1).AsRegister<GpuRegister>();
@@ -2120,7 +1805,7 @@ void IntrinsicLocationsBuilderMIPS64::VisitSystemArrayCopyChar(HInvoke* invoke) 
 
   // Okay, it is safe to generate inline code.
   LocationSummary* locations =
-      new (arena_) LocationSummary(invoke, LocationSummary::kCallOnSlowPath, kIntrinsified);
+      new (allocator_) LocationSummary(invoke, LocationSummary::kCallOnSlowPath, kIntrinsified);
   // arraycopy(Object src, int srcPos, Object dest, int destPos, int length).
   locations->SetInAt(0, Location::RequiresRegister());
   locations->SetInAt(1, Location::RegisterOrConstant(invoke->InputAt(1)));
@@ -2216,7 +1901,8 @@ void IntrinsicCodeGeneratorMIPS64::VisitSystemArrayCopyChar(HInvoke* invoke) {
   GpuRegister src_base = locations->GetTemp(1).AsRegister<GpuRegister>();
   GpuRegister count = locations->GetTemp(2).AsRegister<GpuRegister>();
 
-  SlowPathCodeMIPS64* slow_path = new (GetAllocator()) IntrinsicSlowPathMIPS64(invoke);
+  SlowPathCodeMIPS64* slow_path =
+      new (codegen_->GetScopedAllocator()) IntrinsicSlowPathMIPS64(invoke);
   codegen_->AddSlowPath(slow_path);
 
   // Bail out if the source and destination are the same (to handle overlap).
@@ -2250,10 +1936,10 @@ void IntrinsicCodeGeneratorMIPS64::VisitSystemArrayCopyChar(HInvoke* invoke) {
 
   // Okay, everything checks out.  Finally time to do the copy.
   // Check assumption that sizeof(Char) is 2 (used in scaling below).
-  const size_t char_size = Primitive::ComponentSize(Primitive::kPrimChar);
+  const size_t char_size = DataType::Size(DataType::Type::kUint16);
   DCHECK_EQ(char_size, 2u);
 
-  const size_t char_shift = Primitive::ComponentSizeShift(Primitive::kPrimChar);
+  const size_t char_shift = DataType::SizeShift(DataType::Type::kUint16);
 
   const uint32_t data_offset = mirror::Array::DataOffset(char_size).Uint32Value();
 
@@ -2287,14 +1973,14 @@ void IntrinsicCodeGeneratorMIPS64::VisitSystemArrayCopyChar(HInvoke* invoke) {
 }
 
 static void GenHighestOneBit(LocationSummary* locations,
-                             Primitive::Type type,
+                             DataType::Type type,
                              Mips64Assembler* assembler) {
-  DCHECK(type == Primitive::kPrimInt || type == Primitive::kPrimLong) << PrettyDescriptor(type);
+  DCHECK(type == DataType::Type::kInt32 || type == DataType::Type::kInt64) << type;
 
   GpuRegister in = locations->InAt(0).AsRegister<GpuRegister>();
   GpuRegister out = locations->Out().AsRegister<GpuRegister>();
 
-  if (type == Primitive::kPrimLong) {
+  if (type == DataType::Type::kInt64) {
     __ Dclz(TMP, in);
     __ LoadConst64(AT, INT64_C(0x8000000000000000));
     __ Dsrlv(AT, AT, TMP);
@@ -2314,31 +2000,31 @@ static void GenHighestOneBit(LocationSummary* locations,
 
 // int java.lang.Integer.highestOneBit(int)
 void IntrinsicLocationsBuilderMIPS64::VisitIntegerHighestOneBit(HInvoke* invoke) {
-  CreateIntToIntLocations(arena_, invoke);
+  CreateIntToIntLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitIntegerHighestOneBit(HInvoke* invoke) {
-  GenHighestOneBit(invoke->GetLocations(), Primitive::kPrimInt, GetAssembler());
+  GenHighestOneBit(invoke->GetLocations(), DataType::Type::kInt32, GetAssembler());
 }
 
 // long java.lang.Long.highestOneBit(long)
 void IntrinsicLocationsBuilderMIPS64::VisitLongHighestOneBit(HInvoke* invoke) {
-  CreateIntToIntLocations(arena_, invoke);
+  CreateIntToIntLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitLongHighestOneBit(HInvoke* invoke) {
-  GenHighestOneBit(invoke->GetLocations(), Primitive::kPrimLong, GetAssembler());
+  GenHighestOneBit(invoke->GetLocations(), DataType::Type::kInt64, GetAssembler());
 }
 
 static void GenLowestOneBit(LocationSummary* locations,
-                            Primitive::Type type,
+                            DataType::Type type,
                             Mips64Assembler* assembler) {
-  DCHECK(type == Primitive::kPrimInt || type == Primitive::kPrimLong) << PrettyDescriptor(type);
+  DCHECK(type == DataType::Type::kInt32 || type == DataType::Type::kInt64) << type;
 
   GpuRegister in = locations->InAt(0).AsRegister<GpuRegister>();
   GpuRegister out = locations->Out().AsRegister<GpuRegister>();
 
-  if (type == Primitive::kPrimLong) {
+  if (type == DataType::Type::kInt64) {
     __ Dsubu(TMP, ZERO, in);
   } else {
     __ Subu(TMP, ZERO, in);
@@ -2348,41 +2034,39 @@ static void GenLowestOneBit(LocationSummary* locations,
 
 // int java.lang.Integer.lowestOneBit(int)
 void IntrinsicLocationsBuilderMIPS64::VisitIntegerLowestOneBit(HInvoke* invoke) {
-  CreateIntToIntLocations(arena_, invoke);
+  CreateIntToIntLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitIntegerLowestOneBit(HInvoke* invoke) {
-  GenLowestOneBit(invoke->GetLocations(), Primitive::kPrimInt, GetAssembler());
+  GenLowestOneBit(invoke->GetLocations(), DataType::Type::kInt32, GetAssembler());
 }
 
 // long java.lang.Long.lowestOneBit(long)
 void IntrinsicLocationsBuilderMIPS64::VisitLongLowestOneBit(HInvoke* invoke) {
-  CreateIntToIntLocations(arena_, invoke);
+  CreateIntToIntLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitLongLowestOneBit(HInvoke* invoke) {
-  GenLowestOneBit(invoke->GetLocations(), Primitive::kPrimLong, GetAssembler());
+  GenLowestOneBit(invoke->GetLocations(), DataType::Type::kInt64, GetAssembler());
 }
 
-static void CreateFPToFPCallLocations(ArenaAllocator* arena, HInvoke* invoke) {
-  LocationSummary* locations = new (arena) LocationSummary(invoke,
-                                                           LocationSummary::kCallOnMainOnly,
-                                                           kIntrinsified);
+static void CreateFPToFPCallLocations(ArenaAllocator* allocator, HInvoke* invoke) {
+  LocationSummary* locations =
+      new (allocator) LocationSummary(invoke, LocationSummary::kCallOnMainOnly, kIntrinsified);
   InvokeRuntimeCallingConvention calling_convention;
 
   locations->SetInAt(0, Location::FpuRegisterLocation(calling_convention.GetFpuRegisterAt(0)));
-  locations->SetOut(calling_convention.GetReturnLocation(Primitive::kPrimDouble));
+  locations->SetOut(calling_convention.GetReturnLocation(DataType::Type::kFloat64));
 }
 
-static void CreateFPFPToFPCallLocations(ArenaAllocator* arena, HInvoke* invoke) {
-  LocationSummary* locations = new (arena) LocationSummary(invoke,
-                                                           LocationSummary::kCallOnMainOnly,
-                                                           kIntrinsified);
+static void CreateFPFPToFPCallLocations(ArenaAllocator* allocator, HInvoke* invoke) {
+  LocationSummary* locations =
+      new (allocator) LocationSummary(invoke, LocationSummary::kCallOnMainOnly, kIntrinsified);
   InvokeRuntimeCallingConvention calling_convention;
 
   locations->SetInAt(0, Location::FpuRegisterLocation(calling_convention.GetFpuRegisterAt(0)));
   locations->SetInAt(1, Location::FpuRegisterLocation(calling_convention.GetFpuRegisterAt(1)));
-  locations->SetOut(calling_convention.GetReturnLocation(Primitive::kPrimDouble));
+  locations->SetOut(calling_convention.GetReturnLocation(DataType::Type::kFloat64));
 }
 
 static void GenFPToFPCall(HInvoke* invoke,
@@ -2413,7 +2097,7 @@ static void GenFPFPToFPCall(HInvoke* invoke,
 
 // static double java.lang.Math.cos(double a)
 void IntrinsicLocationsBuilderMIPS64::VisitMathCos(HInvoke* invoke) {
-  CreateFPToFPCallLocations(arena_, invoke);
+  CreateFPToFPCallLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitMathCos(HInvoke* invoke) {
@@ -2422,7 +2106,7 @@ void IntrinsicCodeGeneratorMIPS64::VisitMathCos(HInvoke* invoke) {
 
 // static double java.lang.Math.sin(double a)
 void IntrinsicLocationsBuilderMIPS64::VisitMathSin(HInvoke* invoke) {
-  CreateFPToFPCallLocations(arena_, invoke);
+  CreateFPToFPCallLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitMathSin(HInvoke* invoke) {
@@ -2431,7 +2115,7 @@ void IntrinsicCodeGeneratorMIPS64::VisitMathSin(HInvoke* invoke) {
 
 // static double java.lang.Math.acos(double a)
 void IntrinsicLocationsBuilderMIPS64::VisitMathAcos(HInvoke* invoke) {
-  CreateFPToFPCallLocations(arena_, invoke);
+  CreateFPToFPCallLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitMathAcos(HInvoke* invoke) {
@@ -2440,7 +2124,7 @@ void IntrinsicCodeGeneratorMIPS64::VisitMathAcos(HInvoke* invoke) {
 
 // static double java.lang.Math.asin(double a)
 void IntrinsicLocationsBuilderMIPS64::VisitMathAsin(HInvoke* invoke) {
-  CreateFPToFPCallLocations(arena_, invoke);
+  CreateFPToFPCallLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitMathAsin(HInvoke* invoke) {
@@ -2449,7 +2133,7 @@ void IntrinsicCodeGeneratorMIPS64::VisitMathAsin(HInvoke* invoke) {
 
 // static double java.lang.Math.atan(double a)
 void IntrinsicLocationsBuilderMIPS64::VisitMathAtan(HInvoke* invoke) {
-  CreateFPToFPCallLocations(arena_, invoke);
+  CreateFPToFPCallLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitMathAtan(HInvoke* invoke) {
@@ -2458,16 +2142,25 @@ void IntrinsicCodeGeneratorMIPS64::VisitMathAtan(HInvoke* invoke) {
 
 // static double java.lang.Math.atan2(double y, double x)
 void IntrinsicLocationsBuilderMIPS64::VisitMathAtan2(HInvoke* invoke) {
-  CreateFPFPToFPCallLocations(arena_, invoke);
+  CreateFPFPToFPCallLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitMathAtan2(HInvoke* invoke) {
   GenFPFPToFPCall(invoke, codegen_, kQuickAtan2);
 }
 
+// static double java.lang.Math.pow(double y, double x)
+void IntrinsicLocationsBuilderMIPS64::VisitMathPow(HInvoke* invoke) {
+  CreateFPFPToFPCallLocations(allocator_, invoke);
+}
+
+void IntrinsicCodeGeneratorMIPS64::VisitMathPow(HInvoke* invoke) {
+  GenFPFPToFPCall(invoke, codegen_, kQuickPow);
+}
+
 // static double java.lang.Math.cbrt(double a)
 void IntrinsicLocationsBuilderMIPS64::VisitMathCbrt(HInvoke* invoke) {
-  CreateFPToFPCallLocations(arena_, invoke);
+  CreateFPToFPCallLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitMathCbrt(HInvoke* invoke) {
@@ -2476,7 +2169,7 @@ void IntrinsicCodeGeneratorMIPS64::VisitMathCbrt(HInvoke* invoke) {
 
 // static double java.lang.Math.cosh(double x)
 void IntrinsicLocationsBuilderMIPS64::VisitMathCosh(HInvoke* invoke) {
-  CreateFPToFPCallLocations(arena_, invoke);
+  CreateFPToFPCallLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitMathCosh(HInvoke* invoke) {
@@ -2485,7 +2178,7 @@ void IntrinsicCodeGeneratorMIPS64::VisitMathCosh(HInvoke* invoke) {
 
 // static double java.lang.Math.exp(double a)
 void IntrinsicLocationsBuilderMIPS64::VisitMathExp(HInvoke* invoke) {
-  CreateFPToFPCallLocations(arena_, invoke);
+  CreateFPToFPCallLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitMathExp(HInvoke* invoke) {
@@ -2494,7 +2187,7 @@ void IntrinsicCodeGeneratorMIPS64::VisitMathExp(HInvoke* invoke) {
 
 // static double java.lang.Math.expm1(double x)
 void IntrinsicLocationsBuilderMIPS64::VisitMathExpm1(HInvoke* invoke) {
-  CreateFPToFPCallLocations(arena_, invoke);
+  CreateFPToFPCallLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitMathExpm1(HInvoke* invoke) {
@@ -2503,7 +2196,7 @@ void IntrinsicCodeGeneratorMIPS64::VisitMathExpm1(HInvoke* invoke) {
 
 // static double java.lang.Math.hypot(double x, double y)
 void IntrinsicLocationsBuilderMIPS64::VisitMathHypot(HInvoke* invoke) {
-  CreateFPFPToFPCallLocations(arena_, invoke);
+  CreateFPFPToFPCallLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitMathHypot(HInvoke* invoke) {
@@ -2512,7 +2205,7 @@ void IntrinsicCodeGeneratorMIPS64::VisitMathHypot(HInvoke* invoke) {
 
 // static double java.lang.Math.log(double a)
 void IntrinsicLocationsBuilderMIPS64::VisitMathLog(HInvoke* invoke) {
-  CreateFPToFPCallLocations(arena_, invoke);
+  CreateFPToFPCallLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitMathLog(HInvoke* invoke) {
@@ -2521,7 +2214,7 @@ void IntrinsicCodeGeneratorMIPS64::VisitMathLog(HInvoke* invoke) {
 
 // static double java.lang.Math.log10(double x)
 void IntrinsicLocationsBuilderMIPS64::VisitMathLog10(HInvoke* invoke) {
-  CreateFPToFPCallLocations(arena_, invoke);
+  CreateFPToFPCallLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitMathLog10(HInvoke* invoke) {
@@ -2530,7 +2223,7 @@ void IntrinsicCodeGeneratorMIPS64::VisitMathLog10(HInvoke* invoke) {
 
 // static double java.lang.Math.nextAfter(double start, double direction)
 void IntrinsicLocationsBuilderMIPS64::VisitMathNextAfter(HInvoke* invoke) {
-  CreateFPFPToFPCallLocations(arena_, invoke);
+  CreateFPFPToFPCallLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitMathNextAfter(HInvoke* invoke) {
@@ -2539,7 +2232,7 @@ void IntrinsicCodeGeneratorMIPS64::VisitMathNextAfter(HInvoke* invoke) {
 
 // static double java.lang.Math.sinh(double x)
 void IntrinsicLocationsBuilderMIPS64::VisitMathSinh(HInvoke* invoke) {
-  CreateFPToFPCallLocations(arena_, invoke);
+  CreateFPToFPCallLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitMathSinh(HInvoke* invoke) {
@@ -2548,7 +2241,7 @@ void IntrinsicCodeGeneratorMIPS64::VisitMathSinh(HInvoke* invoke) {
 
 // static double java.lang.Math.tan(double a)
 void IntrinsicLocationsBuilderMIPS64::VisitMathTan(HInvoke* invoke) {
-  CreateFPToFPCallLocations(arena_, invoke);
+  CreateFPToFPCallLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitMathTan(HInvoke* invoke) {
@@ -2557,15 +2250,113 @@ void IntrinsicCodeGeneratorMIPS64::VisitMathTan(HInvoke* invoke) {
 
 // static double java.lang.Math.tanh(double x)
 void IntrinsicLocationsBuilderMIPS64::VisitMathTanh(HInvoke* invoke) {
-  CreateFPToFPCallLocations(arena_, invoke);
+  CreateFPToFPCallLocations(allocator_, invoke);
 }
 
 void IntrinsicCodeGeneratorMIPS64::VisitMathTanh(HInvoke* invoke) {
   GenFPToFPCall(invoke, codegen_, kQuickTanh);
 }
 
+// long java.lang.Integer.valueOf(long)
+void IntrinsicLocationsBuilderMIPS64::VisitIntegerValueOf(HInvoke* invoke) {
+  InvokeRuntimeCallingConvention calling_convention;
+  IntrinsicVisitor::ComputeIntegerValueOfLocations(
+      invoke,
+      codegen_,
+      calling_convention.GetReturnLocation(DataType::Type::kReference),
+      Location::RegisterLocation(calling_convention.GetRegisterAt(0)));
+}
+
+void IntrinsicCodeGeneratorMIPS64::VisitIntegerValueOf(HInvoke* invoke) {
+  IntrinsicVisitor::IntegerValueOfInfo info =
+      IntrinsicVisitor::ComputeIntegerValueOfInfo(invoke, codegen_->GetCompilerOptions());
+  LocationSummary* locations = invoke->GetLocations();
+  Mips64Assembler* assembler = GetAssembler();
+  InstructionCodeGeneratorMIPS64* icodegen =
+      down_cast<InstructionCodeGeneratorMIPS64*>(codegen_->GetInstructionVisitor());
+
+  GpuRegister out = locations->Out().AsRegister<GpuRegister>();
+  if (invoke->InputAt(0)->IsConstant()) {
+    int32_t value = invoke->InputAt(0)->AsIntConstant()->GetValue();
+    if (static_cast<uint32_t>(value - info.low) < info.length) {
+      // Just embed the j.l.Integer in the code.
+      DCHECK_NE(info.value_boot_image_reference, IntegerValueOfInfo::kInvalidReference);
+      codegen_->LoadBootImageAddress(out, info.value_boot_image_reference);
+    } else {
+      DCHECK(locations->CanCall());
+      // Allocate and initialize a new j.l.Integer.
+      // TODO: If we JIT, we could allocate the j.l.Integer now, and store it in the
+      // JIT object table.
+      codegen_->AllocateInstanceForIntrinsic(invoke->AsInvokeStaticOrDirect(),
+                                             info.integer_boot_image_offset);
+      __ StoreConstToOffset(kStoreWord, value, out, info.value_offset, TMP);
+      // `value` is a final field :-( Ideally, we'd merge this memory barrier with the allocation
+      // one.
+      icodegen->GenerateMemoryBarrier(MemBarrierKind::kStoreStore);
+    }
+  } else {
+    DCHECK(locations->CanCall());
+    GpuRegister in = locations->InAt(0).AsRegister<GpuRegister>();
+    Mips64Label allocate, done;
+
+    __ Addiu32(out, in, -info.low);
+    // As unsigned quantities is out < info.length ?
+    __ LoadConst32(AT, info.length);
+    // Branch if out >= info.length . This means that "in" is outside of the valid range.
+    __ Bgeuc(out, AT, &allocate);
+
+    // If the value is within the bounds, load the j.l.Integer directly from the array.
+    codegen_->LoadBootImageAddress(TMP, info.array_data_boot_image_reference);
+    __ Dlsa(out, out, TMP, TIMES_4);
+    __ Lwu(out, out, 0);
+    __ MaybeUnpoisonHeapReference(out);
+    __ Bc(&done);
+
+    __ Bind(&allocate);
+    // Otherwise allocate and initialize a new j.l.Integer.
+    codegen_->AllocateInstanceForIntrinsic(invoke->AsInvokeStaticOrDirect(),
+                                           info.integer_boot_image_offset);
+    __ StoreToOffset(kStoreWord, in, out, info.value_offset);
+    // `value` is a final field :-( Ideally, we'd merge this memory barrier with the allocation
+    // one.
+    icodegen->GenerateMemoryBarrier(MemBarrierKind::kStoreStore);
+    __ Bind(&done);
+  }
+}
+
+// static boolean java.lang.Thread.interrupted()
+void IntrinsicLocationsBuilderMIPS64::VisitThreadInterrupted(HInvoke* invoke) {
+  LocationSummary* locations =
+      new (allocator_) LocationSummary(invoke, LocationSummary::kNoCall, kIntrinsified);
+  locations->SetOut(Location::RequiresRegister());
+}
+
+void IntrinsicCodeGeneratorMIPS64::VisitThreadInterrupted(HInvoke* invoke) {
+  Mips64Assembler* assembler = GetAssembler();
+  GpuRegister out = invoke->GetLocations()->Out().AsRegister<GpuRegister>();
+  int32_t offset = Thread::InterruptedOffset<kMips64PointerSize>().Int32Value();
+  __ LoadFromOffset(kLoadWord, out, TR, offset);
+  Mips64Label done;
+  __ Beqzc(out, &done);
+  __ Sync(0);
+  __ StoreToOffset(kStoreWord, ZERO, TR, offset);
+  __ Sync(0);
+  __ Bind(&done);
+}
+
+void IntrinsicLocationsBuilderMIPS64::VisitReachabilityFence(HInvoke* invoke) {
+  LocationSummary* locations =
+      new (allocator_) LocationSummary(invoke, LocationSummary::kNoCall, kIntrinsified);
+  locations->SetInAt(0, Location::Any());
+}
+
+void IntrinsicCodeGeneratorMIPS64::VisitReachabilityFence(HInvoke* invoke ATTRIBUTE_UNUSED) { }
+
 UNIMPLEMENTED_INTRINSIC(MIPS64, ReferenceGetReferent)
 UNIMPLEMENTED_INTRINSIC(MIPS64, SystemArrayCopy)
+UNIMPLEMENTED_INTRINSIC(MIPS64, CRC32Update)
+UNIMPLEMENTED_INTRINSIC(MIPS64, CRC32UpdateBytes)
+UNIMPLEMENTED_INTRINSIC(MIPS64, CRC32UpdateByteBuffer)
 
 UNIMPLEMENTED_INTRINSIC(MIPS64, StringStringIndexOf);
 UNIMPLEMENTED_INTRINSIC(MIPS64, StringStringIndexOfAfter);
@@ -2582,8 +2373,6 @@ UNIMPLEMENTED_INTRINSIC(MIPS64, UnsafeGetAndAddLong)
 UNIMPLEMENTED_INTRINSIC(MIPS64, UnsafeGetAndSetInt)
 UNIMPLEMENTED_INTRINSIC(MIPS64, UnsafeGetAndSetLong)
 UNIMPLEMENTED_INTRINSIC(MIPS64, UnsafeGetAndSetObject)
-
-UNIMPLEMENTED_INTRINSIC(MIPS64, IntegerValueOf)
 
 UNREACHABLE_INTRINSICS(MIPS64)
 

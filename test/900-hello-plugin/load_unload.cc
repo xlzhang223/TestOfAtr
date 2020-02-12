@@ -17,10 +17,11 @@
 #include <jni.h>
 #include <stdio.h>
 
+#include <android-base/logging.h>
+#include <android-base/macros.h>
+
 #include "art_method-inl.h"
-#include "base/logging.h"
-#include "base/macros.h"
-#include "java_vm_ext.h"
+#include "jni/java_vm_ext.h"
 #include "runtime.h"
 
 namespace art {

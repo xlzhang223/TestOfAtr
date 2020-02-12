@@ -17,14 +17,12 @@
 #ifndef ART_RUNTIME_ART_FIELD_H_
 #define ART_RUNTIME_ART_FIELD_H_
 
-#include <jni.h>
-
-#include "dex_file_types.h"
+#include "dex/dex_file_types.h"
+#include "dex/modifiers.h"
+#include "dex/primitive.h"
 #include "gc_root.h"
-#include "modifiers.h"
 #include "obj_ptr.h"
 #include "offsets.h"
-#include "primitive.h"
 #include "read_barrier_option.h"
 
 namespace art {
@@ -34,15 +32,18 @@ class ScopedObjectAccessAlreadyRunnable;
 
 namespace mirror {
 class Class;
+class ClassLoader;
 class DexCache;
 class Object;
 class String;
 }  // namespace mirror
 
-class ArtField FINAL {
+class ArtField final {
  public:
   template<ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
   ObjPtr<mirror::Class> GetDeclaringClass() REQUIRES_SHARED(Locks::mutator_lock_);
+
+  ObjPtr<mirror::ClassLoader> GetClassLoader() REQUIRES_SHARED(Locks::mutator_lock_);
 
   void SetDeclaringClass(ObjPtr<mirror::Class> new_declaring_class)
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -171,7 +172,9 @@ class ArtField FINAL {
 
   // NO_THREAD_SAFETY_ANALYSIS since we don't know what the callback requires.
   template<typename RootVisitorType>
-  void VisitRoots(RootVisitorType& visitor) NO_THREAD_SAFETY_ANALYSIS;
+  ALWAYS_INLINE inline void VisitRoots(RootVisitorType& visitor) NO_THREAD_SAFETY_ANALYSIS {
+    visitor.VisitRoot(declaring_class_.AddressWithoutBarrier());
+  }
 
   bool IsVolatile() REQUIRES_SHARED(Locks::mutator_lock_) {
     return (GetAccessFlags() & kAccVolatile) != 0;
@@ -194,8 +197,7 @@ class ArtField FINAL {
   const char* GetName() REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Resolves / returns the name from the dex cache.
-  ObjPtr<mirror::String> GetStringName(Thread* self, bool resolve)
-      REQUIRES_SHARED(Locks::mutator_lock_);
+  ObjPtr<mirror::String> ResolveNameString() REQUIRES_SHARED(Locks::mutator_lock_);
 
   const char* GetTypeDescriptor() REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -203,11 +205,12 @@ class ArtField FINAL {
 
   bool IsPrimitiveType() REQUIRES_SHARED(Locks::mutator_lock_);
 
-  template <bool kResolve>
-  ObjPtr<mirror::Class> GetType() REQUIRES_SHARED(Locks::mutator_lock_);
+  ObjPtr<mirror::Class> LookupResolvedType() REQUIRES_SHARED(Locks::mutator_lock_);
+  ObjPtr<mirror::Class> ResolveType() REQUIRES_SHARED(Locks::mutator_lock_);
 
   size_t FieldSize() REQUIRES_SHARED(Locks::mutator_lock_);
 
+  template <ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
   ObjPtr<mirror::DexCache> GetDexCache() REQUIRES_SHARED(Locks::mutator_lock_);
 
   const DexFile* GetDexFile() REQUIRES_SHARED(Locks::mutator_lock_);
@@ -229,12 +232,9 @@ class ArtField FINAL {
       REQUIRES_SHARED(Locks::mutator_lock_);
 
  private:
+  bool IsProxyField() REQUIRES_SHARED(Locks::mutator_lock_);
+
   ObjPtr<mirror::Class> ProxyFindSystemClass(const char* descriptor)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-  ObjPtr<mirror::String> ResolveGetStringName(Thread* self,
-                                              const DexFile& dex_file,
-                                              dex::StringIndex string_idx,
-                                              ObjPtr<mirror::DexCache> dex_cache)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   void GetAccessFlagsDCheck() REQUIRES_SHARED(Locks::mutator_lock_);

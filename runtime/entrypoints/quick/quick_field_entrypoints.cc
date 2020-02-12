@@ -18,21 +18,15 @@
 
 #include "art_field-inl.h"
 #include "art_method-inl.h"
+#include "base/callee_save_type.h"
 #include "callee_save_frame.h"
-#include "dex_file-inl.h"
+#include "dex/dex_file-inl.h"
 #include "entrypoints/entrypoint_utils-inl.h"
 #include "gc_root-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/object_reference.h"
 
 namespace art {
-
-inline constexpr bool FindFieldTypeIsRead(FindFieldType type) {
-  return type == InstanceObjectRead ||
-         type == InstancePrimitiveRead ||
-         type == StaticObjectRead ||
-         type == StaticPrimitiveRead;
-}
 
 // Helper function to do a null check after trying to resolve the field. Not for statics since obj
 // does not exist there. There is a suspend check, object is a double pointer to update the value
@@ -49,7 +43,7 @@ ALWAYS_INLINE static inline ArtField* FindInstanceField(uint32_t field_idx,
   HandleWrapper<mirror::Object> h(hs.NewHandleWrapper(obj));
   ArtField* field = FindFieldFromCode<type, kAccessCheck>(field_idx, referrer, self, size);
   if (LIKELY(field != nullptr) && UNLIKELY(h == nullptr)) {
-    ThrowNullPointerExceptionForFieldAccess(field, /*is_read*/FindFieldTypeIsRead(type));
+    ThrowNullPointerExceptionForFieldAccess(field, (type & FindFieldFlags::ReadBit) != 0);
     return nullptr;
   }
   return field;
@@ -59,14 +53,19 @@ static ArtMethod* GetReferrer(Thread* self) REQUIRES_SHARED(Locks::mutator_lock_
   if (kIsDebugBuild) {
     // stub_test doesn't call this code with a proper frame, so get the outer, and if
     // it does not have compiled code return it.
-    ArtMethod* outer = GetCalleeSaveOuterMethod(self, Runtime::kSaveRefsOnly);
+    ArtMethod* outer = GetCalleeSaveOuterMethod(self, CalleeSaveType::kSaveRefsOnly);
     if (outer->GetEntryPointFromQuickCompiledCode() == nullptr) {
       return outer;
     }
   }
-  return GetCalleeSaveMethodCallerAndOuterMethod(self, Runtime::kSaveRefsOnly).caller;
+  return GetCalleeSaveMethodCallerAndOuterMethod(self, CalleeSaveType::kSaveRefsOnly).caller;
 }
 
+// Macro used to define this set of functions:
+//
+//   art{Get,Set}<Kind>{Static,Instance}FromCode
+//   art{Get,Set}<Kind>{Static,Instance}FromCompiledCode
+//
 #define ART_GET_FIELD_FROM_CODE(Kind, PrimitiveType, RetType, SetType,         \
                                 PrimitiveOrObject, IsObject, Ptr)              \
   extern "C" RetType artGet ## Kind ## StaticFromCode(uint32_t field_idx,      \
@@ -78,12 +77,12 @@ static ArtMethod* GetReferrer(Thread* self) REQUIRES_SHARED(Locks::mutator_lock_
         field_idx, referrer, Static ## PrimitiveOrObject ## Read,              \
         sizeof(PrimitiveType));                                                \
     if (LIKELY(field != nullptr)) {                                            \
-      return field->Get ## Kind (field->GetDeclaringClass())Ptr;               \
+      return field->Get ## Kind (field->GetDeclaringClass())Ptr;  /* NOLINT */ \
     }                                                                          \
     field = FindFieldFromCode<Static ## PrimitiveOrObject ## Read, true>(      \
         field_idx, referrer, self, sizeof(PrimitiveType));                     \
     if (LIKELY(field != nullptr)) {                                            \
-      return field->Get ## Kind (field->GetDeclaringClass())Ptr;               \
+      return field->Get ## Kind (field->GetDeclaringClass())Ptr;  /* NOLINT */ \
     }                                                                          \
     /* Will throw exception by checking with Thread::Current. */               \
     return 0;                                                                  \
@@ -99,12 +98,12 @@ static ArtMethod* GetReferrer(Thread* self) REQUIRES_SHARED(Locks::mutator_lock_
         field_idx, referrer, Instance ## PrimitiveOrObject ## Read,            \
         sizeof(PrimitiveType));                                                \
     if (LIKELY(field != nullptr) && obj != nullptr) {                          \
-      return field->Get ## Kind (obj)Ptr;                                      \
+      return field->Get ## Kind (obj)Ptr;  /* NOLINT */                        \
     }                                                                          \
     field = FindInstanceField<Instance ## PrimitiveOrObject ## Read, true>(    \
         field_idx, referrer, self, sizeof(PrimitiveType), &obj);               \
     if (LIKELY(field != nullptr)) {                                            \
-      return field->Get ## Kind (obj)Ptr;                                      \
+      return field->Get ## Kind (obj)Ptr;  /* NOLINT */                        \
     }                                                                          \
     /* Will throw exception by checking with Thread::Current. */               \
     return 0;                                                                  \
@@ -215,14 +214,99 @@ static ArtMethod* GetReferrer(Thread* self) REQUIRES_SHARED(Locks::mutator_lock_
         field_idx, obj, new_value, GetReferrer(self), self);                   \
   }
 
+// Define these functions:
+//
+//   artGetByteStaticFromCode
+//   artGetByteInstanceFromCode
+//   artSetByteStaticFromCode
+//   artSetByteInstanceFromCode
+//   artGetByteStaticFromCompiledCode
+//   artGetByteInstanceFromCompiledCode
+//   artSetByteStaticFromCompiledCode
+//   artSetByteInstanceFromCompiledCode
+//
 ART_GET_FIELD_FROM_CODE(Byte, int8_t, ssize_t, uint32_t, Primitive, false, )
+
+// Define these functions:
+//
+//   artGetBooleanStaticFromCode
+//   artGetBooleanInstanceFromCode
+//   artSetBooleanStaticFromCode
+//   artSetBooleanInstanceFromCode
+//   artGetBooleanStaticFromCompiledCode
+//   artGetBooleanInstanceFromCompiledCode
+//   artSetBooleanStaticFromCompiledCode
+//   artSetBooleanInstanceFromCompiledCode
+//
 ART_GET_FIELD_FROM_CODE(Boolean, int8_t, size_t, uint32_t, Primitive, false, )
+
+// Define these functions:
+//
+//   artGetShortStaticFromCode
+//   artGetShortInstanceFromCode
+//   artSetShortStaticFromCode
+//   artSetShortInstanceFromCode
+//   artGetShortStaticFromCompiledCode
+//   artGetShortInstanceFromCompiledCode
+//   artSetShortStaticFromCompiledCode
+//   artSetShortInstanceFromCompiledCode
+//
 ART_GET_FIELD_FROM_CODE(Short, int16_t, ssize_t, uint16_t, Primitive, false, )
+
+// Define these functions:
+//
+//   artGetCharStaticFromCode
+//   artGetCharInstanceFromCode
+//   artSetCharStaticFromCode
+//   artSetCharInstanceFromCode
+//   artGetCharStaticFromCompiledCode
+//   artGetCharInstanceFromCompiledCode
+//   artSetCharStaticFromCompiledCode
+//   artSetCharInstanceFromCompiledCode
+//
 ART_GET_FIELD_FROM_CODE(Char, int16_t, size_t, uint16_t, Primitive, false, )
+
+// Define these functions:
+//
+//   artGet32StaticFromCode
+//   artGet32InstanceFromCode
+//   artSet32StaticFromCode
+//   artSet32InstanceFromCode
+//   artGet32StaticFromCompiledCode
+//   artGet32InstanceFromCompiledCode
+//   artSet32StaticFromCompiledCode
+//   artSet32InstanceFromCompiledCode
+//
 ART_GET_FIELD_FROM_CODE(32, int32_t, size_t, uint32_t, Primitive, false, )
+
+// Define these functions:
+//
+//   artGet64StaticFromCode
+//   artGet64InstanceFromCode
+//   artSet64StaticFromCode
+//   artSet64InstanceFromCode
+//   artGet64StaticFromCompiledCode
+//   artGet64InstanceFromCompiledCode
+//   artSet64StaticFromCompiledCode
+//   artSet64InstanceFromCompiledCode
+//
 ART_GET_FIELD_FROM_CODE(64, int64_t, uint64_t, uint64_t, Primitive, false, )
+
+// Define these functions:
+//
+//   artGetObjStaticFromCode
+//   artGetObjInstanceFromCode
+//   artSetObjStaticFromCode
+//   artSetObjInstanceFromCode
+//   artGetObjStaticFromCompiledCode
+//   artGetObjInstanceFromCompiledCode
+//   artSetObjStaticFromCompiledCode
+//   artSetObjInstanceFromCompiledCode
+//
 ART_GET_FIELD_FROM_CODE(Obj, mirror::HeapReference<mirror::Object>, mirror::Object*,
                         mirror::Object*, Object, true, .Ptr())
+
+#undef ART_GET_FIELD_FROM_CODE
 
 
 // To cut on the number of entrypoints, we have shared entries for
@@ -300,6 +384,7 @@ extern "C" mirror::Object* artReadBarrierMark(mirror::Object* obj) {
 extern "C" mirror::Object* artReadBarrierSlow(mirror::Object* ref ATTRIBUTE_UNUSED,
                                               mirror::Object* obj,
                                               uint32_t offset) {
+  // Used only in connection with non-volatile loads.
   DCHECK(kEmitCompilerReadBarrier);
   uint8_t* raw_addr = reinterpret_cast<uint8_t*>(obj) + offset;
   mirror::HeapReference<mirror::Object>* ref_addr =
@@ -307,9 +392,10 @@ extern "C" mirror::Object* artReadBarrierSlow(mirror::Object* ref ATTRIBUTE_UNUS
   constexpr ReadBarrierOption kReadBarrierOption =
       kUseReadBarrier ? kWithReadBarrier : kWithoutReadBarrier;
   mirror::Object* result =
-      ReadBarrier::Barrier<mirror::Object, kReadBarrierOption>(obj,
-                                                               MemberOffset(offset),
-                                                               ref_addr);
+      ReadBarrier::Barrier<mirror::Object, /* kIsVolatile= */ false, kReadBarrierOption>(
+        obj,
+        MemberOffset(offset),
+        ref_addr);
   return result;
 }
 

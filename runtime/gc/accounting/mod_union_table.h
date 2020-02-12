@@ -17,25 +17,30 @@
 #ifndef ART_RUNTIME_GC_ACCOUNTING_MOD_UNION_TABLE_H_
 #define ART_RUNTIME_GC_ACCOUNTING_MOD_UNION_TABLE_H_
 
-#include "bitmap.h"
 #include "base/allocator.h"
+#include "base/safe_map.h"
+#include "base/tracking_safe_map.h"
+#include "bitmap.h"
 #include "card_table.h"
-#include "globals.h"
-#include "object_callbacks.h"
-#include "safe_map.h"
+#include "mirror/object_reference.h"
+#include "runtime_globals.h"
 
 #include <set>
 #include <vector>
 
 namespace art {
+
 namespace mirror {
 class Object;
 }  // namespace mirror
 
+class MarkObjectVisitor;
+
 namespace gc {
 namespace space {
-  class ContinuousSpace;
+class ContinuousSpace;
 }  // namespace space
+
 class Heap;
 
 namespace accounting {
@@ -44,6 +49,9 @@ namespace accounting {
 // cleared between GC phases, reducing the number of dirty cards that need to be scanned.
 class ModUnionTable {
  public:
+  // A callback for visiting an object in the heap.
+  using ObjectCallback = void (*)(mirror::Object*, void*);
+
   typedef std::set<uint8_t*, std::less<uint8_t*>,
                    TrackingAllocator<uint8_t*, kAllocatorTagModUnionCardSet>> CardSet;
   typedef MemoryRangeBitmap<CardTable::kCardSize> CardBitmap;
@@ -72,7 +80,7 @@ class ModUnionTable {
   virtual void UpdateAndMarkReferences(MarkObjectVisitor* visitor) = 0;
 
   // Visit all of the objects that may contain references to other spaces.
-  virtual void VisitObjects(ObjectCallback* callback, void* arg) = 0;
+  virtual void VisitObjects(ObjectCallback callback, void* arg) = 0;
 
   // Verification, sanity checks that we don't have clean cards which conflict with out cached data
   // for said cards. Exclusive lock is required since verify sometimes uses
@@ -117,33 +125,33 @@ class ModUnionTableReferenceCache : public ModUnionTable {
   virtual ~ModUnionTableReferenceCache() {}
 
   // Clear and store cards for a space.
-  void ProcessCards() OVERRIDE;
+  void ProcessCards() override;
 
   // Update table based on cleared cards and mark all references to the other spaces.
-  void UpdateAndMarkReferences(MarkObjectVisitor* visitor) OVERRIDE
+  void UpdateAndMarkReferences(MarkObjectVisitor* visitor) override
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(Locks::heap_bitmap_lock_);
 
-  virtual void VisitObjects(ObjectCallback* callback, void* arg) OVERRIDE
+  void VisitObjects(ObjectCallback callback, void* arg) override
       REQUIRES(Locks::heap_bitmap_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Exclusive lock is required since verify uses SpaceBitmap::VisitMarkedRange and
   // VisitMarkedRange can't know if the callback will modify the bitmap or not.
-  void Verify() OVERRIDE
+  void Verify() override
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(Locks::heap_bitmap_lock_);
 
   // Function that tells whether or not to add a reference to the table.
   virtual bool ShouldAddReference(const mirror::Object* ref) const = 0;
 
-  virtual bool ContainsCardFor(uintptr_t addr) OVERRIDE;
+  bool ContainsCardFor(uintptr_t addr) override;
 
-  virtual void Dump(std::ostream& os) OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_);
+  void Dump(std::ostream& os) override REQUIRES_SHARED(Locks::mutator_lock_);
 
-  virtual void SetCards() OVERRIDE;
+  void SetCards() override;
 
-  virtual void ClearTable() OVERRIDE;
+  void ClearTable() override;
 
  protected:
   // Cleared card array, used to update the mod-union table.
@@ -164,27 +172,27 @@ class ModUnionTableCardCache : public ModUnionTable {
   virtual ~ModUnionTableCardCache() {}
 
   // Clear and store cards for a space.
-  virtual void ProcessCards() OVERRIDE;
+  void ProcessCards() override;
 
   // Mark all references to the alloc space(s).
-  virtual void UpdateAndMarkReferences(MarkObjectVisitor* visitor) OVERRIDE
+  void UpdateAndMarkReferences(MarkObjectVisitor* visitor) override
       REQUIRES(Locks::heap_bitmap_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  virtual void VisitObjects(ObjectCallback* callback, void* arg) OVERRIDE
+  void VisitObjects(ObjectCallback callback, void* arg) override
       REQUIRES(Locks::heap_bitmap_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Nothing to verify.
-  virtual void Verify() OVERRIDE {}
+  void Verify() override {}
 
-  virtual void Dump(std::ostream& os) OVERRIDE;
+  void Dump(std::ostream& os) override;
 
-  virtual bool ContainsCardFor(uintptr_t addr) OVERRIDE;
+  bool ContainsCardFor(uintptr_t addr) override;
 
-  virtual void SetCards() OVERRIDE;
+  void SetCards() override;
 
-  virtual void ClearTable() OVERRIDE;
+  void ClearTable() override;
 
  protected:
   // Cleared card bitmap, used to update the mod-union table.

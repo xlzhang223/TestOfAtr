@@ -19,15 +19,15 @@
 
 #include "jni.h"
 
+#include "base/locks.h"
 #include "base/macros.h"
-#include "base/mutex.h"
 #include "base/value_object.h"
 #include "thread_state.h"
 
 namespace art {
 
 class JavaVMExt;
-struct JNIEnvExt;
+class JNIEnvExt;
 template<class MirrorType> class ObjPtr;
 class Thread;
 

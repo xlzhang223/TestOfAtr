@@ -21,10 +21,13 @@
 #include <cctype>
 #include <sstream>
 
+#include "art_method.h"
 #include "bounds_check_elimination.h"
 #include "builder.h"
 #include "code_generator.h"
+#include "data_type-inl.h"
 #include "dead_code_elimination.h"
+#include "dex/descriptors_names.h"
 #include "disassembler.h"
 #include "inliner.h"
 #include "licm.h"
@@ -32,8 +35,10 @@
 #include "optimization.h"
 #include "reference_type_propagation.h"
 #include "register_allocator_linear_scan.h"
+#include "scoped_thread_state_change-inl.h"
 #include "ssa_liveness_analysis.h"
 #include "utils/assembler.h"
+#include "utils/intrusive_forward_list.h"
 
 namespace art {
 
@@ -66,6 +71,13 @@ class StringList {
       current->Dump(NewEntryStream());
     }
   }
+  // Construct StringList from a list of elements. The value type must provide method `Dump`.
+  template <typename Container>
+  explicit StringList(const Container& list, Format format = kArrayBrackets) : StringList(format) {
+    for (const typename Container::value_type& current : list) {
+      current.Dump(NewEntryStream());
+    }
+  }
 
   std::ostream& NewEntryStream() {
     if (is_empty_) {
@@ -94,8 +106,7 @@ std::ostream& operator<<(std::ostream& os, const StringList& list) {
   }
 }
 
-typedef Disassembler* create_disasm_prototype(InstructionSet instruction_set,
-                                              DisassemblerOptions* options);
+using create_disasm_prototype = Disassembler*(InstructionSet, DisassemblerOptions*);
 class HGraphVisualizerDisassembler {
  public:
   HGraphVisualizerDisassembler(InstructionSet instruction_set,
@@ -119,10 +130,10 @@ class HGraphVisualizerDisassembler {
     // been generated, so we can read data in literal pools.
     disassembler_ = std::unique_ptr<Disassembler>((*create_disassembler)(
             instruction_set,
-            new DisassemblerOptions(/* absolute_addresses */ false,
+            new DisassemblerOptions(/* absolute_addresses= */ false,
                                     base_address,
                                     end_address,
-                                    /* can_read_literals */ true,
+                                    /* can_read_literals= */ true,
                                     Is64BitInstructionSet(instruction_set)
                                         ? &Thread::DumpThreadOffset<PointerSize::k64>
                                         : &Thread::DumpThreadOffset<PointerSize::k32>)));
@@ -142,7 +153,7 @@ class HGraphVisualizerDisassembler {
     }
 
     const uint8_t* base = disassembler_->GetDisassemblerOptions()->base_address_;
-    if (instruction_set_ == kThumb2) {
+    if (instruction_set_ == InstructionSet::kThumb2) {
       // ARM and Thumb-2 use the same disassembler. The bottom bit of the
       // address is used to distinguish between the two.
       base += 1;
@@ -235,25 +246,6 @@ class HGraphVisualizerPrinter : public HGraphDelegateVisitor {
     }
   }
 
-  char GetTypeId(Primitive::Type type) {
-    // Note that Primitive::Descriptor would not work for us
-    // because it does not handle reference types (that is kPrimNot).
-    switch (type) {
-      case Primitive::kPrimBoolean: return 'z';
-      case Primitive::kPrimByte: return 'b';
-      case Primitive::kPrimChar: return 'c';
-      case Primitive::kPrimShort: return 's';
-      case Primitive::kPrimInt: return 'i';
-      case Primitive::kPrimLong: return 'j';
-      case Primitive::kPrimFloat: return 'f';
-      case Primitive::kPrimDouble: return 'd';
-      case Primitive::kPrimNot: return 'l';
-      case Primitive::kPrimVoid: return 'v';
-    }
-    LOG(FATAL) << "Unreachable";
-    return 'v';
-  }
-
   void PrintPredecessors(HBasicBlock* block) {
     AddIndent();
     output_ << "predecessors";
@@ -340,7 +332,7 @@ class HGraphVisualizerPrinter : public HGraphDelegateVisitor {
     return output_;
   }
 
-  void VisitParallelMove(HParallelMove* instruction) OVERRIDE {
+  void VisitParallelMove(HParallelMove* instruction) override {
     StartAttributeStream("liveness") << instruction->GetLifetimePosition();
     StringList moves;
     for (size_t i = 0, e = instruction->NumMoves(); i < e; ++i) {
@@ -353,36 +345,36 @@ class HGraphVisualizerPrinter : public HGraphDelegateVisitor {
     StartAttributeStream("moves") <<  moves;
   }
 
-  void VisitIntConstant(HIntConstant* instruction) OVERRIDE {
+  void VisitIntConstant(HIntConstant* instruction) override {
     StartAttributeStream() << instruction->GetValue();
   }
 
-  void VisitLongConstant(HLongConstant* instruction) OVERRIDE {
+  void VisitLongConstant(HLongConstant* instruction) override {
     StartAttributeStream() << instruction->GetValue();
   }
 
-  void VisitFloatConstant(HFloatConstant* instruction) OVERRIDE {
+  void VisitFloatConstant(HFloatConstant* instruction) override {
     StartAttributeStream() << instruction->GetValue();
   }
 
-  void VisitDoubleConstant(HDoubleConstant* instruction) OVERRIDE {
+  void VisitDoubleConstant(HDoubleConstant* instruction) override {
     StartAttributeStream() << instruction->GetValue();
   }
 
-  void VisitPhi(HPhi* phi) OVERRIDE {
+  void VisitPhi(HPhi* phi) override {
     StartAttributeStream("reg") << phi->GetRegNumber();
     StartAttributeStream("is_catch_phi") << std::boolalpha << phi->IsCatchPhi() << std::noboolalpha;
   }
 
-  void VisitMemoryBarrier(HMemoryBarrier* barrier) OVERRIDE {
+  void VisitMemoryBarrier(HMemoryBarrier* barrier) override {
     StartAttributeStream("kind") << barrier->GetBarrierKind();
   }
 
-  void VisitMonitorOperation(HMonitorOperation* monitor) OVERRIDE {
+  void VisitMonitorOperation(HMonitorOperation* monitor) override {
     StartAttributeStream("kind") << (monitor->IsEnter() ? "enter" : "exit");
   }
 
-  void VisitLoadClass(HLoadClass* load_class) OVERRIDE {
+  void VisitLoadClass(HLoadClass* load_class) override {
     StartAttributeStream("load_kind") << load_class->GetLoadKind();
     const char* descriptor = load_class->GetDexFile().GetTypeDescriptor(
         load_class->GetDexFile().GetTypeId(load_class->GetTypeIndex()));
@@ -393,23 +385,42 @@ class HGraphVisualizerPrinter : public HGraphDelegateVisitor {
         << load_class->NeedsAccessCheck() << std::noboolalpha;
   }
 
-  void VisitLoadString(HLoadString* load_string) OVERRIDE {
+  void VisitLoadMethodHandle(HLoadMethodHandle* load_method_handle) override {
+    StartAttributeStream("load_kind") << "RuntimeCall";
+    StartAttributeStream("method_handle_index") << load_method_handle->GetMethodHandleIndex();
+  }
+
+  void VisitLoadMethodType(HLoadMethodType* load_method_type) override {
+    StartAttributeStream("load_kind") << "RuntimeCall";
+    const DexFile& dex_file = load_method_type->GetDexFile();
+    const dex::ProtoId& proto_id = dex_file.GetProtoId(load_method_type->GetProtoIndex());
+    StartAttributeStream("method_type") << dex_file.GetProtoSignature(proto_id);
+  }
+
+  void VisitLoadString(HLoadString* load_string) override {
     StartAttributeStream("load_kind") << load_string->GetLoadKind();
   }
 
-  void VisitCheckCast(HCheckCast* check_cast) OVERRIDE {
-    StartAttributeStream("check_kind") << check_cast->GetTypeCheckKind();
+  void HandleTypeCheckInstruction(HTypeCheckInstruction* check) {
+    StartAttributeStream("check_kind") << check->GetTypeCheckKind();
     StartAttributeStream("must_do_null_check") << std::boolalpha
-        << check_cast->MustDoNullCheck() << std::noboolalpha;
+        << check->MustDoNullCheck() << std::noboolalpha;
+    if (check->GetTypeCheckKind() == TypeCheckKind::kBitstringCheck) {
+      StartAttributeStream("path_to_root") << std::hex
+          << "0x" << check->GetBitstringPathToRoot() << std::dec;
+      StartAttributeStream("mask") << std::hex << "0x" << check->GetBitstringMask() << std::dec;
+    }
   }
 
-  void VisitInstanceOf(HInstanceOf* instance_of) OVERRIDE {
-    StartAttributeStream("check_kind") << instance_of->GetTypeCheckKind();
-    StartAttributeStream("must_do_null_check") << std::boolalpha
-        << instance_of->MustDoNullCheck() << std::noboolalpha;
+  void VisitCheckCast(HCheckCast* check_cast) override {
+    HandleTypeCheckInstruction(check_cast);
   }
 
-  void VisitArrayLength(HArrayLength* array_length) OVERRIDE {
+  void VisitInstanceOf(HInstanceOf* instance_of) override {
+    HandleTypeCheckInstruction(instance_of);
+  }
+
+  void VisitArrayLength(HArrayLength* array_length) override {
     StartAttributeStream("is_string_length") << std::boolalpha
         << array_length->IsStringLength() << std::noboolalpha;
     if (array_length->IsEmittedAtUseSite()) {
@@ -417,42 +428,53 @@ class HGraphVisualizerPrinter : public HGraphDelegateVisitor {
     }
   }
 
-  void VisitBoundsCheck(HBoundsCheck* bounds_check) OVERRIDE {
+  void VisitBoundsCheck(HBoundsCheck* bounds_check) override {
     StartAttributeStream("is_string_char_at") << std::boolalpha
         << bounds_check->IsStringCharAt() << std::noboolalpha;
   }
 
-  void VisitArrayGet(HArrayGet* array_get) OVERRIDE {
+  void VisitArrayGet(HArrayGet* array_get) override {
     StartAttributeStream("is_string_char_at") << std::boolalpha
         << array_get->IsStringCharAt() << std::noboolalpha;
   }
 
-  void VisitArraySet(HArraySet* array_set) OVERRIDE {
+  void VisitArraySet(HArraySet* array_set) override {
     StartAttributeStream("value_can_be_null") << std::boolalpha
         << array_set->GetValueCanBeNull() << std::noboolalpha;
     StartAttributeStream("needs_type_check") << std::boolalpha
         << array_set->NeedsTypeCheck() << std::noboolalpha;
   }
 
-  void VisitCompare(HCompare* compare) OVERRIDE {
+  void VisitCompare(HCompare* compare) override {
     ComparisonBias bias = compare->GetBias();
     StartAttributeStream("bias") << (bias == ComparisonBias::kGtBias
                                      ? "gt"
                                      : (bias == ComparisonBias::kLtBias ? "lt" : "none"));
   }
 
-  void VisitInvoke(HInvoke* invoke) OVERRIDE {
+  void VisitInvoke(HInvoke* invoke) override {
     StartAttributeStream("dex_file_index") << invoke->GetDexMethodIndex();
-    StartAttributeStream("method_name") << GetGraph()->GetDexFile().PrettyMethod(
-        invoke->GetDexMethodIndex(), /* with_signature */ false);
+    ArtMethod* method = invoke->GetResolvedMethod();
+    // We don't print signatures, which conflict with c1visualizer format.
+    static constexpr bool kWithSignature = false;
+    // Note that we can only use the graph's dex file for the unresolved case. The
+    // other invokes might be coming from inlined methods.
+    ScopedObjectAccess soa(Thread::Current());
+    std::string method_name = (method == nullptr)
+        ? GetGraph()->GetDexFile().PrettyMethod(invoke->GetDexMethodIndex(), kWithSignature)
+        : method->PrettyMethod(kWithSignature);
+    StartAttributeStream("method_name") << method_name;
+    StartAttributeStream("always_throws") << std::boolalpha
+                                          << invoke->AlwaysThrows()
+                                          << std::noboolalpha;
   }
 
-  void VisitInvokeUnresolved(HInvokeUnresolved* invoke) OVERRIDE {
+  void VisitInvokeUnresolved(HInvokeUnresolved* invoke) override {
     VisitInvoke(invoke);
     StartAttributeStream("invoke_type") << invoke->GetInvokeType();
   }
 
-  void VisitInvokeStaticOrDirect(HInvokeStaticOrDirect* invoke) OVERRIDE {
+  void VisitInvokeStaticOrDirect(HInvokeStaticOrDirect* invoke) override {
     VisitInvoke(invoke);
     StartAttributeStream("method_load_kind") << invoke->GetMethodLoadKind();
     StartAttributeStream("intrinsic") << invoke->GetIntrinsic();
@@ -461,73 +483,104 @@ class HGraphVisualizerPrinter : public HGraphDelegateVisitor {
     }
   }
 
-  void VisitInvokeVirtual(HInvokeVirtual* invoke) OVERRIDE {
+  void VisitInvokeVirtual(HInvokeVirtual* invoke) override {
     VisitInvoke(invoke);
     StartAttributeStream("intrinsic") << invoke->GetIntrinsic();
   }
 
-  void VisitInvokePolymorphic(HInvokePolymorphic* invoke) OVERRIDE {
+  void VisitInvokePolymorphic(HInvokePolymorphic* invoke) override {
     VisitInvoke(invoke);
     StartAttributeStream("invoke_type") << "InvokePolymorphic";
   }
 
-  void VisitInstanceFieldGet(HInstanceFieldGet* iget) OVERRIDE {
+  void VisitInstanceFieldGet(HInstanceFieldGet* iget) override {
     StartAttributeStream("field_name") <<
         iget->GetFieldInfo().GetDexFile().PrettyField(iget->GetFieldInfo().GetFieldIndex(),
                                                       /* with type */ false);
     StartAttributeStream("field_type") << iget->GetFieldType();
   }
 
-  void VisitInstanceFieldSet(HInstanceFieldSet* iset) OVERRIDE {
+  void VisitInstanceFieldSet(HInstanceFieldSet* iset) override {
     StartAttributeStream("field_name") <<
         iset->GetFieldInfo().GetDexFile().PrettyField(iset->GetFieldInfo().GetFieldIndex(),
                                                       /* with type */ false);
     StartAttributeStream("field_type") << iset->GetFieldType();
   }
 
-  void VisitUnresolvedInstanceFieldGet(HUnresolvedInstanceFieldGet* field_access) OVERRIDE {
+  void VisitStaticFieldGet(HStaticFieldGet* sget) override {
+    StartAttributeStream("field_name") <<
+        sget->GetFieldInfo().GetDexFile().PrettyField(sget->GetFieldInfo().GetFieldIndex(),
+                                                      /* with type */ false);
+    StartAttributeStream("field_type") << sget->GetFieldType();
+  }
+
+  void VisitStaticFieldSet(HStaticFieldSet* sset) override {
+    StartAttributeStream("field_name") <<
+        sset->GetFieldInfo().GetDexFile().PrettyField(sset->GetFieldInfo().GetFieldIndex(),
+                                                      /* with type */ false);
+    StartAttributeStream("field_type") << sset->GetFieldType();
+  }
+
+  void VisitUnresolvedInstanceFieldGet(HUnresolvedInstanceFieldGet* field_access) override {
     StartAttributeStream("field_type") << field_access->GetFieldType();
   }
 
-  void VisitUnresolvedInstanceFieldSet(HUnresolvedInstanceFieldSet* field_access) OVERRIDE {
+  void VisitUnresolvedInstanceFieldSet(HUnresolvedInstanceFieldSet* field_access) override {
     StartAttributeStream("field_type") << field_access->GetFieldType();
   }
 
-  void VisitUnresolvedStaticFieldGet(HUnresolvedStaticFieldGet* field_access) OVERRIDE {
+  void VisitUnresolvedStaticFieldGet(HUnresolvedStaticFieldGet* field_access) override {
     StartAttributeStream("field_type") << field_access->GetFieldType();
   }
 
-  void VisitUnresolvedStaticFieldSet(HUnresolvedStaticFieldSet* field_access) OVERRIDE {
+  void VisitUnresolvedStaticFieldSet(HUnresolvedStaticFieldSet* field_access) override {
     StartAttributeStream("field_type") << field_access->GetFieldType();
   }
 
-  void VisitTryBoundary(HTryBoundary* try_boundary) OVERRIDE {
+  void VisitTryBoundary(HTryBoundary* try_boundary) override {
     StartAttributeStream("kind") << (try_boundary->IsEntry() ? "entry" : "exit");
   }
 
-  void VisitDeoptimize(HDeoptimize* deoptimize) OVERRIDE {
+  void VisitDeoptimize(HDeoptimize* deoptimize) override {
     StartAttributeStream("kind") << deoptimize->GetKind();
   }
 
-  void VisitVecHalvingAdd(HVecHalvingAdd* hadd) OVERRIDE {
-    StartAttributeStream("unsigned") << std::boolalpha << hadd->IsUnsigned() << std::noboolalpha;
+  void VisitVecOperation(HVecOperation* vec_operation) override {
+    StartAttributeStream("packed_type") << vec_operation->GetPackedType();
+  }
+
+  void VisitVecMemoryOperation(HVecMemoryOperation* vec_mem_operation) override {
+    StartAttributeStream("alignment") << vec_mem_operation->GetAlignment().ToString();
+  }
+
+  void VisitVecHalvingAdd(HVecHalvingAdd* hadd) override {
+    VisitVecBinaryOperation(hadd);
     StartAttributeStream("rounded") << std::boolalpha << hadd->IsRounded() << std::noboolalpha;
   }
 
-  void VisitVecMultiplyAccumulate(HVecMultiplyAccumulate* instruction) OVERRIDE {
+  void VisitVecMultiplyAccumulate(HVecMultiplyAccumulate* instruction) override {
+    VisitVecOperation(instruction);
     StartAttributeStream("kind") << instruction->GetOpKind();
+  }
+
+  void VisitVecDotProd(HVecDotProd* instruction) override {
+    VisitVecOperation(instruction);
+    DataType::Type arg_type = instruction->InputAt(1)->AsVecOperation()->GetPackedType();
+    StartAttributeStream("type") << (instruction->IsZeroExtending() ?
+                                    DataType::ToUnsigned(arg_type) :
+                                    DataType::ToSigned(arg_type));
   }
 
 #if defined(ART_ENABLE_CODEGEN_arm) || defined(ART_ENABLE_CODEGEN_arm64)
-  void VisitMultiplyAccumulate(HMultiplyAccumulate* instruction) OVERRIDE {
+  void VisitMultiplyAccumulate(HMultiplyAccumulate* instruction) override {
     StartAttributeStream("kind") << instruction->GetOpKind();
   }
 
-  void VisitBitwiseNegatedRight(HBitwiseNegatedRight* instruction) OVERRIDE {
+  void VisitBitwiseNegatedRight(HBitwiseNegatedRight* instruction) override {
     StartAttributeStream("kind") << instruction->GetOpKind();
   }
 
-  void VisitDataProcWithShifterOp(HDataProcWithShifterOp* instruction) OVERRIDE {
+  void VisitDataProcWithShifterOp(HDataProcWithShifterOp* instruction) override {
     StartAttributeStream("kind") << instruction->GetInstrKind() << "+" << instruction->GetOpKind();
     if (HDataProcWithShifterOp::IsShiftOp(instruction->GetOpKind())) {
       StartAttributeStream("shift") << instruction->GetShiftAmount();
@@ -545,9 +598,14 @@ class HGraphVisualizerPrinter : public HGraphDelegateVisitor {
     if (!inputs.empty()) {
       StringList input_list;
       for (const HInstruction* input : inputs) {
-        input_list.NewEntryStream() << GetTypeId(input->GetType()) << input->GetId();
+        input_list.NewEntryStream() << DataType::TypeId(input->GetType()) << input->GetId();
       }
       StartAttributeStream() << input_list;
+    }
+    if (instruction->GetDexPc() != kNoDexPc) {
+      StartAttributeStream("dex_pc") << instruction->GetDexPc();
+    } else {
+      StartAttributeStream("dex_pc") << "n/a";
     }
     instruction->Accept(this);
     if (instruction->HasEnvironment()) {
@@ -559,7 +617,7 @@ class HGraphVisualizerPrinter : public HGraphDelegateVisitor {
         for (size_t i = 0, e = environment->Size(); i < e; ++i) {
           HInstruction* insn = environment->GetInstructionAt(i);
           if (insn != nullptr) {
-            vregs.NewEntryStream() << GetTypeId(insn->GetType()) << insn->GetId();
+            vregs.NewEntryStream() << DataType::TypeId(insn->GetType()) << insn->GetId();
           } else {
             vregs.NewEntryStream() << "_";
           }
@@ -576,8 +634,8 @@ class HGraphVisualizerPrinter : public HGraphDelegateVisitor {
         LiveInterval* interval = instruction->GetLiveInterval();
         StartAttributeStream("ranges")
             << StringList(interval->GetFirstRange(), StringList::kSetBrackets);
-        StartAttributeStream("uses") << StringList(interval->GetFirstUse());
-        StartAttributeStream("env_uses") << StringList(interval->GetFirstEnvironmentUse());
+        StartAttributeStream("uses") << StringList(interval->GetUses());
+        StartAttributeStream("env_uses") << StringList(interval->GetEnvironmentUses());
         StartAttributeStream("is_fixed") << interval->IsFixed();
         StartAttributeStream("is_split") << interval->IsSplit();
         StartAttributeStream("is_low") << interval->IsLowInterval();
@@ -614,20 +672,32 @@ class HGraphVisualizerPrinter : public HGraphDelegateVisitor {
           << std::boolalpha << loop_info->IsIrreducible() << std::noboolalpha;
     }
 
+    // For the builder and the inliner, we want to add extra information on HInstructions
+    // that have reference types, and also HInstanceOf/HCheckcast.
     if ((IsPass(HGraphBuilder::kBuilderPassName)
         || IsPass(HInliner::kInlinerPassName))
-        && (instruction->GetType() == Primitive::kPrimNot)) {
-      ReferenceTypeInfo info = instruction->IsLoadClass()
-        ? instruction->AsLoadClass()->GetLoadedClassRTI()
-        : instruction->GetReferenceTypeInfo();
+        && (instruction->GetType() == DataType::Type::kReference ||
+            instruction->IsInstanceOf() ||
+            instruction->IsCheckCast())) {
+      ReferenceTypeInfo info = (instruction->GetType() == DataType::Type::kReference)
+          ? instruction->IsLoadClass()
+              ? instruction->AsLoadClass()->GetLoadedClassRTI()
+              : instruction->GetReferenceTypeInfo()
+          : instruction->IsInstanceOf()
+              ? instruction->AsInstanceOf()->GetTargetClassRTI()
+              : instruction->AsCheckCast()->GetTargetClassRTI();
       ScopedObjectAccess soa(Thread::Current());
       if (info.IsValid()) {
         StartAttributeStream("klass")
             << mirror::Class::PrettyDescriptor(info.GetTypeHandle().Get());
-        StartAttributeStream("can_be_null")
-            << std::boolalpha << instruction->CanBeNull() << std::noboolalpha;
+        if (instruction->GetType() == DataType::Type::kReference) {
+          StartAttributeStream("can_be_null")
+              << std::boolalpha << instruction->CanBeNull() << std::noboolalpha;
+        }
         StartAttributeStream("exact") << std::boolalpha << info.IsExact() << std::noboolalpha;
-      } else if (instruction->IsLoadClass()) {
+      } else if (instruction->IsLoadClass() ||
+                 instruction->IsInstanceOf() ||
+                 instruction->IsCheckCast()) {
         StartAttributeStream("klass") << "unresolved";
       } else {
         // The NullConstant may be added to the graph during other passes that happen between
@@ -660,7 +730,7 @@ class HGraphVisualizerPrinter : public HGraphDelegateVisitor {
       size_t num_uses = instruction->GetUses().SizeSlow();
       AddIndent();
       output_ << bci << " " << num_uses << " "
-              << GetTypeId(instruction->GetType()) << instruction->GetId() << " ";
+              << DataType::TypeId(instruction->GetType()) << instruction->GetId() << " ";
       PrintInstruction(instruction);
       output_ << " " << kEndInstructionMarker << "\n";
     }
@@ -751,7 +821,7 @@ class HGraphVisualizerPrinter : public HGraphDelegateVisitor {
     Flush();
   }
 
-  void VisitBasicBlock(HBasicBlock* block) OVERRIDE {
+  void VisitBasicBlock(HBasicBlock* block) override {
     StartTag("block");
     PrintProperty("name", "B", block->GetBlockId());
     if (block->GetLifetimeStart() != kNoLifetime) {
@@ -783,7 +853,7 @@ class HGraphVisualizerPrinter : public HGraphDelegateVisitor {
     for (HInstructionIterator it(block->GetPhis()); !it.Done(); it.Advance()) {
       AddIndent();
       HInstruction* instruction = it.Current();
-      output_ << instruction->GetId() << " " << GetTypeId(instruction->GetType())
+      output_ << instruction->GetId() << " " << DataType::TypeId(instruction->GetType())
               << instruction->GetId() << "[ ";
       for (const HInstruction* input : instruction->GetInputs()) {
         output_ << input->GetId() << " ";
@@ -854,8 +924,8 @@ void HGraphVisualizer::DumpGraphWithDisassembly() const {
     HGraphVisualizerPrinter printer(graph_,
                                     *output_,
                                     "disassembly",
-                                    /* is_after_pass */ true,
-                                    /* graph_in_bad_state */ false,
+                                    /* is_after_pass= */ true,
+                                    /* graph_in_bad_state= */ false,
                                     codegen_,
                                     codegen_.GetDisassemblyInformation());
     printer.Run();

@@ -17,7 +17,7 @@
 #ifndef ART_RUNTIME_ENTRYPOINTS_QUICK_QUICK_DEFAULT_INIT_ENTRYPOINTS_H_
 #define ART_RUNTIME_ENTRYPOINTS_QUICK_QUICK_DEFAULT_INIT_ENTRYPOINTS_H_
 
-#include "base/logging.h"
+#include "base/logging.h"  // FOR VLOG_IS_ON.
 #include "entrypoints/jni/jni_entrypoints.h"
 #include "entrypoints/runtime_asm_entrypoints.h"
 #include "quick_alloc_entrypoints.h"
@@ -26,17 +26,19 @@
 
 namespace art {
 
-void DefaultInitEntryPoints(JniEntryPoints* jpoints, QuickEntryPoints* qpoints) {
+static void DefaultInitEntryPoints(JniEntryPoints* jpoints, QuickEntryPoints* qpoints) {
   // JNI
   jpoints->pDlsymLookup = art_jni_dlsym_lookup_stub;
 
   // Alloc
-  ResetQuickAllocEntryPoints(qpoints, /* is_marking */ true);
+  ResetQuickAllocEntryPoints(qpoints, /* is_marking= */ true);
 
-  // DexCache
+  // Resolution and initialization
   qpoints->pInitializeStaticStorage = art_quick_initialize_static_storage;
-  qpoints->pInitializeTypeAndVerifyAccess = art_quick_initialize_type_and_verify_access;
-  qpoints->pInitializeType = art_quick_initialize_type;
+  qpoints->pResolveTypeAndVerifyAccess = art_quick_resolve_type_and_verify_access;
+  qpoints->pResolveType = art_quick_resolve_type;
+  qpoints->pResolveMethodHandle = art_quick_resolve_method_handle;
+  qpoints->pResolveMethodType = art_quick_resolve_method_type;
   qpoints->pResolveString = art_quick_resolve_string;
 
   // Field
@@ -104,6 +106,7 @@ void DefaultInitEntryPoints(JniEntryPoints* jpoints, QuickEntryPoints* qpoints) 
   qpoints->pInvokeVirtualTrampolineWithAccessCheck =
       art_quick_invoke_virtual_trampoline_with_access_check;
   qpoints->pInvokePolymorphic = art_quick_invoke_polymorphic;
+  qpoints->pInvokeCustom = art_quick_invoke_custom;
 
   // Thread
   qpoints->pTestSuspend = art_quick_test_suspend;
@@ -118,7 +121,7 @@ void DefaultInitEntryPoints(JniEntryPoints* jpoints, QuickEntryPoints* qpoints) 
 
   // Deoptimize
   qpoints->pDeoptimize = art_quick_deoptimize_from_compiled_code;
-};
+}
 
 }  // namespace art
 

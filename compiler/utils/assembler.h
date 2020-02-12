@@ -19,6 +19,8 @@
 
 #include <vector>
 
+#include <android-base/logging.h>
+
 #include "arch/instruction_set.h"
 #include "arch/instruction_set_features.h"
 #include "arm/constants_arm.h"
@@ -26,12 +28,11 @@
 #include "base/arena_object.h"
 #include "base/array_ref.h"
 #include "base/enums.h"
-#include "base/logging.h"
 #include "base/macros.h"
-#include "debug/dwarf/debug_frame_opcode_writer.h"
+#include "base/memory_region.h"
+#include "dwarf/debug_frame_opcode_writer.h"
 #include "label.h"
 #include "managed_register.h"
-#include "memory_region.h"
 #include "mips/constants_mips.h"
 #include "offsets.h"
 #include "x86/constants_x86.h"
@@ -89,11 +90,11 @@ class SlowPath : public DeletableArenaObject<kArenaAllocAssembler> {
 
 class AssemblerBuffer {
  public:
-  explicit AssemblerBuffer(ArenaAllocator* arena);
+  explicit AssemblerBuffer(ArenaAllocator* allocator);
   ~AssemblerBuffer();
 
-  ArenaAllocator* GetArena() {
-    return arena_;
+  ArenaAllocator* GetAllocator() {
+    return allocator_;
   }
 
   // Basic support for emitting, loading, and storing.
@@ -252,7 +253,7 @@ class AssemblerBuffer {
   // for a single, fast space check per instruction.
   static const int kMinimumGap = 32;
 
-  ArenaAllocator* arena_;
+  ArenaAllocator* const allocator_;
   uint8_t* contents_;
   uint8_t* cursor_;
   uint8_t* limit_;
@@ -282,7 +283,7 @@ class AssemblerBuffer {
 
 // The purpose of this class is to ensure that we do not have to explicitly
 // call the AdvancePC method (which is good for convenience and correctness).
-class DebugFrameOpCodeWriterForAssembler FINAL
+class DebugFrameOpCodeWriterForAssembler final
     : public dwarf::DebugFrameOpCodeWriter<> {
  public:
   struct DelayedAdvancePC {
@@ -291,10 +292,10 @@ class DebugFrameOpCodeWriterForAssembler FINAL
   };
 
   // This method is called the by the opcode writers.
-  virtual void ImplicitlyAdvancePC() FINAL;
+  void ImplicitlyAdvancePC() final;
 
   explicit DebugFrameOpCodeWriterForAssembler(Assembler* buffer)
-      : dwarf::DebugFrameOpCodeWriter<>(false /* enabled */),
+      : dwarf::DebugFrameOpCodeWriter<>(/* enabled= */ false),
         assembler_(buffer),
         delay_emitting_advance_pc_(false),
         delayed_advance_pcs_() {
@@ -392,8 +393,8 @@ class Assembler : public DeletableArenaObject<kArenaAllocAssembler> {
    */
   DebugFrameOpCodeWriterForAssembler& cfi() { return cfi_; }
 
-  ArenaAllocator* GetArena() {
-    return buffer_.GetArena();
+  ArenaAllocator* GetAllocator() {
+    return buffer_.GetAllocator();
   }
 
   AssemblerBuffer* GetBuffer() {
@@ -401,7 +402,7 @@ class Assembler : public DeletableArenaObject<kArenaAllocAssembler> {
   }
 
  protected:
-  explicit Assembler(ArenaAllocator* arena) : buffer_(arena), cfi_(this) {}
+  explicit Assembler(ArenaAllocator* allocator) : buffer_(allocator), cfi_(this) {}
 
   AssemblerBuffer buffer_;
 

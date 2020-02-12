@@ -21,12 +21,9 @@
 
 namespace art {
 namespace mirror {
-  class Object;
-  template<class MirrorType> class HeapReference;
+class Object;
+template<class MirrorType> class HeapReference;
 }  // namespace mirror
-
-// A callback for visiting an object in the heap.
-typedef void (ObjectCallback)(mirror::Object* obj, void* arg);
 
 class IsMarkedVisitor {
  public:

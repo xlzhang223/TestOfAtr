@@ -16,11 +16,13 @@ package art
 
 import (
 	"android/soong/android"
+	"android/soong/apex"
 	"android/soong/cc"
 	"fmt"
+	"log"
 	"sync"
 
-	"github.com/google/blueprint"
+	"github.com/google/blueprint/proptools"
 )
 
 var supportedArches = []string{"arm", "arm64", "mips", "mips64", "x86", "x86_64"}
@@ -46,16 +48,15 @@ func globalFlags(ctx android.BaseContext) ([]string, []string) {
 		cflags = append(cflags, "-DART_USE_TLAB=1")
 	}
 
-	if !envFalse(ctx, "ART_ENABLE_VDEX") {
-		cflags = append(cflags, "-DART_ENABLE_VDEX")
-	}
-
 	imtSize := envDefault(ctx, "ART_IMT_SIZE", "43")
 	cflags = append(cflags, "-DIMT_SIZE="+imtSize)
 
 	if envTrue(ctx, "ART_HEAP_POISONING") {
 		cflags = append(cflags, "-DART_HEAP_POISONING=1")
 		asflags = append(asflags, "-DART_HEAP_POISONING=1")
+	}
+	if envTrue(ctx, "ART_USE_CXX_INTERPRETER") {
+		cflags = append(cflags, "-DART_USE_CXX_INTERPRETER=1")
 	}
 
 	if !envFalse(ctx, "ART_USE_READ_BARRIER") && ctx.AConfig().ArtUseReadBarrier() {
@@ -70,10 +71,49 @@ func globalFlags(ctx android.BaseContext) ([]string, []string) {
 			"-DART_READ_BARRIER_TYPE_IS_"+barrierType+"=1")
 	}
 
-	if envTrue(ctx, "ART_USE_OLD_ARM_BACKEND") {
-		// Used to enable the old, pre-VIXL ARM code generator.
-		cflags = append(cflags, "-DART_USE_OLD_ARM_BACKEND=1")
-		asflags = append(asflags, "-DART_USE_OLD_ARM_BACKEND=1")
+	if !envFalse(ctx, "ART_USE_GENERATIONAL_CC") {
+		cflags = append(cflags, "-DART_USE_GENERATIONAL_CC=1")
+	}
+
+	cdexLevel := envDefault(ctx, "ART_DEFAULT_COMPACT_DEX_LEVEL", "fast")
+	cflags = append(cflags, "-DART_DEFAULT_COMPACT_DEX_LEVEL="+cdexLevel)
+
+	// We need larger stack overflow guards for ASAN, as the compiled code will have
+	// larger frame sizes. For simplicity, just use global not-target-specific cflags.
+	// Note: We increase this for both debug and non-debug, as the overflow gap will
+	//       be compiled into managed code. We always preopt (and build core images) with
+	//       the debug version. So make the gap consistent (and adjust for the worst).
+	if len(ctx.AConfig().SanitizeDevice()) > 0 || len(ctx.AConfig().SanitizeHost()) > 0 {
+		cflags = append(cflags,
+			"-DART_STACK_OVERFLOW_GAP_arm=8192",
+			"-DART_STACK_OVERFLOW_GAP_arm64=8192",
+			"-DART_STACK_OVERFLOW_GAP_mips=16384",
+			"-DART_STACK_OVERFLOW_GAP_mips64=16384",
+			"-DART_STACK_OVERFLOW_GAP_x86=16384",
+			"-DART_STACK_OVERFLOW_GAP_x86_64=20480")
+	} else {
+		cflags = append(cflags,
+			"-DART_STACK_OVERFLOW_GAP_arm=8192",
+			"-DART_STACK_OVERFLOW_GAP_arm64=8192",
+			"-DART_STACK_OVERFLOW_GAP_mips=16384",
+			"-DART_STACK_OVERFLOW_GAP_mips64=16384",
+			"-DART_STACK_OVERFLOW_GAP_x86=8192",
+			"-DART_STACK_OVERFLOW_GAP_x86_64=8192")
+	}
+
+	if envTrue(ctx, "ART_ENABLE_ADDRESS_SANITIZER") {
+		// Used to enable full sanitization, i.e., user poisoning, under ASAN.
+		cflags = append(cflags, "-DART_ENABLE_ADDRESS_SANITIZER=1")
+		asflags = append(asflags, "-DART_ENABLE_ADDRESS_SANITIZER=1")
+	}
+
+	if envTrue(ctx, "ART_MIPS32_CHECK_ALIGNMENT") {
+		// Enable the use of MIPS32 CHECK_ALIGNMENT macro for debugging purposes
+		asflags = append(asflags, "-DART_MIPS32_CHECK_ALIGNMENT")
+	}
+
+	if envTrueOrDefault(ctx, "USE_D8_DESUGAR") {
+		cflags = append(cflags, "-DUSE_D8_DESUGAR=1")
 	}
 
 	return cflags, asflags
@@ -132,6 +172,11 @@ func hostFlags(ctx android.BaseContext) []string {
 	cflags = append(cflags, "-DART_BASE_ADDRESS_MIN_DELTA="+minDelta)
 	cflags = append(cflags, "-DART_BASE_ADDRESS_MAX_DELTA="+maxDelta)
 
+	if len(ctx.AConfig().SanitizeHost()) > 0 && !envFalse(ctx, "ART_ENABLE_ADDRESS_SANITIZER") {
+		// We enable full sanitization on the host by default.
+		cflags = append(cflags, "-DART_ENABLE_ADDRESS_SANITIZER=1")
+	}
+
 	return cflags
 }
 
@@ -145,14 +190,25 @@ func globalDefaults(ctx android.LoadHookContext) {
 				Cflags []string
 			}
 		}
-		Cflags  []string
-		Asflags []string
+		Cflags   []string
+		Asflags  []string
+		Sanitize struct {
+			Recover []string
+		}
 	}
 
 	p := &props{}
 	p.Cflags, p.Asflags = globalFlags(ctx)
 	p.Target.Android.Cflags = deviceFlags(ctx)
 	p.Target.Host.Cflags = hostFlags(ctx)
+
+	if envTrue(ctx, "ART_DEX_FILE_ACCESS_TRACKING") {
+		p.Cflags = append(p.Cflags, "-DART_DEX_FILE_ACCESS_TRACKING")
+		p.Sanitize.Recover = []string{
+			"address",
+		}
+	}
+
 	ctx.AppendProperties(p)
 }
 
@@ -168,35 +224,39 @@ func debugDefaults(ctx android.LoadHookContext) {
 
 func customLinker(ctx android.LoadHookContext) {
 	linker := envDefault(ctx, "CUSTOM_TARGET_LINKER", "")
-	if linker != "" {
-		type props struct {
-			DynamicLinker string
-		}
-
-		p := &props{}
-		p.DynamicLinker = linker
-		ctx.AppendProperties(p)
+	type props struct {
+		DynamicLinker string
 	}
+
+	p := &props{}
+	if linker != "" {
+		p.DynamicLinker = linker
+	}
+
+	ctx.AppendProperties(p)
 }
 
 func prefer32Bit(ctx android.LoadHookContext) {
-	if envTrue(ctx, "HOST_PREFER_32_BIT") {
-		type props struct {
-			Target struct {
-				Host struct {
-					Compile_multilib string
-				}
+	type props struct {
+		Target struct {
+			Host struct {
+				Compile_multilib *string
 			}
 		}
-
-		p := &props{}
-		p.Target.Host.Compile_multilib = "prefer32"
-		ctx.AppendProperties(p)
 	}
+
+	p := &props{}
+	if envTrue(ctx, "HOST_PREFER_32_BIT") {
+		p.Target.Host.Compile_multilib = proptools.StringPtr("prefer32")
+	}
+
+	ctx.AppendProperties(p)
 }
 
+var testMapKey = android.NewOnceKey("artTests")
+
 func testMap(config android.Config) map[string][]string {
-	return config.Once("artTests", func() interface{} {
+	return config.Once(testMapKey, func() interface{} {
 		return make(map[string][]string)
 	}).(map[string][]string)
 }
@@ -224,75 +284,134 @@ var artTestMutex sync.Mutex
 
 func init() {
 	android.RegisterModuleType("art_cc_library", artLibrary)
+	android.RegisterModuleType("art_cc_library_static", artStaticLibrary)
 	android.RegisterModuleType("art_cc_binary", artBinary)
 	android.RegisterModuleType("art_cc_test", artTest)
 	android.RegisterModuleType("art_cc_test_library", artTestLibrary)
 	android.RegisterModuleType("art_cc_defaults", artDefaultsFactory)
+	android.RegisterModuleType("libart_cc_defaults", libartDefaultsFactory)
+	android.RegisterModuleType("libart_static_cc_defaults", libartStaticDefaultsFactory)
 	android.RegisterModuleType("art_global_defaults", artGlobalDefaultsFactory)
 	android.RegisterModuleType("art_debug_defaults", artDebugDefaultsFactory)
+
+	// TODO: This makes the module disable itself for host if HOST_PREFER_32_BIT is
+	// set. We need this because the multilib types of binaries listed in the apex
+	// rule must match the declared type. This is normally not difficult but HOST_PREFER_32_BIT
+	// changes this to 'prefer32' on all host binaries. Since HOST_PREFER_32_BIT is
+	// only used for testing we can just disable the module.
+	// See b/120617876 for more information.
+	android.RegisterModuleType("art_apex_test", artTestApexBundleFactory)
 }
 
-func artGlobalDefaultsFactory() (blueprint.Module, []interface{}) {
-	module, props := artDefaultsFactory()
+func artTestApexBundleFactory() android.Module {
+	module := apex.ApexBundleFactory( /*testApex*/ true)
+	android.AddLoadHook(module, func(ctx android.LoadHookContext) {
+		if envTrue(ctx, "HOST_PREFER_32_BIT") {
+			type props struct {
+				Target struct {
+					Host struct {
+						Enabled *bool
+					}
+				}
+			}
+
+			p := &props{}
+			p.Target.Host.Enabled = proptools.BoolPtr(false)
+			ctx.AppendProperties(p)
+			log.Print("Disabling host build of " + ctx.ModuleName() + " for HOST_PREFER_32_BIT=true")
+		}
+	})
+
+	return module
+}
+
+func artGlobalDefaultsFactory() android.Module {
+	module := artDefaultsFactory()
 	android.AddLoadHook(module, globalDefaults)
 
-	return module, props
+	return module
 }
 
-func artDebugDefaultsFactory() (blueprint.Module, []interface{}) {
-	module, props := artDefaultsFactory()
+func artDebugDefaultsFactory() android.Module {
+	module := artDefaultsFactory()
 	android.AddLoadHook(module, debugDefaults)
 
-	return module, props
+	return module
 }
 
-func artDefaultsFactory() (blueprint.Module, []interface{}) {
+func artDefaultsFactory() android.Module {
 	c := &codegenProperties{}
-	module, props := cc.DefaultsFactory(c)
+	module := cc.DefaultsFactory(c)
 	android.AddLoadHook(module, func(ctx android.LoadHookContext) { codegen(ctx, c, true) })
 
-	return module, props
+	return module
 }
 
-func artLibrary() (blueprint.Module, []interface{}) {
-	library, _ := cc.NewLibrary(android.HostAndDeviceSupported)
-	module, props := library.Init()
+func libartDefaultsFactory() android.Module {
+	c := &codegenProperties{}
+	module := cc.DefaultsFactory(c)
+	android.AddLoadHook(module, func(ctx android.LoadHookContext) { codegen(ctx, c, true) })
 
-	props = installCodegenCustomizer(module, props, true)
-
-	return module, props
+	return module
 }
 
-func artBinary() (blueprint.Module, []interface{}) {
+func libartStaticDefaultsFactory() android.Module {
+	c := &codegenProperties{}
+	module := cc.DefaultsFactory(c)
+	android.AddLoadHook(module, func(ctx android.LoadHookContext) { codegen(ctx, c, true) })
+
+	return module
+}
+
+func artLibrary() android.Module {
+	m, _ := cc.NewLibrary(android.HostAndDeviceSupported)
+	module := m.Init()
+
+	installCodegenCustomizer(module, true)
+
+	return module
+}
+
+func artStaticLibrary() android.Module {
+	m, library := cc.NewLibrary(android.HostAndDeviceSupported)
+	library.BuildOnlyStatic()
+	module := m.Init()
+
+	installCodegenCustomizer(module, true)
+
+	return module
+}
+
+func artBinary() android.Module {
 	binary, _ := cc.NewBinary(android.HostAndDeviceSupported)
-	module, props := binary.Init()
+	module := binary.Init()
 
 	android.AddLoadHook(module, customLinker)
 	android.AddLoadHook(module, prefer32Bit)
-	return module, props
+	return module
 }
 
-func artTest() (blueprint.Module, []interface{}) {
+func artTest() android.Module {
 	test := cc.NewTest(android.HostAndDeviceSupported)
-	module, props := test.Init()
+	module := test.Init()
 
-	props = installCodegenCustomizer(module, props, false)
+	installCodegenCustomizer(module, false)
 
 	android.AddLoadHook(module, customLinker)
 	android.AddLoadHook(module, prefer32Bit)
 	android.AddInstallHook(module, testInstall)
-	return module, props
+	return module
 }
 
-func artTestLibrary() (blueprint.Module, []interface{}) {
+func artTestLibrary() android.Module {
 	test := cc.NewTestLibrary(android.HostAndDeviceSupported)
-	module, props := test.Init()
+	module := test.Init()
 
-	props = installCodegenCustomizer(module, props, false)
+	installCodegenCustomizer(module, false)
 
 	android.AddLoadHook(module, prefer32Bit)
 	android.AddInstallHook(module, testInstall)
-	return module, props
+	return module
 }
 
 func envDefault(ctx android.BaseContext, key string, defaultValue string) string {
@@ -309,4 +428,8 @@ func envTrue(ctx android.BaseContext, key string) bool {
 
 func envFalse(ctx android.BaseContext, key string) bool {
 	return ctx.AConfig().Getenv(key) == "false"
+}
+
+func envTrueOrDefault(ctx android.BaseContext, key string) bool {
+	return ctx.AConfig().Getenv(key) != "false"
 }

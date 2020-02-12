@@ -17,20 +17,20 @@
 #include "compiled_method.h"
 
 #include "driver/compiled_method_storage.h"
-#include "driver/compiler_driver.h"
 #include "utils/swap_space.h"
 
 namespace art {
 
-CompiledCode::CompiledCode(CompilerDriver* compiler_driver, InstructionSet instruction_set,
+CompiledCode::CompiledCode(CompiledMethodStorage* storage,
+                           InstructionSet instruction_set,
                            const ArrayRef<const uint8_t>& quick_code)
-    : compiler_driver_(compiler_driver),
-      instruction_set_(instruction_set),
-      quick_code_(compiler_driver_->GetCompiledMethodStorage()->DeduplicateCode(quick_code)) {
+    : storage_(storage),
+      quick_code_(storage->DeduplicateCode(quick_code)),
+      packed_fields_(InstructionSetField::Encode(instruction_set)) {
 }
 
 CompiledCode::~CompiledCode() {
-  compiler_driver_->GetCompiledMethodStorage()->ReleaseCode(quick_code_);
+  GetStorage()->ReleaseCode(quick_code_);
 }
 
 bool CompiledCode::operator==(const CompiledCode& rhs) const {
@@ -47,7 +47,7 @@ bool CompiledCode::operator==(const CompiledCode& rhs) const {
 }
 
 size_t CompiledCode::AlignCode(size_t offset) const {
-  return AlignCode(offset, instruction_set_);
+  return AlignCode(offset, GetInstructionSet());
 }
 
 size_t CompiledCode::AlignCode(size_t offset, InstructionSet instruction_set) {
@@ -55,39 +55,38 @@ size_t CompiledCode::AlignCode(size_t offset, InstructionSet instruction_set) {
 }
 
 size_t CompiledCode::CodeDelta() const {
-  return CodeDelta(instruction_set_);
+  return CodeDelta(GetInstructionSet());
 }
 
 size_t CompiledCode::CodeDelta(InstructionSet instruction_set) {
   switch (instruction_set) {
-    case kArm:
-    case kArm64:
-    case kMips:
-    case kMips64:
-    case kX86:
-    case kX86_64:
+    case InstructionSet::kArm:
+    case InstructionSet::kArm64:
+    case InstructionSet::kMips:
+    case InstructionSet::kMips64:
+    case InstructionSet::kX86:
+    case InstructionSet::kX86_64:
       return 0;
-    case kThumb2: {
+    case InstructionSet::kThumb2: {
       // +1 to set the low-order bit so a BLX will switch to Thumb mode
       return 1;
     }
     default:
       LOG(FATAL) << "Unknown InstructionSet: " << instruction_set;
-      return 0;
+      UNREACHABLE();
   }
 }
 
-const void* CompiledCode::CodePointer(const void* code_pointer,
-                                      InstructionSet instruction_set) {
+const void* CompiledCode::CodePointer(const void* code_pointer, InstructionSet instruction_set) {
   switch (instruction_set) {
-    case kArm:
-    case kArm64:
-    case kMips:
-    case kMips64:
-    case kX86:
-    case kX86_64:
+    case InstructionSet::kArm:
+    case InstructionSet::kArm64:
+    case InstructionSet::kMips:
+    case InstructionSet::kMips64:
+    case InstructionSet::kX86:
+    case InstructionSet::kX86_64:
       return code_pointer;
-    case kThumb2: {
+    case InstructionSet::kThumb2: {
       uintptr_t address = reinterpret_cast<uintptr_t>(code_pointer);
       // Set the low-order bit so a BLX will switch to Thumb mode
       address |= 0x1;
@@ -95,68 +94,52 @@ const void* CompiledCode::CodePointer(const void* code_pointer,
     }
     default:
       LOG(FATAL) << "Unknown InstructionSet: " << instruction_set;
-      return nullptr;
+      UNREACHABLE();
   }
 }
 
-CompiledMethod::CompiledMethod(CompilerDriver* driver,
+CompiledMethod::CompiledMethod(CompiledMethodStorage* storage,
                                InstructionSet instruction_set,
                                const ArrayRef<const uint8_t>& quick_code,
-                               const size_t frame_size_in_bytes,
-                               const uint32_t core_spill_mask,
-                               const uint32_t fp_spill_mask,
-                               const ArrayRef<const uint8_t>& method_info,
                                const ArrayRef<const uint8_t>& vmap_table,
                                const ArrayRef<const uint8_t>& cfi_info,
-                               const ArrayRef<const LinkerPatch>& patches)
-    : CompiledCode(driver, instruction_set, quick_code),
-      frame_size_in_bytes_(frame_size_in_bytes),
-      core_spill_mask_(core_spill_mask),
-      fp_spill_mask_(fp_spill_mask),
-      method_info_(driver->GetCompiledMethodStorage()->DeduplicateMethodInfo(method_info)),
-      vmap_table_(driver->GetCompiledMethodStorage()->DeduplicateVMapTable(vmap_table)),
-      cfi_info_(driver->GetCompiledMethodStorage()->DeduplicateCFIInfo(cfi_info)),
-      patches_(driver->GetCompiledMethodStorage()->DeduplicateLinkerPatches(patches)) {
+                               const ArrayRef<const linker::LinkerPatch>& patches)
+    : CompiledCode(storage, instruction_set, quick_code),
+      vmap_table_(storage->DeduplicateVMapTable(vmap_table)),
+      cfi_info_(storage->DeduplicateCFIInfo(cfi_info)),
+      patches_(storage->DeduplicateLinkerPatches(patches)) {
 }
 
 CompiledMethod* CompiledMethod::SwapAllocCompiledMethod(
-    CompilerDriver* driver,
+    CompiledMethodStorage* storage,
     InstructionSet instruction_set,
     const ArrayRef<const uint8_t>& quick_code,
-    const size_t frame_size_in_bytes,
-    const uint32_t core_spill_mask,
-    const uint32_t fp_spill_mask,
-    const ArrayRef<const uint8_t>& method_info,
     const ArrayRef<const uint8_t>& vmap_table,
     const ArrayRef<const uint8_t>& cfi_info,
-    const ArrayRef<const LinkerPatch>& patches) {
-  SwapAllocator<CompiledMethod> alloc(driver->GetCompiledMethodStorage()->GetSwapSpaceAllocator());
+    const ArrayRef<const linker::LinkerPatch>& patches) {
+  SwapAllocator<CompiledMethod> alloc(storage->GetSwapSpaceAllocator());
   CompiledMethod* ret = alloc.allocate(1);
   alloc.construct(ret,
-                  driver,
+                  storage,
                   instruction_set,
                   quick_code,
-                  frame_size_in_bytes,
-                  core_spill_mask,
-                  fp_spill_mask,
-                  method_info,
                   vmap_table,
                   cfi_info, patches);
   return ret;
 }
 
-void CompiledMethod::ReleaseSwapAllocatedCompiledMethod(CompilerDriver* driver, CompiledMethod* m) {
-  SwapAllocator<CompiledMethod> alloc(driver->GetCompiledMethodStorage()->GetSwapSpaceAllocator());
+void CompiledMethod::ReleaseSwapAllocatedCompiledMethod(CompiledMethodStorage* storage,
+                                                        CompiledMethod* m) {
+  SwapAllocator<CompiledMethod> alloc(storage->GetSwapSpaceAllocator());
   alloc.destroy(m);
   alloc.deallocate(m, 1);
 }
 
 CompiledMethod::~CompiledMethod() {
-  CompiledMethodStorage* storage = GetCompilerDriver()->GetCompiledMethodStorage();
+  CompiledMethodStorage* storage = GetStorage();
   storage->ReleaseLinkerPatches(patches_);
   storage->ReleaseCFIInfo(cfi_info_);
   storage->ReleaseVMapTable(vmap_table_);
-  storage->ReleaseMethodInfo(method_info_);
 }
 
 }  // namespace art

@@ -25,7 +25,7 @@
 
 #include "art_field-inl.h"
 #include "art_method-inl.h"
-#include "base/logging.h"
+#include "base/logging.h"  // For VLOG.
 #include "debugger.h"
 #include "jdwp/jdwp_constants.h"
 #include "jdwp/jdwp_expand_buf.h"
@@ -164,7 +164,7 @@ static uint32_t GetInstrumentationEventFor(JdwpEventKind eventKind) {
       return instrumentation::Instrumentation::kDexPcMoved;
     case EK_EXCEPTION:
     case EK_EXCEPTION_CATCH:
-      return instrumentation::Instrumentation::kExceptionCaught;
+      return instrumentation::Instrumentation::kExceptionThrown;
     case EK_METHOD_ENTRY:
       return instrumentation::Instrumentation::kMethodEntered;
     case EK_METHOD_EXIT:
@@ -500,8 +500,8 @@ static bool ModsMatch(JdwpEvent* pEvent, const ModBasket& basket)
       }
       break;
     case MK_CONDITIONAL:
-      CHECK(false);  // should not be getting these
-      break;
+      LOG(FATAL) << "Unexpected MK_CONDITIONAL";  // should not be getting these
+      UNREACHABLE();
     case MK_THREAD_ONLY:
       if (!Dbg::MatchThread(pMod->threadOnly.threadId, basket.thread)) {
         return false;
@@ -554,7 +554,7 @@ static bool ModsMatch(JdwpEvent* pEvent, const ModBasket& basket)
       break;
     default:
       LOG(FATAL) << "unknown mod kind " << pMod->modKind;
-      break;
+      UNREACHABLE();
     }
   }
   return true;
@@ -1159,7 +1159,7 @@ void JdwpState::PostException(const EventLocation* pThrowLoc, mirror::Throwable*
   }
   basket.className = Dbg::GetClassName(basket.locationClass.Get());
   basket.exceptionClass.Assign(exception_object->GetClass());
-  basket.caught = (pCatchLoc->method != 0);
+  basket.caught = (pCatchLoc->method != nullptr);
   basket.thisPtr.Assign(thisPtr);
 
   /* don't try to post an exception caused by the debugger */

@@ -14,10 +14,11 @@
  * limitations under the License.
  */
 
+#include <android-base/logging.h>
+
 #include "art_method-inl.h"
-#include "base/logging.h"
 #include "entrypoints/entrypoint_utils.h"
-#include "java_vm_ext.h"
+#include "jni/java_vm_ext.h"
 #include "mirror/object-inl.h"
 #include "scoped_thread_state_change-inl.h"
 #include "thread.h"
@@ -42,12 +43,11 @@ extern "C" const void* artFindNativeMethod(Thread* self) {
   // otherwise we return the address of the method we found.
   void* native_code = soa.Vm()->FindCodeForNativeMethod(method);
   if (native_code == nullptr) {
-    DCHECK(self->IsExceptionPending());
+    self->AssertPendingException();
     return nullptr;
-  } else {
-    // Register so that future calls don't come here
-    return method->RegisterNative(native_code, false);
   }
+  // Register so that future calls don't come here
+  return method->RegisterNative(native_code);
 }
 
 }  // namespace art

@@ -23,6 +23,9 @@
 
 namespace art {
 
+class CodeGenerator;
+class DexCompilationUnit;
+
 /**
  * Abstraction to implement an optimization pass.
  */
@@ -43,12 +46,11 @@ class HOptimization : public ArenaObject<kArenaAllocOptimization> {
   // 'instruction_simplifier$before_codegen'.
   const char* GetPassName() const { return pass_name_; }
 
-  // Perform the analysis itself.
-  virtual void Run() = 0;
+  // Perform the pass or analysis. Returns false if no optimizations occurred or no useful
+  // information was computed (this is best effort, returning true is always ok).
+  virtual bool Run() = 0;
 
  protected:
-  void MaybeRecordStat(MethodCompilationStat compilation_stat, size_t count = 1) const;
-
   HGraph* const graph_;
   // Used to record stats about the optimization.
   OptimizingCompilerStats* const stats_;
@@ -59,6 +61,93 @@ class HOptimization : public ArenaObject<kArenaAllocOptimization> {
 
   DISALLOW_COPY_AND_ASSIGN(HOptimization);
 };
+
+// Optimization passes that can be constructed by the helper method below. An enum
+// field is preferred over a string lookup at places where performance matters.
+// TODO: generate this table and lookup methods below automatically?
+enum class OptimizationPass {
+  kBoundsCheckElimination,
+  kCHAGuardOptimization,
+  kCodeSinking,
+  kConstantFolding,
+  kConstructorFenceRedundancyElimination,
+  kDeadCodeElimination,
+  kGlobalValueNumbering,
+  kInductionVarAnalysis,
+  kInliner,
+  kInstructionSimplifier,
+  kInvariantCodeMotion,
+  kLoadStoreAnalysis,
+  kLoadStoreElimination,
+  kLoopOptimization,
+  kScheduling,
+  kSelectGenerator,
+  kSideEffectsAnalysis,
+#ifdef ART_ENABLE_CODEGEN_arm
+  kInstructionSimplifierArm,
+#endif
+#ifdef ART_ENABLE_CODEGEN_arm64
+  kInstructionSimplifierArm64,
+#endif
+#ifdef ART_ENABLE_CODEGEN_mips
+  kPcRelativeFixupsMips,
+  kInstructionSimplifierMips,
+#endif
+#ifdef ART_ENABLE_CODEGEN_x86
+  kPcRelativeFixupsX86,
+  kInstructionSimplifierX86,
+#endif
+#ifdef ART_ENABLE_CODEGEN_x86_64
+  kInstructionSimplifierX86_64,
+#endif
+#if defined(ART_ENABLE_CODEGEN_x86) || defined(ART_ENABLE_CODEGEN_x86_64)
+  kX86MemoryOperandGeneration,
+#endif
+  kNone,
+  kLast = kNone
+};
+
+// Lookup name of optimization pass.
+const char* OptimizationPassName(OptimizationPass pass);
+
+// Lookup optimization pass by name.
+OptimizationPass OptimizationPassByName(const std::string& pass_name);
+
+// Optimization definition consisting of an optimization pass
+// an optional alternative name (nullptr denotes default), and
+// an optional pass dependence (kNone denotes no dependence).
+struct OptimizationDef {
+  OptimizationDef(OptimizationPass p, const char* pn, OptimizationPass d)
+      : pass(p), pass_name(pn), depends_on(d) {}
+  OptimizationPass pass;
+  const char* pass_name;
+  OptimizationPass depends_on;
+};
+
+// Helper method for optimization definition array entries.
+inline OptimizationDef OptDef(OptimizationPass pass,
+                              const char* pass_name = nullptr,
+                              OptimizationPass depends_on = OptimizationPass::kNone) {
+  return OptimizationDef(pass, pass_name, depends_on);
+}
+
+// Helper method to construct series of optimization passes.
+// The array should consist of the requested optimizations
+// and optional alternative names for repeated passes.
+// Example:
+//    { OptPass(kConstantFolding),
+//      OptPass(Inliner),
+//      OptPass(kConstantFolding, "constant_folding$after_inlining")
+//    }
+ArenaVector<HOptimization*> ConstructOptimizations(
+    const OptimizationDef definitions[],
+    size_t length,
+    ArenaAllocator* allocator,
+    HGraph* graph,
+    OptimizingCompilerStats* stats,
+    CodeGenerator* codegen,
+    const DexCompilationUnit& dex_compilation_unit,
+    VariableSizedHandleScope* handles);
 
 }  // namespace art
 

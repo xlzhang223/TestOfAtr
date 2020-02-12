@@ -14,12 +14,13 @@
  * limitations under the License.
  */
 
-#include "barrier.h"
 #include "monitor.h"
 
+#include <memory>
 #include <string>
 
-#include "atomic.h"
+#include "base/atomic.h"
+#include "barrier.h"
 #include "base/time_utils.h"
 #include "class_linker-inl.h"
 #include "common_runtime_test.h"
@@ -34,13 +35,10 @@ namespace art {
 
 class MonitorTest : public CommonRuntimeTest {
  protected:
-  void SetUpRuntimeOptions(RuntimeOptions *options) OVERRIDE {
+  void SetUpRuntimeOptions(RuntimeOptions *options) override {
     // Use a smaller heap
-    for (std::pair<std::string, const void*>& pair : *options) {
-      if (pair.first.find("-Xmx") == 0) {
-        pair.first = "-Xmx4M";  // Smallest we can go.
-      }
-    }
+    SetUpRuntimeOptionsForFillHeap(options);
+
     options->push_back(std::make_pair("-Xint", nullptr));
   }
  public:
@@ -56,52 +54,6 @@ class MonitorTest : public CommonRuntimeTest {
   bool completed_;
 };
 
-// Fill the heap.
-static const size_t kMaxHandles = 1000000;  // Use arbitrary large amount for now.
-static void FillHeap(Thread* self, ClassLinker* class_linker,
-                     std::unique_ptr<StackHandleScope<kMaxHandles>>* hsp,
-                     std::vector<MutableHandle<mirror::Object>>* handles)
-    REQUIRES_SHARED(Locks::mutator_lock_) {
-  Runtime::Current()->GetHeap()->SetIdealFootprint(1 * GB);
-
-  hsp->reset(new StackHandleScope<kMaxHandles>(self));
-  // Class java.lang.Object.
-  Handle<mirror::Class> c((*hsp)->NewHandle(class_linker->FindSystemClass(self,
-                                                                       "Ljava/lang/Object;")));
-  // Array helps to fill memory faster.
-  Handle<mirror::Class> ca((*hsp)->NewHandle(class_linker->FindSystemClass(self,
-                                                                        "[Ljava/lang/Object;")));
-
-  // Start allocating with 128K
-  size_t length = 128 * KB / 4;
-  while (length > 10) {
-    MutableHandle<mirror::Object> h((*hsp)->NewHandle<mirror::Object>(
-        mirror::ObjectArray<mirror::Object>::Alloc(self, ca.Get(), length / 4)));
-    if (self->IsExceptionPending() || h == nullptr) {
-      self->ClearException();
-
-      // Try a smaller length
-      length = length / 8;
-      // Use at most half the reported free space.
-      size_t mem = Runtime::Current()->GetHeap()->GetFreeMemory();
-      if (length * 8 > mem) {
-        length = mem / 8;
-      }
-    } else {
-      handles->push_back(h);
-    }
-  }
-
-  // Allocate simple objects till it fails.
-  while (!self->IsExceptionPending()) {
-    MutableHandle<mirror::Object> h = (*hsp)->NewHandle<mirror::Object>(c->AllocObject(self));
-    if (!self->IsExceptionPending() && h != nullptr) {
-      handles->push_back(h);
-    }
-  }
-  self->ClearException();
-}
-
 // Check that an exception can be thrown correctly.
 // This test is potentially racy, but the timeout is long enough that it should work.
 
@@ -111,7 +63,7 @@ class CreateTask : public Task {
       monitor_test_(monitor_test), initial_sleep_(initial_sleep), millis_(millis),
       expected_(expected) {}
 
-  void Run(Thread* self) {
+  void Run(Thread* self) override {
     {
       ScopedObjectAccess soa(self);
 
@@ -167,7 +119,7 @@ class CreateTask : public Task {
     }
   }
 
-  void Finalize() {
+  void Finalize() override {
     delete this;
   }
 
@@ -185,7 +137,7 @@ class UseTask : public Task {
       monitor_test_(monitor_test), initial_sleep_(initial_sleep), millis_(millis),
       expected_(expected) {}
 
-  void Run(Thread* self) {
+  void Run(Thread* self) override {
     monitor_test_->barrier_->Wait(self);  // Wait for the other thread to set up the monitor.
 
     {
@@ -207,7 +159,7 @@ class UseTask : public Task {
     monitor_test_->complete_barrier_->Wait(self);  // Wait for test completion.
   }
 
-  void Finalize() {
+  void Finalize() override {
     delete this;
   }
 
@@ -223,7 +175,7 @@ class InterruptTask : public Task {
   InterruptTask(MonitorTest* monitor_test, uint64_t initial_sleep, uint64_t millis) :
       monitor_test_(monitor_test), initial_sleep_(initial_sleep), millis_(millis) {}
 
-  void Run(Thread* self) {
+  void Run(Thread* self) override {
     monitor_test_->barrier_->Wait(self);  // Wait for the other thread to set up the monitor.
 
     {
@@ -251,7 +203,7 @@ class InterruptTask : public Task {
     monitor_test_->complete_barrier_->Wait(self);  // Wait for test completion.
   }
 
-  void Finalize() {
+  void Finalize() override {
     delete this;
   }
 
@@ -265,7 +217,7 @@ class WatchdogTask : public Task {
  public:
   explicit WatchdogTask(MonitorTest* monitor_test) : monitor_test_(monitor_test) {}
 
-  void Run(Thread* self) {
+  void Run(Thread* self) override {
     ScopedObjectAccess soa(self);
 
     monitor_test_->watchdog_object_.Get()->MonitorEnter(self);        // Lock the object.
@@ -280,7 +232,7 @@ class WatchdogTask : public Task {
     }
   }
 
-  void Finalize() {
+  void Finalize() override {
     delete this;
   }
 
@@ -300,20 +252,16 @@ static void CommonWaitSetup(MonitorTest* test, ClassLinker* class_linker, uint64
                                                                               "hello, world!"));
 
   // Create the barrier used to synchronize.
-  test->barrier_ = std::unique_ptr<Barrier>(new Barrier(2));
-  test->complete_barrier_ = std::unique_ptr<Barrier>(new Barrier(3));
+  test->barrier_ = std::make_unique<Barrier>(2);
+  test->complete_barrier_ = std::make_unique<Barrier>(3);
   test->completed_ = false;
 
-  // Fill the heap.
-  std::unique_ptr<StackHandleScope<kMaxHandles>> hsp;
-  std::vector<MutableHandle<mirror::Object>> handles;
-
   // Our job: Fill the heap, then try Wait.
-  FillHeap(soa.Self(), class_linker, &hsp, &handles);
+  {
+    VariableSizedHandleScope vhs(soa.Self());
+    test->FillHeap(soa.Self(), class_linker, &vhs);
 
-  // Now release everything.
-  for (MutableHandle<mirror::Object>& h : handles) {
-    h.Assign(nullptr);
+    // Now release everything.
   }
 
   // Need to drop the mutator lock to allow barriers.
@@ -379,14 +327,14 @@ class TryLockTask : public Task {
  public:
   explicit TryLockTask(Handle<mirror::Object> obj) : obj_(obj) {}
 
-  void Run(Thread* self) {
+  void Run(Thread* self) override {
     ScopedObjectAccess soa(self);
     // Lock is held by other thread, try lock should fail.
     ObjectTryLock<mirror::Object> lock(self, obj_);
     EXPECT_FALSE(lock.Acquired());
   }
 
-  void Finalize() {
+  void Finalize() override {
     delete this;
   }
 
@@ -414,7 +362,7 @@ TEST_F(MonitorTest, TestTryLock) {
     thread_pool.AddTask(self, new TryLockTask(obj1));
     thread_pool.StartWorkers(self);
     ScopedThreadSuspension sts(self, kSuspended);
-    thread_pool.Wait(Thread::Current(), /*do_work*/false, /*may_hold_locks*/false);
+    thread_pool.Wait(Thread::Current(), /*do_work=*/false, /*may_hold_locks=*/false);
   }
   // Test that the trylock actually locks the object.
   {

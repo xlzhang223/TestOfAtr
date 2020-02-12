@@ -14,9 +14,8 @@
  * limitations under the License.
  */
 
-#include "arch/x86/instruction_set_features_x86.h"
-#include "code_generator_x86.h"
 #include "dead_code_elimination.h"
+
 #include "driver/compiler_options.h"
 #include "graph_checker.h"
 #include "optimizing_unit_test.h"
@@ -26,14 +25,17 @@
 
 namespace art {
 
-class DeadCodeEliminationTest : public CommonCompilerTest {};
+class DeadCodeEliminationTest : public OptimizingUnitTest {
+ protected:
+  void TestCode(const std::vector<uint16_t>& data,
+                const std::string& expected_before,
+                const std::string& expected_after);
+};
 
-static void TestCode(const uint16_t* data,
-                     const std::string& expected_before,
-                     const std::string& expected_after) {
-  ArenaPool pool;
-  ArenaAllocator allocator(&pool);
-  HGraph* graph = CreateCFG(&allocator, data);
+void DeadCodeEliminationTest::TestCode(const std::vector<uint16_t>& data,
+                                       const std::string& expected_before,
+                                       const std::string& expected_after) {
+  HGraph* graph = CreateCFG(data);
   ASSERT_NE(graph, nullptr);
 
   StringPrettyPrinter printer_before(graph);
@@ -41,10 +43,7 @@ static void TestCode(const uint16_t* data,
   std::string actual_before = printer_before.str();
   ASSERT_EQ(actual_before, expected_before);
 
-  std::unique_ptr<const X86InstructionSetFeatures> features_x86(
-      X86InstructionSetFeatures::FromCppDefines());
-  x86::CodeGeneratorX86 codegenX86(graph, *features_x86.get(), CompilerOptions());
-  HDeadCodeElimination(graph, nullptr /* stats */, "dead_code_elimination").Run();
+  HDeadCodeElimination(graph, /* stats= */ nullptr, "dead_code_elimination").Run();
   GraphChecker graph_checker(graph);
   graph_checker.Run();
   ASSERT_TRUE(graph_checker.IsValid());
@@ -69,7 +68,7 @@ static void TestCode(const uint16_t* data,
  *     return-void              7.      return
  */
 TEST_F(DeadCodeEliminationTest, AdditionAndConditionalJump) {
-  const uint16_t data[] = THREE_REGISTERS_CODE_ITEM(
+  const std::vector<uint16_t> data = THREE_REGISTERS_CODE_ITEM(
     Instruction::CONST_4 | 1 << 8 | 1 << 12,
     Instruction::CONST_4 | 0 << 8 | 0 << 12,
     Instruction::IF_GEZ | 1 << 8, 3,
@@ -131,7 +130,7 @@ TEST_F(DeadCodeEliminationTest, AdditionAndConditionalJump) {
  *     return                   13.     return-void
  */
 TEST_F(DeadCodeEliminationTest, AdditionsAndInconditionalJumps) {
-  const uint16_t data[] = THREE_REGISTERS_CODE_ITEM(
+  const std::vector<uint16_t> data = THREE_REGISTERS_CODE_ITEM(
     Instruction::CONST_4 | 0 << 8 | 0 << 12,
     Instruction::CONST_4 | 1 << 8 | 1 << 12,
     Instruction::ADD_INT | 2 << 8, 0 | 1 << 8,

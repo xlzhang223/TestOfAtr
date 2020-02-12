@@ -22,6 +22,8 @@
 
 #include <inttypes.h>
 
+#include <set>
+
 #include "android-base/stringprintf.h"
 
 namespace art {
@@ -31,37 +33,41 @@ using android::base::StringPrintf;
 bool VerifyOutputDexFile(dex_ir::Header* orig_header,
                          dex_ir::Header* output_header,
                          std::string* error_msg) {
-  dex_ir::Collections& orig = orig_header->GetCollections();
-  dex_ir::Collections& output = output_header->GetCollections();
-
   // Compare all id sections. They have a defined order that can't be changed by dexlayout.
-  if (!VerifyIds(orig.StringIds(), output.StringIds(), "string ids", error_msg) ||
-      !VerifyIds(orig.TypeIds(), output.TypeIds(), "type ids", error_msg) ||
-      !VerifyIds(orig.ProtoIds(), output.ProtoIds(), "proto ids", error_msg) ||
-      !VerifyIds(orig.FieldIds(), output.FieldIds(), "field ids", error_msg) ||
-      !VerifyIds(orig.MethodIds(), output.MethodIds(), "method ids", error_msg)) {
+  if (!VerifyIds(orig_header->StringIds(), output_header->StringIds(), "string ids", error_msg) ||
+      !VerifyIds(orig_header->TypeIds(), output_header->TypeIds(), "type ids", error_msg) ||
+      !VerifyIds(orig_header->ProtoIds(), output_header->ProtoIds(), "proto ids", error_msg) ||
+      !VerifyIds(orig_header->FieldIds(), output_header->FieldIds(), "field ids", error_msg) ||
+      !VerifyIds(orig_header->MethodIds(), output_header->MethodIds(), "method ids", error_msg)) {
     return false;
   }
   // Compare class defs. The order may have been changed by dexlayout.
-  if (!VerifyClassDefs(orig.ClassDefs(), output.ClassDefs(), error_msg)) {
+  if (!VerifyClassDefs(orig_header->ClassDefs(), output_header->ClassDefs(), error_msg)) {
     return false;
   }
   return true;
 }
 
-template<class T> bool VerifyIds(std::vector<std::unique_ptr<T>>& orig,
-                                 std::vector<std::unique_ptr<T>>& output,
+template<class T> bool VerifyIds(dex_ir::CollectionVector<T>& orig,
+                                 dex_ir::CollectionVector<T>& output,
                                  const char* section_name,
                                  std::string* error_msg) {
-  if (orig.size() != output.size()) {
-    *error_msg = StringPrintf(
-        "Mismatched size for %s section: %zu vs %zu.", section_name, orig.size(), output.size());
-    return false;
-  }
-  for (size_t i = 0; i < orig.size(); ++i) {
-    if (!VerifyId(orig[i].get(), output[i].get(), error_msg)) {
+  auto orig_iter = orig.begin();
+  auto output_iter = output.begin();
+  for (; orig_iter != orig.end() && output_iter != output.end(); ++orig_iter, ++output_iter) {
+    if (!VerifyId(orig_iter->get(), output_iter->get(), error_msg)) {
       return false;
     }
+  }
+  if (orig_iter != orig.end() || output_iter != output.end()) {
+    const char* longer;
+    if (orig_iter == orig.end()) {
+      longer = "output";
+    } else {
+      longer = "original";
+    }
+    *error_msg = StringPrintf("Mismatch for %s section: %s is longer.", section_name, longer);
+    return false;
   }
   return true;
 }
@@ -181,29 +187,36 @@ struct ClassDefCompare {
 
 // The class defs may have a new order due to dexlayout. Use the class's class_idx to uniquely
 // identify them and sort them for comparison.
-bool VerifyClassDefs(std::vector<std::unique_ptr<dex_ir::ClassDef>>& orig,
-                     std::vector<std::unique_ptr<dex_ir::ClassDef>>& output,
+bool VerifyClassDefs(dex_ir::CollectionVector<dex_ir::ClassDef>& orig,
+                     dex_ir::CollectionVector<dex_ir::ClassDef>& output,
                      std::string* error_msg) {
-  if (orig.size() != output.size()) {
-    *error_msg = StringPrintf(
-        "Mismatched size for class defs section: %zu vs %zu.", orig.size(), output.size());
-    return false;
-  }
   // Store the class defs into sets sorted by the class's type index.
   std::set<dex_ir::ClassDef*, ClassDefCompare> orig_set;
   std::set<dex_ir::ClassDef*, ClassDefCompare> output_set;
-  for (size_t i = 0; i < orig.size(); ++i) {
-    orig_set.insert(orig[i].get());
-    output_set.insert(output[i].get());
+  auto orig_iter = orig.begin();
+  auto output_iter = output.begin();
+  for (; orig_iter != orig.end() && output_iter != output.end(); ++orig_iter, ++output_iter) {
+    orig_set.insert(orig_iter->get());
+    output_set.insert(output_iter->get());
   }
-  auto orig_iter = orig_set.begin();
-  auto output_iter = output_set.begin();
-  while (orig_iter != orig_set.end() && output_iter != output_set.end()) {
-    if (!VerifyClassDef(*orig_iter, *output_iter, error_msg)) {
+  if (orig_iter != orig.end() || output_iter != output.end()) {
+    const char* longer;
+    if (orig_iter == orig.end()) {
+      longer = "output";
+    } else {
+      longer = "original";
+    }
+    *error_msg = StringPrintf("Mismatch for class defs section: %s is longer.", longer);
+    return false;
+  }
+  auto orig_set_iter = orig_set.begin();
+  auto output_set_iter = output_set.begin();
+  while (orig_set_iter != orig_set.end() && output_set_iter != output_set.end()) {
+    if (!VerifyClassDef(*orig_set_iter, *output_set_iter, error_msg)) {
       return false;
     }
-    orig_iter++;
-    output_iter++;
+    orig_set_iter++;
+    output_set_iter++;
   }
   return true;
 }
@@ -769,8 +782,8 @@ bool VerifyFields(dex_ir::FieldItemVector* orig,
     return false;
   }
   for (size_t i = 0; i < orig->size(); ++i) {
-    dex_ir::FieldItem* orig_field = (*orig)[i].get();
-    dex_ir::FieldItem* output_field = (*output)[i].get();
+    dex_ir::FieldItem* orig_field = &(*orig)[i];
+    dex_ir::FieldItem* output_field = &(*output)[i];
     if (orig_field->GetFieldId()->GetIndex() != output_field->GetFieldId()->GetIndex()) {
       *error_msg = StringPrintf("Mismatched field index for class data at offset %x: %u vs %u.",
                                 orig_offset,
@@ -802,8 +815,8 @@ bool VerifyMethods(dex_ir::MethodItemVector* orig,
     return false;
   }
   for (size_t i = 0; i < orig->size(); ++i) {
-    dex_ir::MethodItem* orig_method = (*orig)[i].get();
-    dex_ir::MethodItem* output_method = (*output)[i].get();
+    dex_ir::MethodItem* orig_method = &(*orig)[i];
+    dex_ir::MethodItem* output_method = &(*output)[i];
     if (orig_method->GetMethodId()->GetIndex() != output_method->GetMethodId()->GetIndex()) {
       *error_msg = StringPrintf("Mismatched method index for class data at offset %x: %u vs %u.",
                                 orig_offset,
@@ -893,108 +906,23 @@ bool VerifyDebugInfo(dex_ir::DebugInfoItem* orig,
     }
     return true;
   }
-  if (!VerifyPositionInfo(orig->GetPositionInfo(),
-                          output->GetPositionInfo(),
-                          orig->GetOffset(),
-                          error_msg)) {
+  // TODO: Test for debug equivalence rather than byte array equality.
+  uint32_t orig_size = orig->GetDebugInfoSize();
+  uint32_t output_size = output->GetDebugInfoSize();
+  if (orig_size != output_size) {
+    *error_msg = "DebugInfoSize disagreed.";
     return false;
   }
-  return VerifyLocalInfo(orig->GetLocalInfo(),
-                         output->GetLocalInfo(),
-                         orig->GetOffset(),
-                         error_msg);
-}
-
-bool VerifyPositionInfo(dex_ir::PositionInfoVector& orig,
-                        dex_ir::PositionInfoVector& output,
-                        uint32_t orig_offset,
-                        std::string* error_msg) {
-  if (orig.size() != output.size()) {
-    *error_msg = StringPrintf(
-        "Mismatched number of positions for debug info at offset %x: %zu vs %zu.",
-        orig_offset,
-        orig.size(),
-        output.size());
+  uint8_t* orig_data = orig->GetDebugInfo();
+  uint8_t* output_data = output->GetDebugInfo();
+  if ((orig_data == nullptr && output_data != nullptr) ||
+      (orig_data != nullptr && output_data == nullptr)) {
+    *error_msg = "DebugInfo null/non-null mismatch.";
     return false;
   }
-  for (size_t i = 0; i < orig.size(); ++i) {
-    if (orig[i]->address_ != output[i]->address_) {
-      *error_msg = StringPrintf(
-          "Mismatched position address for debug info at offset %x: %u vs %u.",
-          orig_offset,
-          orig[i]->address_,
-          output[i]->address_);
-      return false;
-    }
-    if (orig[i]->line_ != output[i]->line_) {
-      *error_msg = StringPrintf("Mismatched position line for debug info at offset %x: %u vs %u.",
-                                orig_offset,
-                                orig[i]->line_,
-                                output[i]->line_);
-      return false;
-    }
-  }
-  return true;
-}
-
-bool VerifyLocalInfo(dex_ir::LocalInfoVector& orig,
-                     dex_ir::LocalInfoVector& output,
-                     uint32_t orig_offset,
-                     std::string* error_msg) {
-  if (orig.size() != output.size()) {
-    *error_msg = StringPrintf(
-        "Mismatched number of locals for debug info at offset %x: %zu vs %zu.",
-        orig_offset,
-        orig.size(),
-        output.size());
+  if (orig_data != nullptr && memcmp(orig_data, output_data, orig_size) != 0) {
+    *error_msg = "DebugInfo bytes mismatch.";
     return false;
-  }
-  for (size_t i = 0; i < orig.size(); ++i) {
-    if (orig[i]->name_ != output[i]->name_) {
-      *error_msg = StringPrintf("Mismatched local name for debug info at offset %x: %s vs %s.",
-                                orig_offset,
-                                orig[i]->name_.c_str(),
-                                output[i]->name_.c_str());
-      return false;
-    }
-    if (orig[i]->descriptor_ != output[i]->descriptor_) {
-      *error_msg = StringPrintf(
-          "Mismatched local descriptor for debug info at offset %x: %s vs %s.",
-          orig_offset,
-          orig[i]->descriptor_.c_str(),
-          output[i]->descriptor_.c_str());
-      return false;
-    }
-    if (orig[i]->signature_ != output[i]->signature_) {
-      *error_msg = StringPrintf("Mismatched local signature for debug info at offset %x: %s vs %s.",
-                                orig_offset,
-                                orig[i]->signature_.c_str(),
-                                output[i]->signature_.c_str());
-      return false;
-    }
-    if (orig[i]->start_address_ != output[i]->start_address_) {
-      *error_msg = StringPrintf(
-          "Mismatched local start address for debug info at offset %x: %u vs %u.",
-          orig_offset,
-          orig[i]->start_address_,
-          output[i]->start_address_);
-      return false;
-    }
-    if (orig[i]->end_address_ != output[i]->end_address_) {
-      *error_msg = StringPrintf(
-          "Mismatched local end address for debug info at offset %x: %u vs %u.",
-          orig_offset,
-          orig[i]->end_address_,
-          output[i]->end_address_);
-      return false;
-    }
-    if (orig[i]->reg_ != output[i]->reg_) {
-      *error_msg = StringPrintf("Mismatched local reg for debug info at offset %x: %u vs %u.",
-                                orig_offset,
-                                orig[i]->reg_,
-                                output[i]->reg_);
-      return false;
-    }
   }
   return true;
 }

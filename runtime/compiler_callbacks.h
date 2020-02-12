@@ -17,10 +17,19 @@
 #ifndef ART_RUNTIME_COMPILER_CALLBACKS_H_
 #define ART_RUNTIME_COMPILER_CALLBACKS_H_
 
-#include "base/mutex.h"
-#include "class_reference.h"
+#include "base/locks.h"
+#include "dex/class_reference.h"
+#include "class_status.h"
 
 namespace art {
+
+class CompilerDriver;
+
+namespace mirror {
+
+class Class;
+
+}  // namespace mirror
 
 namespace verifier {
 
@@ -42,15 +51,28 @@ class CompilerCallbacks {
       REQUIRES_SHARED(Locks::mutator_lock_) = 0;
   virtual void ClassRejected(ClassReference ref) = 0;
 
-  // Return true if we should attempt to relocate to a random base address if we have not already
-  // done so. Return false if relocating in this way would be problematic.
-  virtual bool IsRelocationPossible() = 0;
-
   virtual verifier::VerifierDeps* GetVerifierDeps() const = 0;
   virtual void SetVerifierDeps(verifier::VerifierDeps* deps ATTRIBUTE_UNUSED) {}
 
+  // Return the class status of a previous stage of the compilation. This can be used, for example,
+  // when class unloading is enabled during multidex compilation.
+  virtual ClassStatus GetPreviousClassState(ClassReference ref ATTRIBUTE_UNUSED) {
+    return ClassStatus::kNotReady;
+  }
+
+  virtual void SetDoesClassUnloading(bool does_class_unloading ATTRIBUTE_UNUSED,
+                                     CompilerDriver* compiler_driver ATTRIBUTE_UNUSED) {}
+
   bool IsBootImage() {
     return mode_ == CallbackMode::kCompileBootImage;
+  }
+
+  virtual void UpdateClassState(ClassReference ref ATTRIBUTE_UNUSED,
+                                ClassStatus state ATTRIBUTE_UNUSED) {}
+
+  virtual bool CanUseOatStatusForVerification(mirror::Class* klass ATTRIBUTE_UNUSED)
+      REQUIRES_SHARED(Locks::mutator_lock_) {
+    return false;
   }
 
  protected:

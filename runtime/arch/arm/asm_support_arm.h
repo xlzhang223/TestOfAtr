@@ -23,14 +23,42 @@
 #define FRAME_SIZE_SAVE_REFS_ONLY 32
 #define FRAME_SIZE_SAVE_REFS_AND_ARGS 112
 #define FRAME_SIZE_SAVE_EVERYTHING 192
+#define FRAME_SIZE_SAVE_EVERYTHING_FOR_CLINIT FRAME_SIZE_SAVE_EVERYTHING
+#define FRAME_SIZE_SAVE_EVERYTHING_FOR_SUSPEND_CHECK FRAME_SIZE_SAVE_EVERYTHING
 
+// The offset from the art_quick_read_barrier_mark_introspection (used for field
+// loads with 32-bit LDR) to the entrypoint for field loads with 16-bit LDR,
+// i.e. art_quick_read_barrier_mark_introspection_narrow.
+#define BAKER_MARK_INTROSPECTION_FIELD_LDR_NARROW_ENTRYPOINT_OFFSET 0x20
+// The offsets from art_quick_read_barrier_mark_introspection to the GC root entrypoints,
+// i.e. art_quick_read_barrier_mark_introspection_gc_roots_{wide,narrow}.
+#define BAKER_MARK_INTROSPECTION_GC_ROOT_LDR_WIDE_ENTRYPOINT_OFFSET 0xc0
+#define BAKER_MARK_INTROSPECTION_GC_ROOT_LDR_NARROW_ENTRYPOINT_OFFSET 0xe0
+// The offset from art_quick_read_barrier_mark_introspection to the array switch cases,
+// i.e. art_quick_read_barrier_mark_introspection_arrays.
+#define BAKER_MARK_INTROSPECTION_ARRAY_SWITCH_OFFSET 0x100
+// The offset from art_quick_read_barrier_mark_introspection to the entrypoint for the
+// UnsafeCASObject intrinsic, i.e. art_quick_read_barrier_mark_introspection_unsafe_cas.
+#define BAKER_MARK_INTROSPECTION_UNSAFE_CAS_ENTRYPOINT_OFFSET 0x180
 
-// zhang
-// Offset of field Thread::tlsPtr_.alloc_site
-#define THREAD_ALLOC_SITE_OFFSET 1280
-// end
-
-// Flag for enabling R4 optimization in arm runtime
-// #define ARM_R4_SUSPEND_FLAG
+// The offset of the reference load LDR from the return address in LR for field loads.
+#ifdef USE_HEAP_POISONING
+#define BAKER_MARK_INTROSPECTION_FIELD_LDR_WIDE_OFFSET -8
+#define BAKER_MARK_INTROSPECTION_FIELD_LDR_NARROW_OFFSET -4
+#else
+#define BAKER_MARK_INTROSPECTION_FIELD_LDR_WIDE_OFFSET -4
+#define BAKER_MARK_INTROSPECTION_FIELD_LDR_NARROW_OFFSET -2
+#endif
+// The offset of the reference load LDR from the return address in LR for array loads.
+#ifdef USE_HEAP_POISONING
+#define BAKER_MARK_INTROSPECTION_ARRAY_LDR_OFFSET -8
+#else
+#define BAKER_MARK_INTROSPECTION_ARRAY_LDR_OFFSET -4
+#endif
+// The offset of the reference load LDR from the return address in LR for GC root loads.
+#define BAKER_MARK_INTROSPECTION_GC_ROOT_LDR_WIDE_OFFSET -8
+#define BAKER_MARK_INTROSPECTION_GC_ROOT_LDR_NARROW_OFFSET -6
+// The offset of the ADD from the return address in LR for UnsafeCASObject intrinsic.
+#define BAKER_MARK_INTROSPECTION_UNSAFE_CAS_ADD_OFFSET -8
 
 #endif  // ART_RUNTIME_ARCH_ARM_ASM_SUPPORT_ARM_H_

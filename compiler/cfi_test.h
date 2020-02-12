@@ -17,28 +17,26 @@
 #ifndef ART_COMPILER_CFI_TEST_H_
 #define ART_COMPILER_CFI_TEST_H_
 
-#include <vector>
 #include <memory>
 #include <sstream>
+#include <vector>
 
 #include "arch/instruction_set.h"
 #include "base/enums.h"
-#include "debug/dwarf/dwarf_constants.h"
 #include "debug/dwarf/dwarf_test.h"
-#include "debug/dwarf/headers.h"
-#include "disassembler/disassembler.h"
+#include "disassembler.h"
+#include "dwarf/dwarf_constants.h"
+#include "dwarf/headers.h"
 #include "gtest/gtest.h"
 #include "thread.h"
 
 namespace art {
 
-constexpr dwarf::CFIFormat kCFIFormat = dwarf::DW_DEBUG_FRAME_FORMAT;
-
 class CFITest : public dwarf::DwarfTest {
  public:
   void GenerateExpected(FILE* f, InstructionSet isa, const char* isa_str,
-                        const std::vector<uint8_t>& actual_asm,
-                        const std::vector<uint8_t>& actual_cfi) {
+                        ArrayRef<const uint8_t> actual_asm,
+                        ArrayRef<const uint8_t> actual_cfi) {
     std::vector<std::string> lines;
     // Print the raw bytes.
     fprintf(f, "static constexpr uint8_t expected_asm_%s[] = {", isa_str);
@@ -50,11 +48,14 @@ class CFITest : public dwarf::DwarfTest {
     // Pretty-print CFI opcodes.
     constexpr bool is64bit = false;
     dwarf::DebugFrameOpCodeWriter<> initial_opcodes;
-    dwarf::WriteCIE(is64bit, dwarf::Reg(8),
-                    initial_opcodes, kCFIFormat, &debug_frame_data_);
+    dwarf::WriteCIE(is64bit, dwarf::Reg(8), initial_opcodes, &debug_frame_data_);
     std::vector<uintptr_t> debug_frame_patches;
-    dwarf::WriteFDE(is64bit, 0, 0, 0, actual_asm.size(), ArrayRef<const uint8_t>(actual_cfi),
-                    kCFIFormat, 0, &debug_frame_data_, &debug_frame_patches);
+    dwarf::WriteFDE(is64bit,
+                    /* cie_pointer= */ 0,
+                    /* code_address= */ 0,
+                    actual_asm.size(),
+                    actual_cfi,
+                    &debug_frame_data_);
     ReformatCfi(Objdump(false, "-W"), &lines);
     // Pretty-print assembly.
     const uint8_t* asm_base = actual_asm.data();
@@ -68,7 +69,7 @@ class CFITest : public dwarf::DwarfTest {
                                              : &Thread::DumpThreadOffset<PointerSize::k32>);
     std::unique_ptr<Disassembler> disasm(Disassembler::Create(isa, opts));
     std::stringstream stream;
-    const uint8_t* base = actual_asm.data() + (isa == kThumb2 ? 1 : 0);
+    const uint8_t* base = actual_asm.data() + (isa == InstructionSet::kThumb2 ? 1 : 0);
     disasm->Dump(stream, base, base + actual_asm.size());
     ReformatAsm(&stream, &lines);
     // Print CFI and assembly interleaved.
@@ -142,7 +143,7 @@ class CFITest : public dwarf::DwarfTest {
   }
 
   // Pretty-print byte array.  12 bytes per line.
-  static void HexDump(FILE* f, const std::vector<uint8_t>& data) {
+  static void HexDump(FILE* f, ArrayRef<const uint8_t> data) {
     for (size_t i = 0; i < data.size(); i++) {
       fprintf(f, i % 12 == 0 ? "\n    " : " ");  // Whitespace.
       fprintf(f, "0x%02X,", data[i]);

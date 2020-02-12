@@ -21,11 +21,13 @@
 #include <memory>
 #include <vector>
 
+#include <android-base/logging.h>
+
 #include "base/arena_containers.h"
-#include "base/logging.h"
+#include "base/macros.h"
+#include "offsets.h"
 #include "utils/arm64/managed_register_arm64.h"
 #include "utils/assembler.h"
-#include "offsets.h"
 
 // TODO(VIXL): Make VIXL compile with -Wshadow.
 #pragma GCC diagnostic push
@@ -35,6 +37,9 @@
 #pragma GCC diagnostic pop
 
 namespace art {
+
+class Arm64InstructionSetFeatures;
+
 namespace arm64 {
 
 #define MEM_OP(...)      vixl::aarch64::MemOperand(__VA_ARGS__)
@@ -59,23 +64,24 @@ enum StoreOperandType {
   kStoreDWord
 };
 
-class Arm64Assembler FINAL : public Assembler {
+class Arm64Assembler final : public Assembler {
  public:
-  explicit Arm64Assembler(ArenaAllocator* arena) : Assembler(arena) {}
+  explicit Arm64Assembler(
+      ArenaAllocator* allocator, const Arm64InstructionSetFeatures* features = nullptr);
 
   virtual ~Arm64Assembler() {}
 
   vixl::aarch64::MacroAssembler* GetVIXLAssembler() { return &vixl_masm_; }
 
   // Finalize the code.
-  void FinalizeCode() OVERRIDE;
+  void FinalizeCode() override;
 
   // Size of generated code.
-  size_t CodeSize() const OVERRIDE;
-  const uint8_t* CodeBufferBaseAddress() const OVERRIDE;
+  size_t CodeSize() const override;
+  const uint8_t* CodeBufferBaseAddress() const override;
 
   // Copy instructions out of assembly buffer into the given region of memory.
-  void FinalizeInstructions(const MemoryRegion& region);
+  void FinalizeInstructions(const MemoryRegion& region) override;
 
   void LoadRawPtr(ManagedRegister dest, ManagedRegister base, Offset offs);
 
@@ -98,10 +104,19 @@ class Arm64Assembler FINAL : public Assembler {
   // Unpoison a heap reference contained in `reg` if heap poisoning is enabled.
   void MaybeUnpoisonHeapReference(vixl::aarch64::Register reg);
 
-  void Bind(Label* label ATTRIBUTE_UNUSED) OVERRIDE {
+  // Emit code checking the status of the Marking Register, and aborting
+  // the program if MR does not match the value stored in the art::Thread
+  // object.
+  //
+  // Argument `temp` is used as a temporary register to generate code.
+  // Argument `code` is used to identify the different occurrences of
+  // MaybeGenerateMarkingRegisterCheck and is passed to the BRK instruction.
+  void GenerateMarkingRegisterCheck(vixl::aarch64::Register temp, int code = 0);
+
+  void Bind(Label* label ATTRIBUTE_UNUSED) override {
     UNIMPLEMENTED(FATAL) << "Do not use Bind for ARM64";
   }
-  void Jump(Label* label ATTRIBUTE_UNUSED) OVERRIDE {
+  void Jump(Label* label ATTRIBUTE_UNUSED) override {
     UNIMPLEMENTED(FATAL) << "Do not use Jump for ARM64";
   }
 

@@ -26,13 +26,13 @@ class HConstantFoldingVisitor : public HGraphDelegateVisitor {
       : HGraphDelegateVisitor(graph) {}
 
  private:
-  void VisitBasicBlock(HBasicBlock* block) OVERRIDE;
+  void VisitBasicBlock(HBasicBlock* block) override;
 
-  void VisitUnaryOperation(HUnaryOperation* inst) OVERRIDE;
-  void VisitBinaryOperation(HBinaryOperation* inst) OVERRIDE;
+  void VisitUnaryOperation(HUnaryOperation* inst) override;
+  void VisitBinaryOperation(HBinaryOperation* inst) override;
 
-  void VisitTypeConversion(HTypeConversion* inst) OVERRIDE;
-  void VisitDivZeroCheck(HDivZeroCheck* inst) OVERRIDE;
+  void VisitTypeConversion(HTypeConversion* inst) override;
+  void VisitDivZeroCheck(HDivZeroCheck* inst) override;
 
   DISALLOW_COPY_AND_ASSIGN(HConstantFoldingVisitor);
 };
@@ -47,34 +47,35 @@ class InstructionWithAbsorbingInputSimplifier : public HGraphVisitor {
  private:
   void VisitShift(HBinaryOperation* shift);
 
-  void VisitEqual(HEqual* instruction) OVERRIDE;
-  void VisitNotEqual(HNotEqual* instruction) OVERRIDE;
+  void VisitEqual(HEqual* instruction) override;
+  void VisitNotEqual(HNotEqual* instruction) override;
 
-  void VisitAbove(HAbove* instruction) OVERRIDE;
-  void VisitAboveOrEqual(HAboveOrEqual* instruction) OVERRIDE;
-  void VisitBelow(HBelow* instruction) OVERRIDE;
-  void VisitBelowOrEqual(HBelowOrEqual* instruction) OVERRIDE;
+  void VisitAbove(HAbove* instruction) override;
+  void VisitAboveOrEqual(HAboveOrEqual* instruction) override;
+  void VisitBelow(HBelow* instruction) override;
+  void VisitBelowOrEqual(HBelowOrEqual* instruction) override;
 
-  void VisitAnd(HAnd* instruction) OVERRIDE;
-  void VisitCompare(HCompare* instruction) OVERRIDE;
-  void VisitMul(HMul* instruction) OVERRIDE;
-  void VisitOr(HOr* instruction) OVERRIDE;
-  void VisitRem(HRem* instruction) OVERRIDE;
-  void VisitShl(HShl* instruction) OVERRIDE;
-  void VisitShr(HShr* instruction) OVERRIDE;
-  void VisitSub(HSub* instruction) OVERRIDE;
-  void VisitUShr(HUShr* instruction) OVERRIDE;
-  void VisitXor(HXor* instruction) OVERRIDE;
+  void VisitAnd(HAnd* instruction) override;
+  void VisitCompare(HCompare* instruction) override;
+  void VisitMul(HMul* instruction) override;
+  void VisitOr(HOr* instruction) override;
+  void VisitRem(HRem* instruction) override;
+  void VisitShl(HShl* instruction) override;
+  void VisitShr(HShr* instruction) override;
+  void VisitSub(HSub* instruction) override;
+  void VisitUShr(HUShr* instruction) override;
+  void VisitXor(HXor* instruction) override;
 };
 
 
-void HConstantFolding::Run() {
+bool HConstantFolding::Run() {
   HConstantFoldingVisitor visitor(graph_);
   // Process basic blocks in reverse post-order in the dominator tree,
   // so that an instruction turned into a constant, used as input of
   // another instruction, may possibly be used to turn that second
   // instruction into a constant as well.
   visitor.VisitReversePostOrder();
+  return true;
 }
 
 
@@ -113,7 +114,7 @@ void HConstantFoldingVisitor::VisitBinaryOperation(HBinaryOperation* inst) {
 void HConstantFoldingVisitor::VisitTypeConversion(HTypeConversion* inst) {
   // Constant folding: replace `TypeConversion(a)' with a constant at
   // compile time if `a' is a constant.
-  HConstant* constant = inst->AsTypeConversion()->TryStaticEvaluation();
+  HConstant* constant = inst->TryStaticEvaluation();
   if (constant != nullptr) {
     inst->ReplaceWith(constant);
     inst->GetBlock()->RemoveInstruction(inst);
@@ -150,7 +151,7 @@ void InstructionWithAbsorbingInputSimplifier::VisitEqual(HEqual* instruction) {
     //    EQUAL lhs, null
     // where lhs cannot be null with
     //    CONSTANT false
-    instruction->ReplaceWith(GetGraph()->GetConstant(Primitive::kPrimBoolean, 0));
+    instruction->ReplaceWith(GetGraph()->GetConstant(DataType::Type::kBool, 0));
     instruction->GetBlock()->RemoveInstruction(instruction);
   }
 }
@@ -162,7 +163,7 @@ void InstructionWithAbsorbingInputSimplifier::VisitNotEqual(HNotEqual* instructi
     //    NOT_EQUAL lhs, null
     // where lhs cannot be null with
     //    CONSTANT true
-    instruction->ReplaceWith(GetGraph()->GetConstant(Primitive::kPrimBoolean, 1));
+    instruction->ReplaceWith(GetGraph()->GetConstant(DataType::Type::kBool, 1));
     instruction->GetBlock()->RemoveInstruction(instruction);
   }
 }
@@ -174,7 +175,7 @@ void InstructionWithAbsorbingInputSimplifier::VisitAbove(HAbove* instruction) {
     //    ABOVE dst, 0, src  // unsigned 0 > src is always false
     // with
     //    CONSTANT false
-    instruction->ReplaceWith(GetGraph()->GetConstant(Primitive::kPrimBoolean, 0));
+    instruction->ReplaceWith(GetGraph()->GetConstant(DataType::Type::kBool, 0));
     instruction->GetBlock()->RemoveInstruction(instruction);
   }
 }
@@ -186,7 +187,7 @@ void InstructionWithAbsorbingInputSimplifier::VisitAboveOrEqual(HAboveOrEqual* i
     //    ABOVE_OR_EQUAL dst, src, 0  // unsigned src >= 0 is always true
     // with
     //    CONSTANT true
-    instruction->ReplaceWith(GetGraph()->GetConstant(Primitive::kPrimBoolean, 1));
+    instruction->ReplaceWith(GetGraph()->GetConstant(DataType::Type::kBool, 1));
     instruction->GetBlock()->RemoveInstruction(instruction);
   }
 }
@@ -198,7 +199,7 @@ void InstructionWithAbsorbingInputSimplifier::VisitBelow(HBelow* instruction) {
     //    BELOW dst, src, 0  // unsigned src < 0 is always false
     // with
     //    CONSTANT false
-    instruction->ReplaceWith(GetGraph()->GetConstant(Primitive::kPrimBoolean, 0));
+    instruction->ReplaceWith(GetGraph()->GetConstant(DataType::Type::kBool, 0));
     instruction->GetBlock()->RemoveInstruction(instruction);
   }
 }
@@ -210,7 +211,7 @@ void InstructionWithAbsorbingInputSimplifier::VisitBelowOrEqual(HBelowOrEqual* i
     //    BELOW_OR_EQUAL dst, 0, src  // unsigned 0 <= src is always true
     // with
     //    CONSTANT true
-    instruction->ReplaceWith(GetGraph()->GetConstant(Primitive::kPrimBoolean, 1));
+    instruction->ReplaceWith(GetGraph()->GetConstant(DataType::Type::kBool, 1));
     instruction->GetBlock()->RemoveInstruction(instruction);
   }
 }
@@ -231,7 +232,7 @@ void InstructionWithAbsorbingInputSimplifier::VisitCompare(HCompare* instruction
   HConstant* input_cst = instruction->GetConstantRight();
   if (input_cst != nullptr) {
     HInstruction* input_value = instruction->GetLeastConstantLeft();
-    if (Primitive::IsFloatingPointType(input_value->GetType()) &&
+    if (DataType::IsFloatingPointType(input_value->GetType()) &&
         ((input_cst->IsFloatConstant() && input_cst->AsFloatConstant()->IsNaN()) ||
          (input_cst->IsDoubleConstant() && input_cst->AsDoubleConstant()->IsNaN()))) {
       // Replace code looking like
@@ -240,7 +241,7 @@ void InstructionWithAbsorbingInputSimplifier::VisitCompare(HCompare* instruction
       //    CONSTANT +1 (gt bias)
       // or
       //    CONSTANT -1 (lt bias)
-      instruction->ReplaceWith(GetGraph()->GetConstant(Primitive::kPrimInt,
+      instruction->ReplaceWith(GetGraph()->GetConstant(DataType::Type::kInt32,
                                                        (instruction->IsGtBias() ? 1 : -1)));
       instruction->GetBlock()->RemoveInstruction(instruction);
     }
@@ -249,8 +250,8 @@ void InstructionWithAbsorbingInputSimplifier::VisitCompare(HCompare* instruction
 
 void InstructionWithAbsorbingInputSimplifier::VisitMul(HMul* instruction) {
   HConstant* input_cst = instruction->GetConstantRight();
-  Primitive::Type type = instruction->GetType();
-  if (Primitive::IsIntOrLongType(type) &&
+  DataType::Type type = instruction->GetType();
+  if (DataType::IsIntOrLongType(type) &&
       (input_cst != nullptr) && input_cst->IsArithmeticZero()) {
     // Replace code looking like
     //    MUL dst, src, 0
@@ -282,9 +283,9 @@ void InstructionWithAbsorbingInputSimplifier::VisitOr(HOr* instruction) {
 }
 
 void InstructionWithAbsorbingInputSimplifier::VisitRem(HRem* instruction) {
-  Primitive::Type type = instruction->GetType();
+  DataType::Type type = instruction->GetType();
 
-  if (!Primitive::IsIntegralType(type)) {
+  if (!DataType::IsIntegralType(type)) {
     return;
   }
 
@@ -326,9 +327,9 @@ void InstructionWithAbsorbingInputSimplifier::VisitShr(HShr* instruction) {
 }
 
 void InstructionWithAbsorbingInputSimplifier::VisitSub(HSub* instruction) {
-  Primitive::Type type = instruction->GetType();
+  DataType::Type type = instruction->GetType();
 
-  if (!Primitive::IsIntegralType(type)) {
+  if (!DataType::IsIntegralType(type)) {
     return;
   }
 
@@ -360,7 +361,7 @@ void InstructionWithAbsorbingInputSimplifier::VisitXor(HXor* instruction) {
     //    XOR dst, src, src
     // with
     //    CONSTANT 0
-    Primitive::Type type = instruction->GetType();
+    DataType::Type type = instruction->GetType();
     HBasicBlock* block = instruction->GetBlock();
     instruction->ReplaceWith(GetGraph()->GetConstant(type, 0));
     block->RemoveInstruction(instruction);

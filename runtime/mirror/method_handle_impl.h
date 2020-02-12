@@ -20,9 +20,9 @@
 #include "art_field.h"
 #include "art_method.h"
 #include "class.h"
-#include "gc_root.h"
-#include "object.h"
 #include "method_type.h"
+#include "obj_ptr.h"
+#include "object.h"
 
 namespace art {
 
@@ -48,6 +48,8 @@ class MANAGED MethodHandle : public Object {
     kInvokeInterface,
     kInvokeTransform,
     kInvokeCallSiteTransform,
+    kInvokeVarHandle,
+    kInvokeVarHandleExact,
     kInstanceGet,
     kInstancePut,
     kStaticGet,
@@ -55,7 +57,7 @@ class MANAGED MethodHandle : public Object {
     kLastValidKind = kStaticPut,
     kFirstAccessorKind = kInstanceGet,
     kLastAccessorKind = kStaticPut,
-    kLastInvokeKind = kInvokeCallSiteTransform
+    kLastInvokeKind = kInvokeVarHandleExact
   };
 
   Kind GetHandleKind() REQUIRES_SHARED(Locks::mutator_lock_) {
@@ -65,9 +67,9 @@ class MANAGED MethodHandle : public Object {
     return static_cast<Kind>(handle_kind);
   }
 
-  ALWAYS_INLINE mirror::MethodType* GetMethodType() REQUIRES_SHARED(Locks::mutator_lock_);
+  ALWAYS_INLINE ObjPtr<mirror::MethodType> GetMethodType() REQUIRES_SHARED(Locks::mutator_lock_);
 
-  ALWAYS_INLINE mirror::MethodType* GetNominalType() REQUIRES_SHARED(Locks::mutator_lock_);
+  ALWAYS_INLINE ObjPtr<mirror::MethodType> GetNominalType() REQUIRES_SHARED(Locks::mutator_lock_);
 
   ArtField* GetTargetField() REQUIRES_SHARED(Locks::mutator_lock_) {
     return reinterpret_cast<ArtField*>(
@@ -81,7 +83,9 @@ class MANAGED MethodHandle : public Object {
 
   ALWAYS_INLINE ObjPtr<mirror::Class> GetTargetClass() REQUIRES_SHARED(Locks::mutator_lock_);
 
-  static mirror::Class* StaticClass() REQUIRES_SHARED(Locks::mutator_lock_);
+  // Gets the return type for a named invoke method, or nullptr if the invoke method is not
+  // supported.
+  static const char* GetReturnTypeDescriptor(const char* invoke_method_name);
 
  protected:
   void Initialize(uintptr_t art_field_or_method, Kind kind, Handle<MethodType> method_type)
@@ -118,17 +122,11 @@ class MANAGED MethodHandle : public Object {
 // C++ mirror of java.lang.invoke.MethodHandleImpl
 class MANAGED MethodHandleImpl : public MethodHandle {
  public:
-  static mirror::MethodHandleImpl* Create(Thread* const self,
-                                          uintptr_t art_field_or_method,
-                                          MethodHandle::Kind kind,
-                                          Handle<MethodType> method_type)
+  static ObjPtr<mirror::MethodHandleImpl> Create(Thread* const self,
+                                                 uintptr_t art_field_or_method,
+                                                 MethodHandle::Kind kind,
+                                                 Handle<MethodType> method_type)
       REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!Roles::uninterruptible_);
-
-  static mirror::Class* StaticClass() REQUIRES_SHARED(Locks::mutator_lock_);
-
-  static void SetClass(Class* klass) REQUIRES_SHARED(Locks::mutator_lock_);
-  static void ResetClass() REQUIRES_SHARED(Locks::mutator_lock_);
-  static void VisitRoots(RootVisitor* visitor) REQUIRES_SHARED(Locks::mutator_lock_);
 
  private:
   static MemberOffset InfoOffset() {
@@ -136,7 +134,6 @@ class MANAGED MethodHandleImpl : public MethodHandle {
   }
 
   HeapReference<mirror::Object> info_;  // Unused by the runtime.
-  static GcRoot<mirror::Class> static_class_;  // java.lang.invoke.MethodHandleImpl.class
 
   friend struct art::MethodHandleImplOffsets;  // for verifying offset information
   DISALLOW_IMPLICIT_CONSTRUCTORS(MethodHandleImpl);

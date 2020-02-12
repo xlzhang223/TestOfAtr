@@ -17,6 +17,24 @@
 #include "compiler_options.h"
 
 #include <fstream>
+#include <string_view>
+
+#include "android-base/stringprintf.h"
+#include "android-base/strings.h"
+
+#include "arch/instruction_set.h"
+#include "arch/instruction_set_features.h"
+#include "base/runtime_debug.h"
+#include "base/variant_map.h"
+#include "class_linker.h"
+#include "cmdline_parser.h"
+#include "compiler_options_map-inl.h"
+#include "dex/dex_file-inl.h"
+#include "dex/verification_results.h"
+#include "dex/verified_method.h"
+#include "runtime.h"
+#include "scoped_thread_state_change-inl.h"
+#include "simple_compiler_options_map.h"
 
 namespace art {
 
@@ -28,10 +46,15 @@ CompilerOptions::CompilerOptions()
       tiny_method_threshold_(kDefaultTinyMethodThreshold),
       num_dex_methods_threshold_(kDefaultNumDexMethodsThreshold),
       inline_max_code_units_(kUnsetInlineMaxCodeUnits),
-      no_inline_from_(nullptr),
-      boot_image_(false),
-      app_image_(false),
-      top_k_profile_threshold_(kDefaultTopKProfileThreshold),
+      instruction_set_(kRuntimeISA == InstructionSet::kArm ? InstructionSet::kThumb2 : kRuntimeISA),
+      instruction_set_features_(nullptr),
+      no_inline_from_(),
+      dex_files_for_oat_file_(),
+      image_classes_(),
+      verification_results_(nullptr),
+      image_type_(ImageType::kNone),
+      compiling_with_core_image_(false),
+      baseline_(false),
       debuggable_(false),
       generate_debug_info_(kDefaultGenerateDebugInfo),
       generate_mini_debug_info_(kDefaultGenerateMiniDebugInfo),
@@ -40,175 +63,141 @@ CompilerOptions::CompilerOptions()
       implicit_so_checks_(true),
       implicit_suspend_checks_(false),
       compile_pic_(false),
-      verbose_methods_(nullptr),
+      dump_timings_(false),
+      dump_pass_timings_(false),
+      dump_stats_(false),
+      top_k_profile_threshold_(kDefaultTopKProfileThreshold),
+      profile_compilation_info_(nullptr),
+      verbose_methods_(),
       abort_on_hard_verifier_failure_(false),
+      abort_on_soft_verifier_failure_(false),
       init_failure_output_(nullptr),
       dump_cfg_file_name_(""),
       dump_cfg_append_(false),
       force_determinism_(false),
+      deduplicate_code_(true),
+      count_hotness_in_compiled_code_(false),
+      resolve_startup_const_strings_(false),
+      check_profiled_methods_(ProfileMethodsCheck::kNone),
+      max_image_block_size_(std::numeric_limits<uint32_t>::max()),
       register_allocation_strategy_(RegisterAllocator::kRegisterAllocatorDefault),
       passes_to_run_(nullptr) {
 }
 
 CompilerOptions::~CompilerOptions() {
-  // The destructor looks empty but it destroys a PassManagerOptions object. We keep it here
-  // because we don't want to include the PassManagerOptions definition from the header file.
+  // Everything done by member destructors.
+  // The definitions of classes forward-declared in the header have now been #included.
 }
 
-CompilerOptions::CompilerOptions(CompilerFilter::Filter compiler_filter,
-                                 size_t huge_method_threshold,
-                                 size_t large_method_threshold,
-                                 size_t small_method_threshold,
-                                 size_t tiny_method_threshold,
-                                 size_t num_dex_methods_threshold,
-                                 size_t inline_max_code_units,
-                                 const std::vector<const DexFile*>* no_inline_from,
-                                 double top_k_profile_threshold,
-                                 bool debuggable,
-                                 bool generate_debug_info,
-                                 bool implicit_null_checks,
-                                 bool implicit_so_checks,
-                                 bool implicit_suspend_checks,
-                                 bool compile_pic,
-                                 const std::vector<std::string>* verbose_methods,
-                                 std::ostream* init_failure_output,
-                                 bool abort_on_hard_verifier_failure,
-                                 const std::string& dump_cfg_file_name,
-                                 bool dump_cfg_append,
-                                 bool force_determinism,
-                                 RegisterAllocator::Strategy regalloc_strategy,
-                                 const std::vector<std::string>* passes_to_run)
-    : compiler_filter_(compiler_filter),
-      huge_method_threshold_(huge_method_threshold),
-      large_method_threshold_(large_method_threshold),
-      small_method_threshold_(small_method_threshold),
-      tiny_method_threshold_(tiny_method_threshold),
-      num_dex_methods_threshold_(num_dex_methods_threshold),
-      inline_max_code_units_(inline_max_code_units),
-      no_inline_from_(no_inline_from),
-      boot_image_(false),
-      app_image_(false),
-      top_k_profile_threshold_(top_k_profile_threshold),
-      debuggable_(debuggable),
-      generate_debug_info_(generate_debug_info),
-      generate_mini_debug_info_(kDefaultGenerateMiniDebugInfo),
-      generate_build_id_(false),
-      implicit_null_checks_(implicit_null_checks),
-      implicit_so_checks_(implicit_so_checks),
-      implicit_suspend_checks_(implicit_suspend_checks),
-      compile_pic_(compile_pic),
-      verbose_methods_(verbose_methods),
-      abort_on_hard_verifier_failure_(abort_on_hard_verifier_failure),
-      init_failure_output_(init_failure_output),
-      dump_cfg_file_name_(dump_cfg_file_name),
-      dump_cfg_append_(dump_cfg_append),
-      force_determinism_(force_determinism),
-      register_allocation_strategy_(regalloc_strategy),
-      passes_to_run_(passes_to_run) {
+namespace {
+
+bool kEmitRuntimeReadBarrierChecks = kIsDebugBuild &&
+    RegisterRuntimeDebugFlag(&kEmitRuntimeReadBarrierChecks);
+
+}  // namespace
+
+bool CompilerOptions::EmitRunTimeChecksInDebugMode() const {
+  // Run-time checks (e.g. Marking Register checks) are only emitted in slow-debug mode.
+  return kEmitRuntimeReadBarrierChecks;
 }
 
-void CompilerOptions::ParseHugeMethodMax(const StringPiece& option, UsageFn Usage) {
-  ParseUintOption(option, "--huge-method-max", &huge_method_threshold_, Usage);
-}
-
-void CompilerOptions::ParseLargeMethodMax(const StringPiece& option, UsageFn Usage) {
-  ParseUintOption(option, "--large-method-max", &large_method_threshold_, Usage);
-}
-
-void CompilerOptions::ParseSmallMethodMax(const StringPiece& option, UsageFn Usage) {
-  ParseUintOption(option, "--small-method-max", &small_method_threshold_, Usage);
-}
-
-void CompilerOptions::ParseTinyMethodMax(const StringPiece& option, UsageFn Usage) {
-  ParseUintOption(option, "--tiny-method-max", &tiny_method_threshold_, Usage);
-}
-
-void CompilerOptions::ParseNumDexMethods(const StringPiece& option, UsageFn Usage) {
-  ParseUintOption(option, "--num-dex-methods", &num_dex_methods_threshold_, Usage);
-}
-
-void CompilerOptions::ParseInlineMaxCodeUnits(const StringPiece& option, UsageFn Usage) {
-  ParseUintOption(option, "--inline-max-code-units", &inline_max_code_units_, Usage);
-}
-
-void CompilerOptions::ParseDumpInitFailures(const StringPiece& option,
-                                            UsageFn Usage ATTRIBUTE_UNUSED) {
-  DCHECK(option.starts_with("--dump-init-failures="));
-  std::string file_name = option.substr(strlen("--dump-init-failures=")).data();
-  init_failure_output_.reset(new std::ofstream(file_name));
+bool CompilerOptions::ParseDumpInitFailures(const std::string& option, std::string* error_msg) {
+  init_failure_output_.reset(new std::ofstream(option));
   if (init_failure_output_.get() == nullptr) {
-    LOG(ERROR) << "Failed to allocate ofstream";
+    *error_msg = "Failed to construct std::ofstream";
+    return false;
   } else if (init_failure_output_->fail()) {
-    LOG(ERROR) << "Failed to open " << file_name << " for writing the initialization "
-               << "failures.";
+    *error_msg = android::base::StringPrintf(
+        "Failed to open %s for writing the initialization failures.", option.c_str());
     init_failure_output_.reset();
-  }
-}
-
-void CompilerOptions::ParseRegisterAllocationStrategy(const StringPiece& option,
-                                                      UsageFn Usage) {
-  DCHECK(option.starts_with("--register-allocation-strategy="));
-  StringPiece choice = option.substr(strlen("--register-allocation-strategy=")).data();
-  if (choice == "linear-scan") {
-    register_allocation_strategy_ = RegisterAllocator::Strategy::kRegisterAllocatorLinearScan;
-  } else if (choice == "graph-color") {
-    register_allocation_strategy_ = RegisterAllocator::Strategy::kRegisterAllocatorGraphColor;
-  } else {
-    Usage("Unrecognized register allocation strategy. Try linear-scan, or graph-color.");
-  }
-}
-
-bool CompilerOptions::ParseCompilerOption(const StringPiece& option, UsageFn Usage) {
-  if (option.starts_with("--compiler-filter=")) {
-    const char* compiler_filter_string = option.substr(strlen("--compiler-filter=")).data();
-    if (!CompilerFilter::ParseCompilerFilter(compiler_filter_string, &compiler_filter_)) {
-      Usage("Unknown --compiler-filter value %s", compiler_filter_string);
-    }
-  } else if (option == "--compile-pic") {
-    compile_pic_ = true;
-  } else if (option.starts_with("--huge-method-max=")) {
-    ParseHugeMethodMax(option, Usage);
-  } else if (option.starts_with("--large-method-max=")) {
-    ParseLargeMethodMax(option, Usage);
-  } else if (option.starts_with("--small-method-max=")) {
-    ParseSmallMethodMax(option, Usage);
-  } else if (option.starts_with("--tiny-method-max=")) {
-    ParseTinyMethodMax(option, Usage);
-  } else if (option.starts_with("--num-dex-methods=")) {
-    ParseNumDexMethods(option, Usage);
-  } else if (option.starts_with("--inline-max-code-units=")) {
-    ParseInlineMaxCodeUnits(option, Usage);
-  } else if (option == "--generate-debug-info" || option == "-g") {
-    generate_debug_info_ = true;
-  } else if (option == "--no-generate-debug-info") {
-    generate_debug_info_ = false;
-  } else if (option == "--generate-mini-debug-info") {
-    generate_mini_debug_info_ = true;
-  } else if (option == "--no-generate-mini-debug-info") {
-    generate_mini_debug_info_ = false;
-  } else if (option == "--generate-build-id") {
-    generate_build_id_ = true;
-  } else if (option == "--no-generate-build-id") {
-    generate_build_id_ = false;
-  } else if (option == "--debuggable") {
-    debuggable_ = true;
-  } else if (option.starts_with("--top-k-profile-threshold=")) {
-    ParseDouble(option.data(), '=', 0.0, 100.0, &top_k_profile_threshold_, Usage);
-  } else if (option == "--abort-on-hard-verifier-error") {
-    abort_on_hard_verifier_failure_ = true;
-  } else if (option.starts_with("--dump-init-failures=")) {
-    ParseDumpInitFailures(option, Usage);
-  } else if (option.starts_with("--dump-cfg=")) {
-    dump_cfg_file_name_ = option.substr(strlen("--dump-cfg=")).data();
-  } else if (option.starts_with("--dump-cfg-append")) {
-    dump_cfg_append_ = true;
-  } else if (option.starts_with("--register-allocation-strategy=")) {
-    ParseRegisterAllocationStrategy(option, Usage);
-  } else {
-    // Option not recognized.
     return false;
   }
   return true;
+}
+
+bool CompilerOptions::ParseRegisterAllocationStrategy(const std::string& option,
+                                                      std::string* error_msg) {
+  if (option == "linear-scan") {
+    register_allocation_strategy_ = RegisterAllocator::Strategy::kRegisterAllocatorLinearScan;
+  } else if (option == "graph-color") {
+    register_allocation_strategy_ = RegisterAllocator::Strategy::kRegisterAllocatorGraphColor;
+  } else {
+    *error_msg = "Unrecognized register allocation strategy. Try linear-scan, or graph-color.";
+    return false;
+  }
+  return true;
+}
+
+bool CompilerOptions::ParseCompilerOptions(const std::vector<std::string>& options,
+                                           bool ignore_unrecognized,
+                                           std::string* error_msg) {
+  auto parser = CreateSimpleParser(ignore_unrecognized);
+  CmdlineResult parse_result = parser.Parse(options);
+  if (!parse_result.IsSuccess()) {
+    *error_msg = parse_result.GetMessage();
+    return false;
+  }
+
+  SimpleParseArgumentMap args = parser.ReleaseArgumentsMap();
+  return ReadCompilerOptions(args, this, error_msg);
+}
+
+bool CompilerOptions::IsImageClass(const char* descriptor) const {
+  // Historical note: We used to hold the set indirectly and there was a distinction between an
+  // empty set and a null, null meaning to include all classes. However, the distiction has been
+  // removed; if we don't have a profile, we treat it as an empty set of classes. b/77340429
+  return image_classes_.find(std::string_view(descriptor)) != image_classes_.end();
+}
+
+const VerificationResults* CompilerOptions::GetVerificationResults() const {
+  DCHECK(Runtime::Current()->IsAotCompiler());
+  return verification_results_;
+}
+
+const VerifiedMethod* CompilerOptions::GetVerifiedMethod(const DexFile* dex_file,
+                                                         uint32_t method_idx) const {
+  MethodReference ref(dex_file, method_idx);
+  return verification_results_->GetVerifiedMethod(ref);
+}
+
+bool CompilerOptions::IsMethodVerifiedWithoutFailures(uint32_t method_idx,
+                                                      uint16_t class_def_idx,
+                                                      const DexFile& dex_file) const {
+  const VerifiedMethod* verified_method = GetVerifiedMethod(&dex_file, method_idx);
+  if (verified_method != nullptr) {
+    return !verified_method->HasVerificationFailures();
+  }
+
+  // If we can't find verification metadata, check if this is a system class (we trust that system
+  // classes have their methods verified). If it's not, be conservative and assume the method
+  // has not been verified successfully.
+
+  // TODO: When compiling the boot image it should be safe to assume that everything is verified,
+  // even if methods are not found in the verification cache.
+  const char* descriptor = dex_file.GetClassDescriptor(dex_file.GetClassDef(class_def_idx));
+  ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
+  Thread* self = Thread::Current();
+  ScopedObjectAccess soa(self);
+  bool is_system_class = class_linker->FindSystemClass(self, descriptor) != nullptr;
+  if (!is_system_class) {
+    self->ClearException();
+  }
+  return is_system_class;
+}
+
+bool CompilerOptions::IsCoreImageFilename(const std::string& boot_image_filename) {
+  // Look for "core.art" or "core-*.art".
+  if (android::base::EndsWith(boot_image_filename, "core.art")) {
+    return true;
+  }
+  if (!android::base::EndsWith(boot_image_filename, ".art")) {
+    return false;
+  }
+  size_t slash_pos = boot_image_filename.rfind('/');
+  if (slash_pos == std::string::npos) {
+    return android::base::StartsWith(boot_image_filename, "core-");
+  }
+  return boot_image_filename.compare(slash_pos + 1, 5u, "core-") == 0;
 }
 
 }  // namespace art

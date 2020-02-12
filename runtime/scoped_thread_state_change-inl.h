@@ -19,9 +19,13 @@
 
 #include "scoped_thread_state_change.h"
 
+#include <android-base/logging.h>
+
 #include "base/casts.h"
-#include "jni_env_ext-inl.h"
+#include "base/mutex.h"
+#include "jni/jni_env_ext-inl.h"
 #include "obj_ptr-inl.h"
+#include "runtime.h"
 #include "thread-inl.h"
 
 namespace art {
@@ -94,12 +98,12 @@ inline bool ScopedObjectAccessAlreadyRunnable::IsRunnable() const {
 }
 
 inline ScopedObjectAccessAlreadyRunnable::ScopedObjectAccessAlreadyRunnable(JNIEnv* env)
-    : self_(ThreadForEnv(env)), env_(down_cast<JNIEnvExt*>(env)), vm_(env_->vm) {}
+    : self_(ThreadForEnv(env)), env_(down_cast<JNIEnvExt*>(env)), vm_(env_->GetVm()) {}
 
 inline ScopedObjectAccessAlreadyRunnable::ScopedObjectAccessAlreadyRunnable(Thread* self)
     : self_(self),
       env_(down_cast<JNIEnvExt*>(self->GetJniEnv())),
-      vm_(env_ != nullptr ? env_->vm : nullptr) {}
+      vm_(env_ != nullptr ? env_->GetVm() : nullptr) {}
 
 inline ScopedObjectAccessUnchecked::ScopedObjectAccessUnchecked(JNIEnv* env)
     : ScopedObjectAccessAlreadyRunnable(env), tsc_(Self(), kRunnable) {

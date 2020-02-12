@@ -17,7 +17,8 @@
 #ifndef ART_RUNTIME_QUICK_EXCEPTION_HANDLER_H_
 #define ART_RUNTIME_QUICK_EXCEPTION_HANDLER_H_
 
-#include "base/logging.h"
+#include <android-base/logging.h>
+
 #include "base/macros.h"
 #include "base/mutex.h"
 #include "deoptimization_kind.h"
@@ -46,7 +47,8 @@ class QuickExceptionHandler {
     UNREACHABLE();
   }
 
-  // Find the catch handler for the given exception.
+  // Find the catch handler for the given exception and call all required Instrumentation methods.
+  // Note this might result in the exception being caught being different from 'exception'.
   void FindCatch(ObjPtr<mirror::Throwable> exception) REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Deoptimize the stack to the upcall/some code that's not deoptimizeable. For
@@ -110,6 +112,10 @@ class QuickExceptionHandler {
 
   void SetHandlerDexPc(uint32_t dex_pc) {
     handler_dex_pc_ = dex_pc;
+  }
+
+  bool GetClearException() const {
+    return clear_exception_;
   }
 
   void SetClearException(bool clear_exception) {

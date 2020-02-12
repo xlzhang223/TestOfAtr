@@ -17,25 +17,23 @@
 #ifndef ART_RUNTIME_MIRROR_THROWABLE_H_
 #define ART_RUNTIME_MIRROR_THROWABLE_H_
 
-#include "gc_root.h"
 #include "object.h"
-#include "object_callbacks.h"
-#include "string.h"
 
 namespace art {
 
+class RootVisitor;
 struct ThrowableOffsets;
 
 namespace mirror {
+
+class String;
 
 // C++ mirror of java.lang.Throwable
 class MANAGED Throwable : public Object {
  public:
   void SetDetailMessage(ObjPtr<String> new_detail_message) REQUIRES_SHARED(Locks::mutator_lock_);
 
-  String* GetDetailMessage() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return GetFieldObject<String>(OFFSET_OF_OBJECT_MEMBER(Throwable, detail_message_));
-  }
+  ObjPtr<String> GetDetailMessage() REQUIRES_SHARED(Locks::mutator_lock_);
 
   std::string Dump() REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -45,35 +43,20 @@ class MANAGED Throwable : public Object {
   void SetCause(ObjPtr<Throwable> cause) REQUIRES_SHARED(Locks::mutator_lock_);
   void SetStackState(ObjPtr<Object> state) REQUIRES_SHARED(Locks::mutator_lock_);
   bool IsCheckedException() REQUIRES_SHARED(Locks::mutator_lock_);
-
-  static Class* GetJavaLangThrowable() REQUIRES_SHARED(Locks::mutator_lock_) {
-    DCHECK(!java_lang_Throwable_.IsNull());
-    return java_lang_Throwable_.Read();
-  }
+  bool IsError() REQUIRES_SHARED(Locks::mutator_lock_);
 
   int32_t GetStackDepth() REQUIRES_SHARED(Locks::mutator_lock_);
 
-  static void SetClass(ObjPtr<Class> java_lang_Throwable);
-  static void ResetClass();
-  static void VisitRoots(RootVisitor* visitor)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
  private:
-  Object* GetStackState() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return GetFieldObjectVolatile<Object>(OFFSET_OF_OBJECT_MEMBER(Throwable, backtrace_));
-  }
-  Object* GetStackTrace() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return GetFieldObjectVolatile<Object>(OFFSET_OF_OBJECT_MEMBER(Throwable, backtrace_));
-  }
+  ObjPtr<Object> GetStackState() REQUIRES_SHARED(Locks::mutator_lock_);
+  ObjPtr<Object> GetStackTrace() REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Field order required by test "ValidateFieldOrderOfJavaCppUnionClasses".
-  HeapReference<Object> backtrace_;  // Note this is Java volatile:
+  HeapReference<Object> backtrace_;
   HeapReference<Throwable> cause_;
   HeapReference<String> detail_message_;
   HeapReference<Object> stack_trace_;
   HeapReference<Object> suppressed_exceptions_;
-
-  static GcRoot<Class> java_lang_Throwable_;
 
   friend struct art::ThrowableOffsets;  // for verifying offset information
   DISALLOW_IMPLICIT_CONSTRUCTORS(Throwable);

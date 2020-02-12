@@ -38,7 +38,8 @@ public class Main {
             if (e.getMessage().contains("Too many open files")) {
                 System.out.println("Message includes \"Too many open files\"");
             } else {
-                System.out.println(e.getMessage());
+                System.out.println("Unexpected exception:");
+                e.printStackTrace();
             }
         }
 
@@ -55,8 +56,11 @@ public class Main {
             System.out.println(e.getMessage());
         }
 
-        for (int i = 0; i < files.size(); i++) {
+        for (int i = 0; i < streams.size(); i++) {
           streams.get(i).close();
+        }
+
+        for (int i = 0; i < files.size(); i++) {
           files.get(i).delete();
         }
         System.out.println("done.");

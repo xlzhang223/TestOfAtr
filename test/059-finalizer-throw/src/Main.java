@@ -25,11 +25,18 @@ public class Main {
     static Object waiter = new Object();
     static volatile boolean didFinal = false;
 
+    private volatile static Throwable preallocatedException;
+
     static void createAndForget() {
         Main main = new Main();
     }
 
     public static void main(String[] args) {
+        // Preallocate exception to lighten the load in the time-sensitive section.
+        preallocatedException = new InterruptedException("whee");
+        // Print out something to avoid effects of being the first to write.
+        System.out.println("Starting");
+
         createAndForget();
 
         System.gc();
@@ -46,7 +53,7 @@ public class Main {
             try {
                 Thread.sleep(500);
             } catch (InterruptedException ie) {
-                System.err.println(ie);
+                System.out.println(ie);
             }
         }
 
@@ -54,7 +61,7 @@ public class Main {
         try {
             Thread.sleep(750);
         } catch (InterruptedException ie) {
-            System.err.println(ie);
+            System.out.println(ie);
         }
 
         System.out.println("done");
@@ -65,6 +72,6 @@ public class Main {
 
         didFinal = true;
 
-        throw new InterruptedException("whee");
+        throw preallocatedException;
     }
 }

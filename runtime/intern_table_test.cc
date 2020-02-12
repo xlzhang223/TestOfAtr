@@ -18,9 +18,10 @@
 
 #include "base/hash_set.h"
 #include "common_runtime_test.h"
+#include "dex/utf.h"
 #include "gc_root-inl.h"
-#include "mirror/object.h"
 #include "handle_scope-inl.h"
+#include "mirror/object.h"
 #include "mirror/string.h"
 #include "scoped_thread_state_change-inl.h"
 
@@ -77,15 +78,15 @@ TEST_F(InternTableTest, CrossHash) {
   GcRoot<mirror::String> str(mirror::String::AllocFromModifiedUtf8(soa.Self(), "00000000"));
 
   MutexLock mu(Thread::Current(), *Locks::intern_table_lock_);
-  for (InternTable::Table::UnorderedSet& table : t.strong_interns_.tables_) {
+  for (InternTable::Table::InternalTable& table : t.strong_interns_.tables_) {
     // The negative hash value shall be 32-bit wide on every host.
-    ASSERT_TRUE(IsUint<32>(table.hashfn_(str)));
+    ASSERT_TRUE(IsUint<32>(table.set_.hashfn_(str)));
   }
 }
 
 class TestPredicate : public IsMarkedVisitor {
  public:
-  mirror::Object* IsMarked(mirror::Object* s) OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_) {
+  mirror::Object* IsMarked(mirror::Object* s) override REQUIRES_SHARED(Locks::mutator_lock_) {
     bool erased = false;
     for (auto it = expected_.begin(), end = expected_.end(); it != end; ++it) {
       if (*it == s) {

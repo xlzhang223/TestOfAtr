@@ -18,14 +18,16 @@
 
 #include <sys/ucontext.h>
 
+#include "arch/instruction_set.h"
+#include "arch/mips64/callee_save_frame_mips64.h"
 #include "art_method.h"
+#include "base/callee_save_type.h"
 #include "base/hex_dump.h"
-#include "base/logging.h"
+#include "base/logging.h"  // For VLOG.
 #include "base/macros.h"
-#include "globals.h"
-#include "quick_method_frame_info_mips64.h"
 #include "registers_mips64.h"
-#include "thread-inl.h"
+#include "runtime_globals.h"
+#include "thread-current-inl.h"
 
 extern "C" void art_quick_throw_stack_overflow();
 extern "C" void art_quick_throw_null_pointer_exception_from_signal();
@@ -51,7 +53,7 @@ void FaultManager::GetMethodAndReturnPcAndSp(siginfo_t* siginfo, void* context,
   // get the method from the top of the stack.  However it's in r0.
   uintptr_t* fault_addr = reinterpret_cast<uintptr_t*>(siginfo->si_addr);  // BVA addr
   uintptr_t* overflow_addr = reinterpret_cast<uintptr_t*>(
-      reinterpret_cast<uint8_t*>(*out_sp) - GetStackOverflowReservedBytes(kMips64));
+      reinterpret_cast<uint8_t*>(*out_sp) - GetStackOverflowReservedBytes(InstructionSet::kMips64));
   if (overflow_addr == fault_addr) {
     *out_method = reinterpret_cast<ArtMethod*>(sc->sc_regs[mips64::A0]);
   } else {
@@ -82,7 +84,7 @@ bool NullPointerHandler::Action(int sig ATTRIBUTE_UNUSED, siginfo_t* info, void*
 
   // Decrement $sp by the frame size of the kSaveEverything method and store
   // the fault address in the padding right after the ArtMethod*.
-  sc->sc_regs[mips64::SP] -= mips64::Mips64CalleeSaveFrameSize(Runtime::kSaveEverything);
+  sc->sc_regs[mips64::SP] -= mips64::Mips64CalleeSaveFrameSize(CalleeSaveType::kSaveEverything);
   uintptr_t* padding = reinterpret_cast<uintptr_t*>(sc->sc_regs[mips64::SP]) + /* ArtMethod* */ 1;
   *padding = reinterpret_cast<uintptr_t>(info->si_addr);
 
@@ -125,7 +127,7 @@ bool StackOverflowHandler::Action(int sig ATTRIBUTE_UNUSED, siginfo_t* info, voi
   VLOG(signals) << "checking for stack overflow, sp: " << std::hex << sp <<
     ", fault_addr: " << fault_addr;
 
-  uintptr_t overflow_addr = sp - GetStackOverflowReservedBytes(kMips64);
+  uintptr_t overflow_addr = sp - GetStackOverflowReservedBytes(InstructionSet::kMips64);
 
   // Check that the fault address is the value expected for a stack overflow.
   if (fault_addr != overflow_addr) {

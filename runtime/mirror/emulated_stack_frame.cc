@@ -14,19 +14,23 @@
  * limitations under the License.
  */
 
-#include "emulated_stack_frame.h"
+#include "emulated_stack_frame-inl.h"
 
-#include "class-inl.h"
-#include "gc_root-inl.h"
+#include "array-alloc-inl.h"
+#include "array-inl.h"
+#include "class-alloc-inl.h"
+#include "class_root.h"
+#include "handle.h"
 #include "jvalue-inl.h"
-#include "method_handles.h"
 #include "method_handles-inl.h"
+#include "method_handles.h"
+#include "method_type-inl.h"
+#include "object_array-alloc-inl.h"
+#include "object_array-inl.h"
 #include "reflection-inl.h"
 
 namespace art {
 namespace mirror {
-
-GcRoot<mirror::Class> EmulatedStackFrame::static_class_;
 
 // Calculates the size of a stack frame based on the size of its argument
 // types and return types.
@@ -103,7 +107,7 @@ class EmulatedStackFrameAccessor {
   }
 
   ALWAYS_INLINE ObjPtr<mirror::Object> GetReference() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return ObjPtr<mirror::Object>(references_->Get(reference_idx_++));
+    return references_->Get(reference_idx_++);
   }
 
   ALWAYS_INLINE uint32_t Get() REQUIRES_SHARED(Locks::mutator_lock_) {
@@ -139,14 +143,12 @@ class EmulatedStackFrameAccessor {
   DISALLOW_COPY_AND_ASSIGN(EmulatedStackFrameAccessor);
 };
 
-template <bool is_range>
-mirror::EmulatedStackFrame* EmulatedStackFrame::CreateFromShadowFrameAndArgs(
+ObjPtr<mirror::EmulatedStackFrame> EmulatedStackFrame::CreateFromShadowFrameAndArgs(
     Thread* self,
     Handle<mirror::MethodType> caller_type,
     Handle<mirror::MethodType> callee_type,
     const ShadowFrame& caller_frame,
-    const uint32_t first_src_reg,
-    const uint32_t (&arg)[Instruction::kMaxVarArgRegs]) {
+    const InstructionOperands* const operands) {
   StackHandleScope<6> hs(self);
 
   // Step 1: We must throw a WrongMethodTypeException if there's a mismatch in the
@@ -168,8 +170,7 @@ mirror::EmulatedStackFrame* EmulatedStackFrame::CreateFromShadowFrameAndArgs(
   CalculateFrameAndReferencesSize(to_types.Get(), r_type.Get(), &frame_size, &refs_size);
 
   // Step 3 : Allocate the arrays.
-  ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
-  ObjPtr<mirror::Class> array_class(class_linker->GetClassRoot(ClassLinker::kObjectArrayClass));
+  ObjPtr<mirror::Class> array_class(GetClassRoot<mirror::ObjectArray<mirror::Object>>());
 
   Handle<mirror::ObjectArray<mirror::Object>> references(hs.NewHandle(
       mirror::ObjectArray<mirror::Object>::Alloc(self, array_class, refs_size)));
@@ -185,16 +186,16 @@ mirror::EmulatedStackFrame* EmulatedStackFrame::CreateFromShadowFrameAndArgs(
   }
 
   // Step 4 : Perform argument conversions (if required).
-  ShadowFrameGetter<is_range> getter(first_src_reg, arg, caller_frame);
+  ShadowFrameGetter getter(caller_frame, operands);
   EmulatedStackFrameAccessor setter(references, stack_frame, stack_frame->GetLength());
-  if (!PerformConversions<ShadowFrameGetter<is_range>, EmulatedStackFrameAccessor>(
+  if (!PerformConversions<ShadowFrameGetter, EmulatedStackFrameAccessor>(
           self, caller_type, callee_type, &getter, &setter, num_method_params)) {
     return nullptr;
   }
 
   // Step 5: Construct the EmulatedStackFrame object.
   Handle<EmulatedStackFrame> sf(hs.NewHandle(
-      ObjPtr<EmulatedStackFrame>::DownCast(StaticClass()->AllocObject(self))));
+      ObjPtr<EmulatedStackFrame>::DownCast(GetClassRoot<EmulatedStackFrame>()->AllocObject(self))));
   sf->SetFieldObject<false>(CallsiteTypeOffset(), caller_type.Get());
   sf->SetFieldObject<false>(TypeOffset(), callee_type.Get());
   sf->SetFieldObject<false>(ReferencesOffset(), references.Get());
@@ -273,37 +274,6 @@ void EmulatedStackFrame::SetReturnValue(Thread* self, const JValue& value) {
     }
   }
 }
-
-void EmulatedStackFrame::SetClass(Class* klass) {
-  CHECK(static_class_.IsNull()) << static_class_.Read() << " " << klass;
-  CHECK(klass != nullptr);
-  static_class_ = GcRoot<Class>(klass);
-}
-
-void EmulatedStackFrame::ResetClass() {
-  CHECK(!static_class_.IsNull());
-  static_class_ = GcRoot<Class>(nullptr);
-}
-
-void EmulatedStackFrame::VisitRoots(RootVisitor* visitor) {
-  static_class_.VisitRootIfNonNull(visitor, RootInfo(kRootStickyClass));
-}
-
-// Explicit DoInvokePolymorphic template function declarations.
-#define EXPLICIT_CREATE_FROM_SHADOW_FRAME_AND_ARGS_DECL(_is_range)                         \
-  template REQUIRES_SHARED(Locks::mutator_lock_)                                           \
-  mirror::EmulatedStackFrame* EmulatedStackFrame::CreateFromShadowFrameAndArgs<_is_range>( \
-    Thread* self,                                                                          \
-    Handle<mirror::MethodType> caller_type,                                                \
-    Handle<mirror::MethodType> callee_type,                                                \
-    const ShadowFrame& caller_frame,                                                       \
-    const uint32_t first_src_reg,                                                          \
-    const uint32_t (&arg)[Instruction::kMaxVarArgRegs])                                    \
-
-EXPLICIT_CREATE_FROM_SHADOW_FRAME_AND_ARGS_DECL(true);
-EXPLICIT_CREATE_FROM_SHADOW_FRAME_AND_ARGS_DECL(false);
-#undef EXPLICIT_CREATE_FROM_SHADOW_FRAME_AND_ARGS_DECL
-
 
 }  // namespace mirror
 }  // namespace art

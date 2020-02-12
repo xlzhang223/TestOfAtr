@@ -29,9 +29,11 @@
 #include <memory>
 #include <vector>
 
+#include <android-base/logging.h>
+
 #include "dex_ir.h"
 #include "dexlayout.h"
-#include "jit/profile_compilation_info.h"
+#include "profile/profile_compilation_info.h"
 
 namespace art {
 
@@ -51,7 +53,7 @@ class Dumper {
 
   bool OpenAndPrintHeader(size_t dex_index) {
     // Open the file and emit the gnuplot prologue.
-    out_file_ = fopen(MultidexName("layout", dex_index, ".gnuplot").c_str(), "w");
+    out_file_ = fopen(MultidexName("layout", dex_index, ".gnuplot").c_str(), "we");
     if (out_file_ == nullptr) {
       return false;
     }
@@ -174,7 +176,7 @@ class Dumper {
                       ProfileCompilationInfo* profile_info) {
     if (profile_info != nullptr) {
       uint32_t method_idx = method->GetMethodId()->GetIndex();
-      if (!profile_info->ContainsMethod(MethodReference(dex_file, method_idx))) {
+      if (!profile_info->GetMethodHotness(MethodReference(dex_file, method_idx)).IsHot()) {
         return;
       }
     }
@@ -188,20 +190,16 @@ class Dumper {
       DumpAddressRange(code_item, class_index);
       const dex_ir::CodeFixups* fixups = code_item->GetCodeFixups();
       if (fixups != nullptr) {
-        std::vector<dex_ir::TypeId*>* type_ids = fixups->TypeIds();
-        for (dex_ir::TypeId* type_id : *type_ids) {
+        for (dex_ir::TypeId* type_id : fixups->TypeIds()) {
           DumpTypeId(type_id, class_index);
         }
-        std::vector<dex_ir::StringId*>* string_ids = fixups->StringIds();
-        for (dex_ir::StringId* string_id : *string_ids) {
+        for (dex_ir::StringId* string_id : fixups->StringIds()) {
           DumpStringId(string_id, class_index);
         }
-        std::vector<dex_ir::MethodId*>* method_ids = fixups->MethodIds();
-        for (dex_ir::MethodId* method_id : *method_ids) {
+        for (dex_ir::MethodId* method_id : fixups->MethodIds()) {
           DumpMethodId(method_id, class_index);
         }
-        std::vector<dex_ir::FieldId*>* field_ids = fixups->FieldIds();
-        for (dex_ir::FieldId* field_id : *field_ids) {
+        for (dex_ir::FieldId* field_id : fixups->FieldIds()) {
           DumpFieldId(field_id, class_index);
         }
       }
@@ -250,13 +248,13 @@ void VisualizeDexLayout(dex_ir::Header* header,
                         ProfileCompilationInfo* profile_info) {
   std::unique_ptr<Dumper> dumper(new Dumper(header));
   if (!dumper->OpenAndPrintHeader(dex_file_index)) {
-    fprintf(stderr, "Could not open output file.\n");
+    LOG(ERROR) << "Could not open output file.";
     return;
   }
 
-  const uint32_t class_defs_size = header->GetCollections().ClassDefsSize();
+  const uint32_t class_defs_size = header->ClassDefs().Size();
   for (uint32_t class_index = 0; class_index < class_defs_size; class_index++) {
-    dex_ir::ClassDef* class_def = header->GetCollections().GetClassDef(class_index);
+    dex_ir::ClassDef* class_def = header->ClassDefs()[class_index];
     dex::TypeIndex type_idx(class_def->ClassType()->GetIndex());
     if (profile_info != nullptr && !profile_info->ContainsClass(*dex_file, type_idx)) {
       continue;
@@ -281,22 +279,22 @@ void VisualizeDexLayout(dex_ir::Header* header,
       dumper->DumpAddressRange(class_data, class_index);
       if (class_data->StaticFields()) {
         for (auto& field_item : *class_data->StaticFields()) {
-          dumper->DumpFieldItem(field_item.get(), class_index);
+          dumper->DumpFieldItem(&field_item, class_index);
         }
       }
       if (class_data->InstanceFields()) {
         for (auto& field_item : *class_data->InstanceFields()) {
-          dumper->DumpFieldItem(field_item.get(), class_index);
+          dumper->DumpFieldItem(&field_item, class_index);
         }
       }
       if (class_data->DirectMethods()) {
         for (auto& method_item : *class_data->DirectMethods()) {
-          dumper->DumpMethodItem(method_item.get(), dex_file, class_index, profile_info);
+          dumper->DumpMethodItem(&method_item, dex_file, class_index, profile_info);
         }
       }
       if (class_data->VirtualMethods()) {
         for (auto& method_item : *class_data->VirtualMethods()) {
-          dumper->DumpMethodItem(method_item.get(), dex_file, class_index, profile_info);
+          dumper->DumpMethodItem(&method_item, dex_file, class_index, profile_info);
         }
       }
     }
@@ -307,7 +305,7 @@ static uint32_t FindNextByteAfterSection(dex_ir::Header* header,
                                          const std::vector<dex_ir::DexFileSection>& sorted_sections,
                                          size_t section_index) {
   for (size_t i = section_index + 1; i < sorted_sections.size(); ++i) {
-    const dex_ir::DexFileSection& section = sorted_sections.at(i);
+    const dex_ir::DexFileSection& section = sorted_sections[i];
     if (section.size != 0) {
       return section.offset;
     }

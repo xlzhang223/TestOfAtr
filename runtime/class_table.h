@@ -25,18 +25,25 @@
 #include "base/hash_set.h"
 #include "base/macros.h"
 #include "base/mutex.h"
-#include "dex_file.h"
 #include "gc_root.h"
 #include "obj_ptr.h"
-#include "object_callbacks.h"
-#include "runtime.h"
 
 namespace art {
 
 class OatFile;
 
+namespace linker {
+class ImageWriter;
+}  // namespace linker
+
+namespace linker {
+class OatWriter;
+}  // namespace linker
+
 namespace mirror {
-  class ClassLoader;
+class Class;
+class ClassLoader;
+class Object;
 }  // namespace mirror
 
 // Each loader has a ClassTable
@@ -46,14 +53,14 @@ class ClassTable {
    public:
     TableSlot() : data_(0u) {}
 
-    TableSlot(const TableSlot& copy) : data_(copy.data_.LoadRelaxed()) {}
+    TableSlot(const TableSlot& copy) : data_(copy.data_.load(std::memory_order_relaxed)) {}
 
     explicit TableSlot(ObjPtr<mirror::Class> klass);
 
     TableSlot(ObjPtr<mirror::Class> klass, uint32_t descriptor_hash);
 
     TableSlot& operator=(const TableSlot& copy) {
-      data_.StoreRelaxed(copy.data_.LoadRelaxed());
+      data_.store(copy.data_.load(std::memory_order_relaxed), std::memory_order_relaxed);
       return *this;
     }
 
@@ -62,7 +69,7 @@ class ClassTable {
     }
 
     uint32_t Hash() const {
-      return MaskHash(data_.LoadRelaxed());
+      return MaskHash(data_.load(std::memory_order_relaxed));
     }
 
     static uint32_t MaskHash(uint32_t hash) {
@@ -183,11 +190,11 @@ class ClassTable {
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Stops visit if the visitor returns false.
-  template <typename Visitor>
+  template <typename Visitor, ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
   bool Visit(Visitor& visitor)
       REQUIRES(!lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
-  template <typename Visitor>
+  template <typename Visitor, ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
   bool Visit(const Visitor& visitor)
       REQUIRES(!lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -251,6 +258,12 @@ class ClassTable {
       REQUIRES(!lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
+  // Filter strong roots (other than classes themselves).
+  template <typename Filter>
+  void RemoveStrongRoots(const Filter& filter)
+      REQUIRES(!lock_)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
   ReaderWriterMutex& GetLock() {
     return lock_;
   }
@@ -281,7 +294,7 @@ class ClassTable {
   // Keep track of oat files with GC roots associated with dex caches in `strong_roots_`.
   std::vector<const OatFile*> oat_files_ GUARDED_BY(lock_);
 
-  friend class ImageWriter;  // for InsertWithoutLocks.
+  friend class linker::ImageWriter;  // for InsertWithoutLocks.
 };
 
 }  // namespace art

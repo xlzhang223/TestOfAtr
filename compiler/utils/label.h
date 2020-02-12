@@ -17,8 +17,8 @@
 #ifndef ART_COMPILER_UTILS_LABEL_H_
 #define ART_COMPILER_UTILS_LABEL_H_
 
-#include "base/logging.h"
-#include "base/macros.h"
+#include <android-base/logging.h>
+#include <android-base/macros.h>
 
 namespace art {
 
@@ -26,27 +26,25 @@ class Assembler;
 class AssemblerBuffer;
 class AssemblerFixup;
 
-namespace arm {
-  class ArmAssembler;
-  class Thumb2Assembler;
-}
 namespace arm64 {
-  class Arm64Assembler;
-}
+class Arm64Assembler;
+}  // namespace arm64
 namespace mips {
-  class MipsAssembler;
-}
+class MipsAssembler;
+class MipsLabel;
+}  // namespace mips
 namespace mips64 {
-  class Mips64Assembler;
-}
+class Mips64Assembler;
+class Mips64Label;
+}  // namespace mips64
 namespace x86 {
-  class X86Assembler;
-  class NearLabel;
-}
+class X86Assembler;
+class NearLabel;
+}  // namespace x86
 namespace x86_64 {
-  class X86_64Assembler;
-  class NearLabel;
-}
+class X86_64Assembler;
+class NearLabel;
+}  // namespace x86_64
 
 class ExternalLabel {
  public:
@@ -116,11 +114,11 @@ class Label {
     CHECK(IsLinked());
   }
 
-  friend class arm::ArmAssembler;
-  friend class arm::Thumb2Assembler;
   friend class arm64::Arm64Assembler;
   friend class mips::MipsAssembler;
+  friend class mips::MipsLabel;
   friend class mips64::Mips64Assembler;
+  friend class mips64::Mips64Label;
   friend class x86::X86Assembler;
   friend class x86::NearLabel;
   friend class x86_64::X86_64Assembler;

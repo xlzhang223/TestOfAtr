@@ -14,9 +14,10 @@
  * limitations under the License.
  */
 
+#include "arch/arm64/instruction_set_features_arm64.h"
 #include "assembler_arm64.h"
-#include "base/logging.h"
 #include "entrypoints/quick/quick_entrypoints.h"
+#include "heap_poisoning.h"
 #include "offsets.h"
 #include "thread.h"
 
@@ -30,6 +31,37 @@ namespace arm64 {
 #else
 #define ___   vixl_masm_.
 #endif
+
+// Sets vixl::CPUFeatures according to ART instruction set features.
+static void SetVIXLCPUFeaturesFromART(vixl::aarch64::MacroAssembler* vixl_masm_,
+                                      const Arm64InstructionSetFeatures* art_features) {
+  // Retrieve already initialized default features of vixl.
+  vixl::CPUFeatures* features = vixl_masm_->GetCPUFeatures();
+
+  DCHECK(features->Has(vixl::CPUFeatures::kFP));
+  DCHECK(features->Has(vixl::CPUFeatures::kNEON));
+  DCHECK(art_features != nullptr);
+  if (art_features->HasCRC()) {
+    features->Combine(vixl::CPUFeatures::kCRC32);
+  }
+  if (art_features->HasDotProd()) {
+    features->Combine(vixl::CPUFeatures::kDotProduct);
+  }
+  if (art_features->HasFP16()) {
+    features->Combine(vixl::CPUFeatures::kFPHalf);
+  }
+  if (art_features->HasLSE()) {
+    features->Combine(vixl::CPUFeatures::kAtomics);
+  }
+}
+
+Arm64Assembler::Arm64Assembler(ArenaAllocator* allocator,
+                               const Arm64InstructionSetFeatures* art_features)
+    : Assembler(allocator) {
+  if (art_features != nullptr) {
+    SetVIXLCPUFeaturesFromART(&vixl_masm_, art_features);
+  }
+}
 
 void Arm64Assembler::FinalizeCode() {
   ___ FinalizeCode();
@@ -156,6 +188,24 @@ void Arm64Assembler::MaybeUnpoisonHeapReference(Register reg) {
   if (kPoisonHeapReferences) {
     UnpoisonHeapReference(reg);
   }
+}
+
+void Arm64Assembler::GenerateMarkingRegisterCheck(Register temp, int code) {
+  // The Marking Register is only used in the Baker read barrier configuration.
+  DCHECK(kEmitCompilerReadBarrier);
+  DCHECK(kUseBakerReadBarrier);
+
+  vixl::aarch64::Register mr = reg_x(MR);  // Marking Register.
+  vixl::aarch64::Register tr = reg_x(TR);  // Thread Register.
+  vixl::aarch64::Label mr_is_ok;
+
+  // temp = self.tls32_.is.gc_marking
+  ___ Ldr(temp, MemOperand(tr, Thread::IsGcMarkingOffset<kArm64PointerSize>().Int32Value()));
+  // Check that mr == self.tls32_.is.gc_marking.
+  ___ Cmp(mr.W(), temp);
+  ___ B(eq, &mr_is_ok);
+  ___ Brk(code);
+  ___ Bind(&mr_is_ok);
 }
 
 #undef ___

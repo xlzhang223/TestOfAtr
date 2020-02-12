@@ -18,15 +18,15 @@
 #include <memory>
 
 #include "base/macros.h"
+#include "base/utils.h"
 #include "builder.h"
 #include "codegen_test_utils.h"
-#include "dex_file.h"
-#include "dex_instruction.h"
+#include "dex/dex_file.h"
+#include "dex/dex_instruction.h"
 #include "driver/compiler_options.h"
 #include "nodes.h"
 #include "optimizing_unit_test.h"
 #include "register_allocator_linear_scan.h"
-#include "utils.h"
 #include "utils/arm/assembler_arm_vixl.h"
 #include "utils/arm/managed_register_arm.h"
 #include "utils/mips/managed_register_mips.h"
@@ -43,28 +43,27 @@ static ::std::vector<CodegenTargetConfig> GetTargetConfigs() {
   ::std::vector<CodegenTargetConfig> v;
   ::std::vector<CodegenTargetConfig> test_config_candidates = {
 #ifdef ART_ENABLE_CODEGEN_arm
-    CodegenTargetConfig(kArm, create_codegen_arm),
-    CodegenTargetConfig(kThumb2, create_codegen_arm),
-    CodegenTargetConfig(kArm, create_codegen_arm_vixl32),
+    // TODO: Should't this be `kThumb2` instead of `kArm` here?
+    CodegenTargetConfig(InstructionSet::kArm, create_codegen_arm_vixl32),
 #endif
 #ifdef ART_ENABLE_CODEGEN_arm64
-    CodegenTargetConfig(kArm64, create_codegen_arm64),
+    CodegenTargetConfig(InstructionSet::kArm64, create_codegen_arm64),
 #endif
 #ifdef ART_ENABLE_CODEGEN_x86
-    CodegenTargetConfig(kX86, create_codegen_x86),
+    CodegenTargetConfig(InstructionSet::kX86, create_codegen_x86),
 #endif
 #ifdef ART_ENABLE_CODEGEN_x86_64
-    CodegenTargetConfig(kX86_64, create_codegen_x86_64),
+    CodegenTargetConfig(InstructionSet::kX86_64, create_codegen_x86_64),
 #endif
 #ifdef ART_ENABLE_CODEGEN_mips
-    CodegenTargetConfig(kMips, create_codegen_mips),
+    CodegenTargetConfig(InstructionSet::kMips, create_codegen_mips),
 #endif
 #ifdef ART_ENABLE_CODEGEN_mips64
-    CodegenTargetConfig(kMips64, create_codegen_mips64)
+    CodegenTargetConfig(InstructionSet::kMips64, create_codegen_mips64)
 #endif
   };
 
-  for (auto test_config : test_config_candidates) {
+  for (const CodegenTargetConfig& test_config : test_config_candidates) {
     if (CanExecute(test_config.GetInstructionSet())) {
       v.push_back(test_config);
     }
@@ -73,41 +72,47 @@ static ::std::vector<CodegenTargetConfig> GetTargetConfigs() {
   return v;
 }
 
-static void TestCode(const uint16_t* data,
-                     bool has_result = false,
-                     int32_t expected = 0) {
-  for (CodegenTargetConfig target_config : GetTargetConfigs()) {
-    ArenaPool pool;
-    ArenaAllocator arena(&pool);
-    HGraph* graph = CreateCFG(&arena, data);
+class CodegenTest : public OptimizingUnitTest {
+ protected:
+  void TestCode(const std::vector<uint16_t>& data, bool has_result = false, int32_t expected = 0);
+  void TestCodeLong(const std::vector<uint16_t>& data, bool has_result, int64_t expected);
+  void TestComparison(IfCondition condition,
+                      int64_t i,
+                      int64_t j,
+                      DataType::Type type,
+                      const CodegenTargetConfig target_config);
+};
+
+void CodegenTest::TestCode(const std::vector<uint16_t>& data, bool has_result, int32_t expected) {
+  for (const CodegenTargetConfig& target_config : GetTargetConfigs()) {
+    ResetPoolAndAllocator();
+    HGraph* graph = CreateCFG(data);
     // Remove suspend checks, they cannot be executed in this context.
     RemoveSuspendChecks(graph);
-    RunCode(target_config, graph, [](HGraph*) {}, has_result, expected);
+    OverrideInstructionSetFeatures(target_config.GetInstructionSet(), "default");
+    RunCode(target_config, *compiler_options_, graph, [](HGraph*) {}, has_result, expected);
   }
 }
 
-static void TestCodeLong(const uint16_t* data,
-                         bool has_result,
-                         int64_t expected) {
-  for (CodegenTargetConfig target_config : GetTargetConfigs()) {
-    ArenaPool pool;
-    ArenaAllocator arena(&pool);
-    HGraph* graph = CreateCFG(&arena, data, Primitive::kPrimLong);
+void CodegenTest::TestCodeLong(const std::vector<uint16_t>& data,
+                               bool has_result, int64_t expected) {
+  for (const CodegenTargetConfig& target_config : GetTargetConfigs()) {
+    ResetPoolAndAllocator();
+    HGraph* graph = CreateCFG(data, DataType::Type::kInt64);
     // Remove suspend checks, they cannot be executed in this context.
     RemoveSuspendChecks(graph);
-    RunCode(target_config, graph, [](HGraph*) {}, has_result, expected);
+    OverrideInstructionSetFeatures(target_config.GetInstructionSet(), "default");
+    RunCode(target_config, *compiler_options_, graph, [](HGraph*) {}, has_result, expected);
   }
 }
-
-class CodegenTest : public CommonCompilerTest {};
 
 TEST_F(CodegenTest, ReturnVoid) {
-  const uint16_t data[] = ZERO_REGISTER_CODE_ITEM(Instruction::RETURN_VOID);
+  const std::vector<uint16_t> data = ZERO_REGISTER_CODE_ITEM(Instruction::RETURN_VOID);
   TestCode(data);
 }
 
 TEST_F(CodegenTest, CFG1) {
-  const uint16_t data[] = ZERO_REGISTER_CODE_ITEM(
+  const std::vector<uint16_t> data = ZERO_REGISTER_CODE_ITEM(
     Instruction::GOTO | 0x100,
     Instruction::RETURN_VOID);
 
@@ -115,7 +120,7 @@ TEST_F(CodegenTest, CFG1) {
 }
 
 TEST_F(CodegenTest, CFG2) {
-  const uint16_t data[] = ZERO_REGISTER_CODE_ITEM(
+  const std::vector<uint16_t> data = ZERO_REGISTER_CODE_ITEM(
     Instruction::GOTO | 0x100,
     Instruction::GOTO | 0x100,
     Instruction::RETURN_VOID);
@@ -124,21 +129,21 @@ TEST_F(CodegenTest, CFG2) {
 }
 
 TEST_F(CodegenTest, CFG3) {
-  const uint16_t data1[] = ZERO_REGISTER_CODE_ITEM(
+  const std::vector<uint16_t> data1 = ZERO_REGISTER_CODE_ITEM(
     Instruction::GOTO | 0x200,
     Instruction::RETURN_VOID,
     Instruction::GOTO | 0xFF00);
 
   TestCode(data1);
 
-  const uint16_t data2[] = ZERO_REGISTER_CODE_ITEM(
+  const std::vector<uint16_t> data2 = ZERO_REGISTER_CODE_ITEM(
     Instruction::GOTO_16, 3,
     Instruction::RETURN_VOID,
     Instruction::GOTO_16, 0xFFFF);
 
   TestCode(data2);
 
-  const uint16_t data3[] = ZERO_REGISTER_CODE_ITEM(
+  const std::vector<uint16_t> data3 = ZERO_REGISTER_CODE_ITEM(
     Instruction::GOTO_32, 4, 0,
     Instruction::RETURN_VOID,
     Instruction::GOTO_32, 0xFFFF, 0xFFFF);
@@ -147,7 +152,7 @@ TEST_F(CodegenTest, CFG3) {
 }
 
 TEST_F(CodegenTest, CFG4) {
-  const uint16_t data[] = ZERO_REGISTER_CODE_ITEM(
+  const std::vector<uint16_t> data = ZERO_REGISTER_CODE_ITEM(
     Instruction::RETURN_VOID,
     Instruction::GOTO | 0x100,
     Instruction::GOTO | 0xFE00);
@@ -156,7 +161,7 @@ TEST_F(CodegenTest, CFG4) {
 }
 
 TEST_F(CodegenTest, CFG5) {
-  const uint16_t data[] = ONE_REGISTER_CODE_ITEM(
+  const std::vector<uint16_t> data = ONE_REGISTER_CODE_ITEM(
     Instruction::CONST_4 | 0 | 0,
     Instruction::IF_EQ, 3,
     Instruction::GOTO | 0x100,
@@ -166,7 +171,7 @@ TEST_F(CodegenTest, CFG5) {
 }
 
 TEST_F(CodegenTest, IntConstant) {
-  const uint16_t data[] = ONE_REGISTER_CODE_ITEM(
+  const std::vector<uint16_t> data = ONE_REGISTER_CODE_ITEM(
     Instruction::CONST_4 | 0 | 0,
     Instruction::RETURN_VOID);
 
@@ -174,7 +179,7 @@ TEST_F(CodegenTest, IntConstant) {
 }
 
 TEST_F(CodegenTest, Return1) {
-  const uint16_t data[] = ONE_REGISTER_CODE_ITEM(
+  const std::vector<uint16_t> data = ONE_REGISTER_CODE_ITEM(
     Instruction::CONST_4 | 0 | 0,
     Instruction::RETURN | 0);
 
@@ -182,7 +187,7 @@ TEST_F(CodegenTest, Return1) {
 }
 
 TEST_F(CodegenTest, Return2) {
-  const uint16_t data[] = TWO_REGISTERS_CODE_ITEM(
+  const std::vector<uint16_t> data = TWO_REGISTERS_CODE_ITEM(
     Instruction::CONST_4 | 0 | 0,
     Instruction::CONST_4 | 0 | 1 << 8,
     Instruction::RETURN | 1 << 8);
@@ -191,7 +196,7 @@ TEST_F(CodegenTest, Return2) {
 }
 
 TEST_F(CodegenTest, Return3) {
-  const uint16_t data[] = TWO_REGISTERS_CODE_ITEM(
+  const std::vector<uint16_t> data = TWO_REGISTERS_CODE_ITEM(
     Instruction::CONST_4 | 0 | 0,
     Instruction::CONST_4 | 1 << 8 | 1 << 12,
     Instruction::RETURN | 1 << 8);
@@ -200,7 +205,7 @@ TEST_F(CodegenTest, Return3) {
 }
 
 TEST_F(CodegenTest, ReturnIf1) {
-  const uint16_t data[] = TWO_REGISTERS_CODE_ITEM(
+  const std::vector<uint16_t> data = TWO_REGISTERS_CODE_ITEM(
     Instruction::CONST_4 | 0 | 0,
     Instruction::CONST_4 | 1 << 8 | 1 << 12,
     Instruction::IF_EQ, 3,
@@ -211,7 +216,7 @@ TEST_F(CodegenTest, ReturnIf1) {
 }
 
 TEST_F(CodegenTest, ReturnIf2) {
-  const uint16_t data[] = TWO_REGISTERS_CODE_ITEM(
+  const std::vector<uint16_t> data = TWO_REGISTERS_CODE_ITEM(
     Instruction::CONST_4 | 0 | 0,
     Instruction::CONST_4 | 1 << 8 | 1 << 12,
     Instruction::IF_EQ | 0 << 4 | 1 << 8, 3,
@@ -222,17 +227,17 @@ TEST_F(CodegenTest, ReturnIf2) {
 }
 
 // Exercise bit-wise (one's complement) not-int instruction.
-#define NOT_INT_TEST(TEST_NAME, INPUT, EXPECTED_OUTPUT) \
-TEST_F(CodegenTest, TEST_NAME) {                        \
-  const int32_t input = INPUT;                          \
-  const uint16_t input_lo = Low16Bits(input);           \
-  const uint16_t input_hi = High16Bits(input);          \
-  const uint16_t data[] = TWO_REGISTERS_CODE_ITEM(      \
-      Instruction::CONST | 0 << 8, input_lo, input_hi,  \
-      Instruction::NOT_INT | 1 << 8 | 0 << 12 ,         \
-      Instruction::RETURN | 1 << 8);                    \
-                                                        \
-  TestCode(data, true, EXPECTED_OUTPUT);                \
+#define NOT_INT_TEST(TEST_NAME, INPUT, EXPECTED_OUTPUT)           \
+TEST_F(CodegenTest, TEST_NAME) {                                  \
+  const int32_t input = INPUT;                                    \
+  const uint16_t input_lo = Low16Bits(input);                     \
+  const uint16_t input_hi = High16Bits(input);                    \
+  const std::vector<uint16_t> data = TWO_REGISTERS_CODE_ITEM(     \
+      Instruction::CONST | 0 << 8, input_lo, input_hi,            \
+      Instruction::NOT_INT | 1 << 8 | 0 << 12 ,                   \
+      Instruction::RETURN | 1 << 8);                              \
+                                                                  \
+  TestCode(data, true, EXPECTED_OUTPUT);                          \
 }
 
 NOT_INT_TEST(ReturnNotIntMinus2, -2, 1)
@@ -254,7 +259,7 @@ TEST_F(CodegenTest, TEST_NAME) {                                         \
   const uint16_t word1 = High16Bits(Low32Bits(input));                   \
   const uint16_t word2 = Low16Bits(High32Bits(input));                   \
   const uint16_t word3 = High16Bits(High32Bits(input)); /* MSW. */       \
-  const uint16_t data[] = FOUR_REGISTERS_CODE_ITEM(                      \
+  const std::vector<uint16_t> data = FOUR_REGISTERS_CODE_ITEM(           \
       Instruction::CONST_WIDE | 0 << 8, word0, word1, word2, word3,      \
       Instruction::NOT_LONG | 2 << 8 | 0 << 12,                          \
       Instruction::RETURN_WIDE | 2 << 8);                                \
@@ -304,7 +309,7 @@ TEST_F(CodegenTest, IntToLongOfLongToInt) {
   const uint16_t word1 = High16Bits(Low32Bits(input));
   const uint16_t word2 = Low16Bits(High32Bits(input));
   const uint16_t word3 = High16Bits(High32Bits(input));  // MSW.
-  const uint16_t data[] = FIVE_REGISTERS_CODE_ITEM(
+  const std::vector<uint16_t> data = FIVE_REGISTERS_CODE_ITEM(
       Instruction::CONST_WIDE | 0 << 8, word0, word1, word2, word3,
       Instruction::CONST_WIDE | 2 << 8, 1, 0, 0, 0,
       Instruction::ADD_LONG | 0, 0 << 8 | 2,             // v0 <- 2^32 + 1
@@ -316,7 +321,7 @@ TEST_F(CodegenTest, IntToLongOfLongToInt) {
 }
 
 TEST_F(CodegenTest, ReturnAdd1) {
-  const uint16_t data[] = TWO_REGISTERS_CODE_ITEM(
+  const std::vector<uint16_t> data = TWO_REGISTERS_CODE_ITEM(
     Instruction::CONST_4 | 3 << 12 | 0,
     Instruction::CONST_4 | 4 << 12 | 1 << 8,
     Instruction::ADD_INT, 1 << 8 | 0,
@@ -326,7 +331,7 @@ TEST_F(CodegenTest, ReturnAdd1) {
 }
 
 TEST_F(CodegenTest, ReturnAdd2) {
-  const uint16_t data[] = TWO_REGISTERS_CODE_ITEM(
+  const std::vector<uint16_t> data = TWO_REGISTERS_CODE_ITEM(
     Instruction::CONST_4 | 3 << 12 | 0,
     Instruction::CONST_4 | 4 << 12 | 1 << 8,
     Instruction::ADD_INT_2ADDR | 1 << 12,
@@ -336,7 +341,7 @@ TEST_F(CodegenTest, ReturnAdd2) {
 }
 
 TEST_F(CodegenTest, ReturnAdd3) {
-  const uint16_t data[] = ONE_REGISTER_CODE_ITEM(
+  const std::vector<uint16_t> data = ONE_REGISTER_CODE_ITEM(
     Instruction::CONST_4 | 4 << 12 | 0 << 8,
     Instruction::ADD_INT_LIT8, 3 << 8 | 0,
     Instruction::RETURN);
@@ -345,7 +350,7 @@ TEST_F(CodegenTest, ReturnAdd3) {
 }
 
 TEST_F(CodegenTest, ReturnAdd4) {
-  const uint16_t data[] = ONE_REGISTER_CODE_ITEM(
+  const std::vector<uint16_t> data = ONE_REGISTER_CODE_ITEM(
     Instruction::CONST_4 | 4 << 12 | 0 << 8,
     Instruction::ADD_INT_LIT16, 3,
     Instruction::RETURN);
@@ -354,7 +359,7 @@ TEST_F(CodegenTest, ReturnAdd4) {
 }
 
 TEST_F(CodegenTest, ReturnMulInt) {
-  const uint16_t data[] = TWO_REGISTERS_CODE_ITEM(
+  const std::vector<uint16_t> data = TWO_REGISTERS_CODE_ITEM(
     Instruction::CONST_4 | 3 << 12 | 0,
     Instruction::CONST_4 | 4 << 12 | 1 << 8,
     Instruction::MUL_INT, 1 << 8 | 0,
@@ -364,7 +369,7 @@ TEST_F(CodegenTest, ReturnMulInt) {
 }
 
 TEST_F(CodegenTest, ReturnMulInt2addr) {
-  const uint16_t data[] = TWO_REGISTERS_CODE_ITEM(
+  const std::vector<uint16_t> data = TWO_REGISTERS_CODE_ITEM(
     Instruction::CONST_4 | 3 << 12 | 0,
     Instruction::CONST_4 | 4 << 12 | 1 << 8,
     Instruction::MUL_INT_2ADDR | 1 << 12,
@@ -374,7 +379,7 @@ TEST_F(CodegenTest, ReturnMulInt2addr) {
 }
 
 TEST_F(CodegenTest, ReturnMulLong) {
-  const uint16_t data[] = FOUR_REGISTERS_CODE_ITEM(
+  const std::vector<uint16_t> data = FOUR_REGISTERS_CODE_ITEM(
     Instruction::CONST_WIDE | 0 << 8, 3, 0, 0, 0,
     Instruction::CONST_WIDE | 2 << 8, 4, 0, 0, 0,
     Instruction::MUL_LONG, 2 << 8 | 0,
@@ -384,7 +389,7 @@ TEST_F(CodegenTest, ReturnMulLong) {
 }
 
 TEST_F(CodegenTest, ReturnMulLong2addr) {
-  const uint16_t data[] = FOUR_REGISTERS_CODE_ITEM(
+  const std::vector<uint16_t> data = FOUR_REGISTERS_CODE_ITEM(
     Instruction::CONST_WIDE | 0 << 8, 3, 0, 0, 0,
     Instruction::CONST_WIDE | 2 << 8, 4, 0, 0, 0,
     Instruction::MUL_LONG_2ADDR | 2 << 12,
@@ -394,7 +399,7 @@ TEST_F(CodegenTest, ReturnMulLong2addr) {
 }
 
 TEST_F(CodegenTest, ReturnMulIntLit8) {
-  const uint16_t data[] = ONE_REGISTER_CODE_ITEM(
+  const std::vector<uint16_t> data = ONE_REGISTER_CODE_ITEM(
     Instruction::CONST_4 | 4 << 12 | 0 << 8,
     Instruction::MUL_INT_LIT8, 3 << 8 | 0,
     Instruction::RETURN);
@@ -403,7 +408,7 @@ TEST_F(CodegenTest, ReturnMulIntLit8) {
 }
 
 TEST_F(CodegenTest, ReturnMulIntLit16) {
-  const uint16_t data[] = ONE_REGISTER_CODE_ITEM(
+  const std::vector<uint16_t> data = ONE_REGISTER_CODE_ITEM(
     Instruction::CONST_4 | 4 << 12 | 0 << 8,
     Instruction::MUL_INT_LIT16, 3,
     Instruction::RETURN);
@@ -413,28 +418,25 @@ TEST_F(CodegenTest, ReturnMulIntLit16) {
 
 TEST_F(CodegenTest, NonMaterializedCondition) {
   for (CodegenTargetConfig target_config : GetTargetConfigs()) {
-    ArenaPool pool;
-    ArenaAllocator allocator(&pool);
+    HGraph* graph = CreateGraph();
 
-    HGraph* graph = CreateGraph(&allocator);
-
-    HBasicBlock* entry = new (&allocator) HBasicBlock(graph);
+    HBasicBlock* entry = new (GetAllocator()) HBasicBlock(graph);
     graph->AddBlock(entry);
     graph->SetEntryBlock(entry);
-    entry->AddInstruction(new (&allocator) HGoto());
+    entry->AddInstruction(new (GetAllocator()) HGoto());
 
-    HBasicBlock* first_block = new (&allocator) HBasicBlock(graph);
+    HBasicBlock* first_block = new (GetAllocator()) HBasicBlock(graph);
     graph->AddBlock(first_block);
     entry->AddSuccessor(first_block);
     HIntConstant* constant0 = graph->GetIntConstant(0);
     HIntConstant* constant1 = graph->GetIntConstant(1);
-    HEqual* equal = new (&allocator) HEqual(constant0, constant0);
+    HEqual* equal = new (GetAllocator()) HEqual(constant0, constant0);
     first_block->AddInstruction(equal);
-    first_block->AddInstruction(new (&allocator) HIf(equal));
+    first_block->AddInstruction(new (GetAllocator()) HIf(equal));
 
-    HBasicBlock* then_block = new (&allocator) HBasicBlock(graph);
-    HBasicBlock* else_block = new (&allocator) HBasicBlock(graph);
-    HBasicBlock* exit_block = new (&allocator) HBasicBlock(graph);
+    HBasicBlock* then_block = new (GetAllocator()) HBasicBlock(graph);
+    HBasicBlock* else_block = new (GetAllocator()) HBasicBlock(graph);
+    HBasicBlock* exit_block = new (GetAllocator()) HBasicBlock(graph);
     graph->SetExitBlock(exit_block);
 
     graph->AddBlock(then_block);
@@ -445,22 +447,23 @@ TEST_F(CodegenTest, NonMaterializedCondition) {
     then_block->AddSuccessor(exit_block);
     else_block->AddSuccessor(exit_block);
 
-    exit_block->AddInstruction(new (&allocator) HExit());
-    then_block->AddInstruction(new (&allocator) HReturn(constant0));
-    else_block->AddInstruction(new (&allocator) HReturn(constant1));
+    exit_block->AddInstruction(new (GetAllocator()) HExit());
+    then_block->AddInstruction(new (GetAllocator()) HReturn(constant0));
+    else_block->AddInstruction(new (GetAllocator()) HReturn(constant1));
 
     ASSERT_FALSE(equal->IsEmittedAtUseSite());
     graph->BuildDominatorTree();
-    PrepareForRegisterAllocation(graph).Run();
+    PrepareForRegisterAllocation(graph, *compiler_options_).Run();
     ASSERT_TRUE(equal->IsEmittedAtUseSite());
 
     auto hook_before_codegen = [](HGraph* graph_in) {
       HBasicBlock* block = graph_in->GetEntryBlock()->GetSuccessors()[0];
-      HParallelMove* move = new (graph_in->GetArena()) HParallelMove(graph_in->GetArena());
+      HParallelMove* move = new (graph_in->GetAllocator()) HParallelMove(graph_in->GetAllocator());
       block->InsertInstructionBefore(move, block->GetLastInstruction());
     };
 
-    RunCode(target_config, graph, hook_before_codegen, true, 0);
+    OverrideInstructionSetFeatures(target_config.GetInstructionSet(), "default");
+    RunCode(target_config, *compiler_options_, graph, hook_before_codegen, true, 0);
   }
 }
 
@@ -476,19 +479,17 @@ TEST_F(CodegenTest, MaterializedCondition1) {
     int rhs[] = {2, 1, 2, -1, 0xabc};
 
     for (size_t i = 0; i < arraysize(lhs); i++) {
-      ArenaPool pool;
-      ArenaAllocator allocator(&pool);
-      HGraph* graph = CreateGraph(&allocator);
+      HGraph* graph = CreateGraph();
 
-      HBasicBlock* entry_block = new (&allocator) HBasicBlock(graph);
+      HBasicBlock* entry_block = new (GetAllocator()) HBasicBlock(graph);
       graph->AddBlock(entry_block);
       graph->SetEntryBlock(entry_block);
-      entry_block->AddInstruction(new (&allocator) HGoto());
-      HBasicBlock* code_block = new (&allocator) HBasicBlock(graph);
+      entry_block->AddInstruction(new (GetAllocator()) HGoto());
+      HBasicBlock* code_block = new (GetAllocator()) HBasicBlock(graph);
       graph->AddBlock(code_block);
-      HBasicBlock* exit_block = new (&allocator) HBasicBlock(graph);
+      HBasicBlock* exit_block = new (GetAllocator()) HBasicBlock(graph);
       graph->AddBlock(exit_block);
-      exit_block->AddInstruction(new (&allocator) HExit());
+      exit_block->AddInstruction(new (GetAllocator()) HExit());
 
       entry_block->AddSuccessor(code_block);
       code_block->AddSuccessor(exit_block);
@@ -504,10 +505,12 @@ TEST_F(CodegenTest, MaterializedCondition1) {
       graph->BuildDominatorTree();
       auto hook_before_codegen = [](HGraph* graph_in) {
         HBasicBlock* block = graph_in->GetEntryBlock()->GetSuccessors()[0];
-        HParallelMove* move = new (graph_in->GetArena()) HParallelMove(graph_in->GetArena());
+        HParallelMove* move =
+            new (graph_in->GetAllocator()) HParallelMove(graph_in->GetAllocator());
         block->InsertInstructionBefore(move, block->GetLastInstruction());
       };
-      RunCode(target_config, graph, hook_before_codegen, true, lhs[i] < rhs[i]);
+      OverrideInstructionSetFeatures(target_config.GetInstructionSet(), "default");
+      RunCode(target_config, *compiler_options_, graph, hook_before_codegen, true, lhs[i] < rhs[i]);
     }
   }
 }
@@ -524,24 +527,22 @@ TEST_F(CodegenTest, MaterializedCondition2) {
 
 
     for (size_t i = 0; i < arraysize(lhs); i++) {
-      ArenaPool pool;
-      ArenaAllocator allocator(&pool);
-      HGraph* graph = CreateGraph(&allocator);
+      HGraph* graph = CreateGraph();
 
-      HBasicBlock* entry_block = new (&allocator) HBasicBlock(graph);
+      HBasicBlock* entry_block = new (GetAllocator()) HBasicBlock(graph);
       graph->AddBlock(entry_block);
       graph->SetEntryBlock(entry_block);
-      entry_block->AddInstruction(new (&allocator) HGoto());
+      entry_block->AddInstruction(new (GetAllocator()) HGoto());
 
-      HBasicBlock* if_block = new (&allocator) HBasicBlock(graph);
+      HBasicBlock* if_block = new (GetAllocator()) HBasicBlock(graph);
       graph->AddBlock(if_block);
-      HBasicBlock* if_true_block = new (&allocator) HBasicBlock(graph);
+      HBasicBlock* if_true_block = new (GetAllocator()) HBasicBlock(graph);
       graph->AddBlock(if_true_block);
-      HBasicBlock* if_false_block = new (&allocator) HBasicBlock(graph);
+      HBasicBlock* if_false_block = new (GetAllocator()) HBasicBlock(graph);
       graph->AddBlock(if_false_block);
-      HBasicBlock* exit_block = new (&allocator) HBasicBlock(graph);
+      HBasicBlock* exit_block = new (GetAllocator()) HBasicBlock(graph);
       graph->AddBlock(exit_block);
-      exit_block->AddInstruction(new (&allocator) HExit());
+      exit_block->AddInstruction(new (GetAllocator()) HExit());
 
       graph->SetEntryBlock(entry_block);
       entry_block->AddSuccessor(if_block);
@@ -572,16 +573,18 @@ TEST_F(CodegenTest, MaterializedCondition2) {
       graph->BuildDominatorTree();
       auto hook_before_codegen = [](HGraph* graph_in) {
         HBasicBlock* block = graph_in->GetEntryBlock()->GetSuccessors()[0];
-        HParallelMove* move = new (graph_in->GetArena()) HParallelMove(graph_in->GetArena());
+        HParallelMove* move =
+            new (graph_in->GetAllocator()) HParallelMove(graph_in->GetAllocator());
         block->InsertInstructionBefore(move, block->GetLastInstruction());
       };
-      RunCode(target_config, graph, hook_before_codegen, true, lhs[i] < rhs[i]);
+      OverrideInstructionSetFeatures(target_config.GetInstructionSet(), "default");
+      RunCode(target_config, *compiler_options_, graph, hook_before_codegen, true, lhs[i] < rhs[i]);
     }
   }
 }
 
 TEST_F(CodegenTest, ReturnDivIntLit8) {
-  const uint16_t data[] = ONE_REGISTER_CODE_ITEM(
+  const std::vector<uint16_t> data = ONE_REGISTER_CODE_ITEM(
     Instruction::CONST_4 | 4 << 12 | 0 << 8,
     Instruction::DIV_INT_LIT8, 3 << 8 | 0,
     Instruction::RETURN);
@@ -590,7 +593,7 @@ TEST_F(CodegenTest, ReturnDivIntLit8) {
 }
 
 TEST_F(CodegenTest, ReturnDivInt2Addr) {
-  const uint16_t data[] = TWO_REGISTERS_CODE_ITEM(
+  const std::vector<uint16_t> data = TWO_REGISTERS_CODE_ITEM(
     Instruction::CONST_4 | 4 << 12 | 0,
     Instruction::CONST_4 | 2 << 12 | 1 << 8,
     Instruction::DIV_INT_2ADDR | 1 << 12,
@@ -600,38 +603,36 @@ TEST_F(CodegenTest, ReturnDivInt2Addr) {
 }
 
 // Helper method.
-static void TestComparison(IfCondition condition,
-                           int64_t i,
-                           int64_t j,
-                           Primitive::Type type,
-                           const CodegenTargetConfig target_config) {
-  ArenaPool pool;
-  ArenaAllocator allocator(&pool);
-  HGraph* graph = CreateGraph(&allocator);
+void CodegenTest::TestComparison(IfCondition condition,
+                                 int64_t i,
+                                 int64_t j,
+                                 DataType::Type type,
+                                 const CodegenTargetConfig target_config) {
+  HGraph* graph = CreateGraph();
 
-  HBasicBlock* entry_block = new (&allocator) HBasicBlock(graph);
+  HBasicBlock* entry_block = new (GetAllocator()) HBasicBlock(graph);
   graph->AddBlock(entry_block);
   graph->SetEntryBlock(entry_block);
-  entry_block->AddInstruction(new (&allocator) HGoto());
+  entry_block->AddInstruction(new (GetAllocator()) HGoto());
 
-  HBasicBlock* block = new (&allocator) HBasicBlock(graph);
+  HBasicBlock* block = new (GetAllocator()) HBasicBlock(graph);
   graph->AddBlock(block);
 
-  HBasicBlock* exit_block = new (&allocator) HBasicBlock(graph);
+  HBasicBlock* exit_block = new (GetAllocator()) HBasicBlock(graph);
   graph->AddBlock(exit_block);
   graph->SetExitBlock(exit_block);
-  exit_block->AddInstruction(new (&allocator) HExit());
+  exit_block->AddInstruction(new (GetAllocator()) HExit());
 
   entry_block->AddSuccessor(block);
   block->AddSuccessor(exit_block);
 
   HInstruction* op1;
   HInstruction* op2;
-  if (type == Primitive::kPrimInt) {
+  if (type == DataType::Type::kInt32) {
     op1 = graph->GetIntConstant(i);
     op2 = graph->GetIntConstant(j);
   } else {
-    DCHECK_EQ(type, Primitive::kPrimLong);
+    DCHECK_EQ(type, DataType::Type::kInt64);
     op1 = graph->GetLongConstant(i);
     op2 = graph->GetLongConstant(j);
   }
@@ -642,51 +643,52 @@ static void TestComparison(IfCondition condition,
   const uint64_t y = j;
   switch (condition) {
     case kCondEQ:
-      comparison = new (&allocator) HEqual(op1, op2);
+      comparison = new (GetAllocator()) HEqual(op1, op2);
       expected_result = (i == j);
       break;
     case kCondNE:
-      comparison = new (&allocator) HNotEqual(op1, op2);
+      comparison = new (GetAllocator()) HNotEqual(op1, op2);
       expected_result = (i != j);
       break;
     case kCondLT:
-      comparison = new (&allocator) HLessThan(op1, op2);
+      comparison = new (GetAllocator()) HLessThan(op1, op2);
       expected_result = (i < j);
       break;
     case kCondLE:
-      comparison = new (&allocator) HLessThanOrEqual(op1, op2);
+      comparison = new (GetAllocator()) HLessThanOrEqual(op1, op2);
       expected_result = (i <= j);
       break;
     case kCondGT:
-      comparison = new (&allocator) HGreaterThan(op1, op2);
+      comparison = new (GetAllocator()) HGreaterThan(op1, op2);
       expected_result = (i > j);
       break;
     case kCondGE:
-      comparison = new (&allocator) HGreaterThanOrEqual(op1, op2);
+      comparison = new (GetAllocator()) HGreaterThanOrEqual(op1, op2);
       expected_result = (i >= j);
       break;
     case kCondB:
-      comparison = new (&allocator) HBelow(op1, op2);
+      comparison = new (GetAllocator()) HBelow(op1, op2);
       expected_result = (x < y);
       break;
     case kCondBE:
-      comparison = new (&allocator) HBelowOrEqual(op1, op2);
+      comparison = new (GetAllocator()) HBelowOrEqual(op1, op2);
       expected_result = (x <= y);
       break;
     case kCondA:
-      comparison = new (&allocator) HAbove(op1, op2);
+      comparison = new (GetAllocator()) HAbove(op1, op2);
       expected_result = (x > y);
       break;
     case kCondAE:
-      comparison = new (&allocator) HAboveOrEqual(op1, op2);
+      comparison = new (GetAllocator()) HAboveOrEqual(op1, op2);
       expected_result = (x >= y);
       break;
   }
   block->AddInstruction(comparison);
-  block->AddInstruction(new (&allocator) HReturn(comparison));
+  block->AddInstruction(new (GetAllocator()) HReturn(comparison));
 
   graph->BuildDominatorTree();
-  RunCode(target_config, graph, [](HGraph*) {}, true, expected_result);
+  OverrideInstructionSetFeatures(target_config.GetInstructionSet(), "default");
+  RunCode(target_config, *compiler_options_, graph, [](HGraph*) {}, true, expected_result);
 }
 
 TEST_F(CodegenTest, ComparisonsInt) {
@@ -694,7 +696,8 @@ TEST_F(CodegenTest, ComparisonsInt) {
     for (int64_t i = -1; i <= 1; i++) {
       for (int64_t j = -1; j <= 1; j++) {
         for (int cond = kCondFirst; cond <= kCondLast; cond++) {
-          TestComparison(static_cast<IfCondition>(cond), i, j, Primitive::kPrimInt, target_config);
+          TestComparison(
+              static_cast<IfCondition>(cond), i, j, DataType::Type::kInt32, target_config);
         }
       }
     }
@@ -706,7 +709,8 @@ TEST_F(CodegenTest, ComparisonsLong) {
     for (int64_t i = -1; i <= 1; i++) {
       for (int64_t j = -1; j <= 1; j++) {
         for (int cond = kCondFirst; cond <= kCondLast; cond++) {
-          TestComparison(static_cast<IfCondition>(cond), i, j, Primitive::kPrimLong, target_config);
+          TestComparison(
+              static_cast<IfCondition>(cond), i, j, DataType::Type::kInt64, target_config);
         }
       }
     }
@@ -715,12 +719,9 @@ TEST_F(CodegenTest, ComparisonsLong) {
 
 #ifdef ART_ENABLE_CODEGEN_arm
 TEST_F(CodegenTest, ARMVIXLParallelMoveResolver) {
-  std::unique_ptr<const ArmInstructionSetFeatures> features(
-      ArmInstructionSetFeatures::FromCppDefines());
-  ArenaPool pool;
-  ArenaAllocator allocator(&pool);
-  HGraph* graph = CreateGraph(&allocator);
-  arm::CodeGeneratorARMVIXL codegen(graph, *features.get(), CompilerOptions());
+  OverrideInstructionSetFeatures(InstructionSet::kThumb2, "default");
+  HGraph* graph = CreateGraph();
+  arm::CodeGeneratorARMVIXL codegen(graph, *compiler_options_);
 
   codegen.Initialize();
 
@@ -728,9 +729,9 @@ TEST_F(CodegenTest, ARMVIXLParallelMoveResolver) {
   // int mem2) which was faulty (before the fix). So previously GPR and FP scratch registers were
   // used as temps; however GPR scratch register is required for big stack offsets which don't fit
   // LDR encoding. So the following code is a regression test for that situation.
-  HParallelMove* move = new (graph->GetArena()) HParallelMove(graph->GetArena());
-  move->AddMove(Location::StackSlot(0), Location::StackSlot(8192), Primitive::kPrimInt, nullptr);
-  move->AddMove(Location::StackSlot(8192), Location::StackSlot(0), Primitive::kPrimInt, nullptr);
+  HParallelMove* move = new (graph->GetAllocator()) HParallelMove(graph->GetAllocator());
+  move->AddMove(Location::StackSlot(0), Location::StackSlot(8192), DataType::Type::kInt32, nullptr);
+  move->AddMove(Location::StackSlot(8192), Location::StackSlot(0), DataType::Type::kInt32, nullptr);
   codegen.GetMoveResolver()->EmitNativeCode(move);
 
   InternalCodeAllocator code_allocator;
@@ -741,12 +742,9 @@ TEST_F(CodegenTest, ARMVIXLParallelMoveResolver) {
 #ifdef ART_ENABLE_CODEGEN_arm64
 // Regression test for b/34760542.
 TEST_F(CodegenTest, ARM64ParallelMoveResolverB34760542) {
-  std::unique_ptr<const Arm64InstructionSetFeatures> features(
-      Arm64InstructionSetFeatures::FromCppDefines());
-  ArenaPool pool;
-  ArenaAllocator allocator(&pool);
-  HGraph* graph = CreateGraph(&allocator);
-  arm64::CodeGeneratorARM64 codegen(graph, *features.get(), CompilerOptions());
+  OverrideInstructionSetFeatures(InstructionSet::kArm64, "default");
+  HGraph* graph = CreateGraph();
+  arm64::CodeGeneratorARM64 codegen(graph, *compiler_options_);
 
   codegen.Initialize();
 
@@ -754,15 +752,36 @@ TEST_F(CodegenTest, ARM64ParallelMoveResolverB34760542) {
   //
   //   Assertion failed (!available->IsEmpty())
   //
-  // in vixl::aarch64::UseScratchRegisterScope::AcquireNextAvailable.
-  HParallelMove* move = new (graph->GetArena()) HParallelMove(graph->GetArena());
+  // in vixl::aarch64::UseScratchRegisterScope::AcquireNextAvailable,
+  // because of the following situation:
+  //
+  //   1. a temp register (IP0) is allocated as a scratch register by
+  //      the parallel move resolver to solve a cycle (swap):
+  //
+  //        [ source=DS0 destination=DS257 type=PrimDouble instruction=null ]
+  //        [ source=DS257 destination=DS0 type=PrimDouble instruction=null ]
+  //
+  //   2. within CodeGeneratorARM64::MoveLocation, another temp
+  //      register (IP1) is allocated to generate the swap between two
+  //      double stack slots;
+  //
+  //   3. VIXL requires a third temp register to emit the `Ldr` or
+  //      `Str` operation from CodeGeneratorARM64::MoveLocation (as
+  //      one of the stack slots' offsets cannot be encoded as an
+  //      immediate), but the pool of (core) temp registers is now
+  //      empty.
+  //
+  // The solution used so far is to use a floating-point temp register
+  // (D31) in step #2, so that IP1 is available for step #3.
+
+  HParallelMove* move = new (graph->GetAllocator()) HParallelMove(graph->GetAllocator());
   move->AddMove(Location::DoubleStackSlot(0),
                 Location::DoubleStackSlot(257),
-                Primitive::kPrimDouble,
+                DataType::Type::kFloat64,
                 nullptr);
   move->AddMove(Location::DoubleStackSlot(257),
                 Location::DoubleStackSlot(0),
-                Primitive::kPrimDouble,
+                DataType::Type::kFloat64,
                 nullptr);
   codegen.GetMoveResolver()->EmitNativeCode(move);
 
@@ -772,33 +791,30 @@ TEST_F(CodegenTest, ARM64ParallelMoveResolverB34760542) {
 
 // Check that ParallelMoveResolver works fine for ARM64 for both cases when SIMD is on and off.
 TEST_F(CodegenTest, ARM64ParallelMoveResolverSIMD) {
-  std::unique_ptr<const Arm64InstructionSetFeatures> features(
-      Arm64InstructionSetFeatures::FromCppDefines());
-  ArenaPool pool;
-  ArenaAllocator allocator(&pool);
-  HGraph* graph = CreateGraph(&allocator);
-  arm64::CodeGeneratorARM64 codegen(graph, *features.get(), CompilerOptions());
+  OverrideInstructionSetFeatures(InstructionSet::kArm64, "default");
+  HGraph* graph = CreateGraph();
+  arm64::CodeGeneratorARM64 codegen(graph, *compiler_options_);
 
   codegen.Initialize();
 
   graph->SetHasSIMD(true);
   for (int i = 0; i < 2; i++) {
-    HParallelMove* move = new (graph->GetArena()) HParallelMove(graph->GetArena());
+    HParallelMove* move = new (graph->GetAllocator()) HParallelMove(graph->GetAllocator());
     move->AddMove(Location::SIMDStackSlot(0),
                   Location::SIMDStackSlot(257),
-                  Primitive::kPrimDouble,
+                  DataType::Type::kFloat64,
                   nullptr);
     move->AddMove(Location::SIMDStackSlot(257),
                   Location::SIMDStackSlot(0),
-                  Primitive::kPrimDouble,
+                  DataType::Type::kFloat64,
                   nullptr);
     move->AddMove(Location::FpuRegisterLocation(0),
                   Location::FpuRegisterLocation(1),
-                  Primitive::kPrimDouble,
+                  DataType::Type::kFloat64,
                   nullptr);
     move->AddMove(Location::FpuRegisterLocation(1),
                   Location::FpuRegisterLocation(0),
-                  Primitive::kPrimDouble,
+                  DataType::Type::kFloat64,
                   nullptr);
     codegen.GetMoveResolver()->EmitNativeCode(move);
     graph->SetHasSIMD(false);
@@ -808,49 +824,73 @@ TEST_F(CodegenTest, ARM64ParallelMoveResolverSIMD) {
   codegen.Finalize(&code_allocator);
 }
 
+// Check that ART ISA Features are propagated to VIXL for arm64 (using cortex-a75 as example).
+TEST_F(CodegenTest, ARM64IsaVIXLFeaturesA75) {
+  OverrideInstructionSetFeatures(InstructionSet::kArm64, "cortex-a75");
+  HGraph* graph = CreateGraph();
+  arm64::CodeGeneratorARM64 codegen(graph, *compiler_options_);
+  vixl::CPUFeatures* features = codegen.GetVIXLAssembler()->GetCPUFeatures();
+
+  EXPECT_TRUE(features->Has(vixl::CPUFeatures::kCRC32));
+  EXPECT_TRUE(features->Has(vixl::CPUFeatures::kDotProduct));
+  EXPECT_TRUE(features->Has(vixl::CPUFeatures::kFPHalf));
+  EXPECT_TRUE(features->Has(vixl::CPUFeatures::kAtomics));
+}
+
+// Check that ART ISA Features are propagated to VIXL for arm64 (using cortex-a53 as example).
+TEST_F(CodegenTest, ARM64IsaVIXLFeaturesA53) {
+  OverrideInstructionSetFeatures(InstructionSet::kArm64, "cortex-a53");
+  HGraph* graph = CreateGraph();
+  arm64::CodeGeneratorARM64 codegen(graph, *compiler_options_);
+  vixl::CPUFeatures* features = codegen.GetVIXLAssembler()->GetCPUFeatures();
+
+  EXPECT_TRUE(features->Has(vixl::CPUFeatures::kCRC32));
+  EXPECT_FALSE(features->Has(vixl::CPUFeatures::kDotProduct));
+  EXPECT_FALSE(features->Has(vixl::CPUFeatures::kFPHalf));
+  EXPECT_FALSE(features->Has(vixl::CPUFeatures::kAtomics));
+}
+
 #endif
 
 #ifdef ART_ENABLE_CODEGEN_mips
 TEST_F(CodegenTest, MipsClobberRA) {
-  std::unique_ptr<const MipsInstructionSetFeatures> features_mips(
-      MipsInstructionSetFeatures::FromCppDefines());
-  if (!CanExecute(kMips) || features_mips->IsR6()) {
+  OverrideInstructionSetFeatures(InstructionSet::kMips, "mips32r");
+  CHECK(!instruction_set_features_->AsMipsInstructionSetFeatures()->IsR6());
+  if (!CanExecute(InstructionSet::kMips)) {
     // HMipsComputeBaseMethodAddress and the NAL instruction behind it
     // should only be generated on non-R6.
     return;
   }
 
-  ArenaPool pool;
-  ArenaAllocator allocator(&pool);
-  HGraph* graph = CreateGraph(&allocator);
+  HGraph* graph = CreateGraph();
 
-  HBasicBlock* entry_block = new (&allocator) HBasicBlock(graph);
+  HBasicBlock* entry_block = new (GetAllocator()) HBasicBlock(graph);
   graph->AddBlock(entry_block);
   graph->SetEntryBlock(entry_block);
-  entry_block->AddInstruction(new (&allocator) HGoto());
+  entry_block->AddInstruction(new (GetAllocator()) HGoto());
 
-  HBasicBlock* block = new (&allocator) HBasicBlock(graph);
+  HBasicBlock* block = new (GetAllocator()) HBasicBlock(graph);
   graph->AddBlock(block);
 
-  HBasicBlock* exit_block = new (&allocator) HBasicBlock(graph);
+  HBasicBlock* exit_block = new (GetAllocator()) HBasicBlock(graph);
   graph->AddBlock(exit_block);
   graph->SetExitBlock(exit_block);
-  exit_block->AddInstruction(new (&allocator) HExit());
+  exit_block->AddInstruction(new (GetAllocator()) HExit());
 
   entry_block->AddSuccessor(block);
   block->AddSuccessor(exit_block);
 
   // To simplify matters, don't create PC-relative HLoadClass or HLoadString.
   // Instead, generate HMipsComputeBaseMethodAddress directly.
-  HMipsComputeBaseMethodAddress* base = new (&allocator) HMipsComputeBaseMethodAddress();
+  HMipsComputeBaseMethodAddress* base = new (GetAllocator()) HMipsComputeBaseMethodAddress();
   block->AddInstruction(base);
   // HMipsComputeBaseMethodAddress is defined as int, so just make the
   // compiled method return it.
-  block->AddInstruction(new (&allocator) HReturn(base));
+  block->AddInstruction(new (GetAllocator()) HReturn(base));
 
   graph->BuildDominatorTree();
 
-  mips::CodeGeneratorMIPS codegenMIPS(graph, *features_mips.get(), CompilerOptions());
+  mips::CodeGeneratorMIPS codegenMIPS(graph, *compiler_options_);
   // Since there isn't HLoadClass or HLoadString, we need to manually indicate
   // that RA is clobbered and the method entry code should generate a stack frame
   // and preserve RA in it. And this is what we're testing here.

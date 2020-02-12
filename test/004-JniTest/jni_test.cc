@@ -14,13 +14,16 @@
  * limitations under the License.
  */
 
-#include <iostream>
 #include <pthread.h>
-#include <stdio.h>
+
+#include <cstdio>
+#include <iostream>
 #include <vector>
 
+#include <android-base/logging.h>
+
 #include "art_method-inl.h"
-#include "base/logging.h"
+#include "base/runtime_debug.h"
 #include "jni.h"
 
 namespace art {
@@ -59,7 +62,7 @@ static void* AttachHelper(void* arg) {
   int attach_result = jvm->AttachCurrentThread(&env, &args);
   CHECK_EQ(attach_result, 0);
 
-  typedef void (*Fn)(JNIEnv*);
+  using Fn = void(*)(JNIEnv*);
   Fn fn = reinterpret_cast<Fn>(arg);
   fn(env);
 
@@ -85,6 +88,14 @@ static void testFindClassOnAttachedNativeThread(JNIEnv* env) {
   jobjectArray array = env->NewObjectArray(0, clazz, nullptr);
   CHECK(array != nullptr);
   CHECK(!env->ExceptionCheck());
+}
+
+extern "C" JNIEXPORT jint JNICALL Java_Main_getFieldSubclass(JNIEnv* env,
+                                                             jclass,
+                                                             jobject f_obj,
+                                                             jclass sub) {
+  jfieldID f = env->FromReflectedField(f_obj);
+  return env->GetStaticIntField(sub, f);
 }
 
 // http://b/10994325
@@ -693,7 +704,7 @@ class JniCallDefaultMethodsTest {
   }
 
  private:
-  void TestCalls(const char* declaring_class, std::vector<const char*> methods) {
+  void TestCalls(const char* declaring_class, const std::vector<const char*>& methods) {
     jmethodID new_method = env_->GetMethodID(concrete_class_, "<init>", "()V");
     jobject obj = env_->NewObject(concrete_class_, new_method);
     CHECK(!env_->ExceptionCheck());
@@ -773,6 +784,31 @@ static jint Java_Main_intFastNativeMethod(JNIEnv*, jclass, jint a, jint b, jint 
 static jint Java_Main_intCriticalNativeMethod(jint a, jint b, jint c) {
   // Note that unlike a "Fast Native" method this excludes JNIEnv and the jclass parameters.
   return a + b + c;
+}
+
+extern "C" JNIEXPORT jobject JNICALL Java_Main_lookupClinit(JNIEnv* env, jclass, jclass kls) {
+  jmethodID clinit_id = env->GetStaticMethodID(kls, "<clinit>", "()V");
+
+  if (clinit_id != nullptr) {
+    jobject obj = env->ToReflectedMethod(kls, clinit_id, /*isStatic*/ true);
+    CHECK(obj != nullptr);
+    return obj;
+  } else {
+    return nullptr;
+  }
+}
+
+extern "C" JNIEXPORT jboolean JNICALL Java_Main_isSlowDebug(JNIEnv*, jclass) {
+  // Return whether slow-debug is on. Only relevant for debug builds.
+  if (kIsDebugBuild) {
+    // Register a dummy flag and get the default value it should be initialized with.
+    static bool dummy_flag = false;
+    dummy_flag = RegisterRuntimeDebugFlag(&dummy_flag);
+
+    return dummy_flag ? JNI_TRUE : JNI_FALSE;
+  }
+  // To pass the Java-side test, just so "on" for release builds.
+  return JNI_TRUE;
 }
 
 }  // namespace art

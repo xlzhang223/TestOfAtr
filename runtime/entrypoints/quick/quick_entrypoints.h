@@ -19,8 +19,8 @@
 
 #include <jni.h>
 
+#include "base/locks.h"
 #include "base/macros.h"
-#include "base/mutex.h"
 #include "deoptimization_kind.h"
 #include "offsets.h"
 
@@ -38,6 +38,7 @@ class Object;
 
 class ArtMethod;
 template<class MirrorType> class GcRoot;
+template<class MirrorType> class StackReference;
 class Thread;
 
 // Pointers to functions that are called by quick compiler generated code via thread-local storage.

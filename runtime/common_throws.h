@@ -17,21 +17,22 @@
 #ifndef ART_RUNTIME_COMMON_THROWS_H_
 #define ART_RUNTIME_COMMON_THROWS_H_
 
-#include "base/mutex.h"
-#include "invoke_type.h"
+#include <string_view>
+
+#include "base/locks.h"
 #include "obj_ptr.h"
 
 namespace art {
 namespace mirror {
-  class Class;
-  class Object;
-  class MethodType;
+class Class;
+class Object;
+class MethodType;
 }  // namespace mirror
 class ArtField;
 class ArtMethod;
 class DexFile;
+enum InvokeType : uint32_t;
 class Signature;
-class StringPiece;
 
 // AbstractMethodError
 
@@ -120,6 +121,11 @@ void ThrowIllegalAccessException(const char* msg)
 void ThrowIllegalArgumentException(const char* msg)
     REQUIRES_SHARED(Locks::mutator_lock_) COLD_ATTR;
 
+// IllegalAccessException
+
+void ThrowIllegalStateException(const char* msg)
+    REQUIRES_SHARED(Locks::mutator_lock_) COLD_ATTR;
+
 // IncompatibleClassChangeError
 
 void ThrowIncompatibleClassChangeError(InvokeType expected_type,
@@ -149,6 +155,11 @@ void ThrowIncompatibleClassChangeError(ObjPtr<mirror::Class> referrer, const cha
     REQUIRES_SHARED(Locks::mutator_lock_) COLD_ATTR;
 
 void ThrowIncompatibleClassChangeErrorForMethodConflict(ArtMethod* method)
+    REQUIRES_SHARED(Locks::mutator_lock_) COLD_ATTR;
+
+// IndexOutOfBoundsException
+
+void ThrowIndexOutOfBoundsException(int index, int length)
     REQUIRES_SHARED(Locks::mutator_lock_) COLD_ATTR;
 
 // InternalError
@@ -186,20 +197,20 @@ void ThrowNegativeArraySizeException(const char* msg)
 
 // NoSuchFieldError
 
-void ThrowNoSuchFieldError(const StringPiece& scope,
+void ThrowNoSuchFieldError(std::string_view scope,
                            ObjPtr<mirror::Class> c,
-                           const StringPiece& type,
-                           const StringPiece& name)
+                           std::string_view type,
+                           std::string_view name)
     REQUIRES_SHARED(Locks::mutator_lock_) COLD_ATTR;
 
-void ThrowNoSuchFieldException(ObjPtr<mirror::Class> c, const StringPiece& name)
+void ThrowNoSuchFieldException(ObjPtr<mirror::Class> c, std::string_view name)
     REQUIRES_SHARED(Locks::mutator_lock_) COLD_ATTR;
 
 // NoSuchMethodError
 
 void ThrowNoSuchMethodError(InvokeType type,
                             ObjPtr<mirror::Class> c,
-                            const StringPiece& name,
+                            std::string_view name,
                             const Signature& signature)
     REQUIRES_SHARED(Locks::mutator_lock_) COLD_ATTR;
 
@@ -223,6 +234,10 @@ void ThrowNullPointerExceptionFromDexPC(bool check_address = false, uintptr_t ad
 void ThrowNullPointerException(const char* msg)
     REQUIRES_SHARED(Locks::mutator_lock_) COLD_ATTR;
 
+// ReadOnlyBufferException
+
+void ThrowReadOnlyBufferException() REQUIRES_SHARED(Locks::mutator_lock_) COLD_ATTR;
+
 // RuntimeException
 
 void ThrowRuntimeException(const char* fmt, ...)
@@ -244,6 +259,10 @@ void ThrowStackOverflowError(Thread* self) REQUIRES_SHARED(Locks::mutator_lock_)
 void ThrowStringIndexOutOfBoundsException(int index, int length)
     REQUIRES_SHARED(Locks::mutator_lock_) COLD_ATTR;
 
+// UnsupportedOperationException
+
+void ThrowUnsupportedOperationException() REQUIRES_SHARED(Locks::mutator_lock_) COLD_ATTR;
+
 // VerifyError
 
 void ThrowVerifyError(ObjPtr<mirror::Class> referrer, const char* fmt, ...)
@@ -251,8 +270,13 @@ void ThrowVerifyError(ObjPtr<mirror::Class> referrer, const char* fmt, ...)
     REQUIRES_SHARED(Locks::mutator_lock_) COLD_ATTR;
 
 // WrongMethodTypeException
-void ThrowWrongMethodTypeException(mirror::MethodType* callee_type,
-                                   mirror::MethodType* callsite_type)
+
+void ThrowWrongMethodTypeException(ObjPtr<mirror::MethodType> callee_type,
+                                   ObjPtr<mirror::MethodType> callsite_type)
+    REQUIRES_SHARED(Locks::mutator_lock_) COLD_ATTR;
+
+void ThrowWrongMethodTypeException(const std::string& expected_descriptor,
+                                   const std::string& actual_descriptor)
     REQUIRES_SHARED(Locks::mutator_lock_) COLD_ATTR;
 
 }  // namespace art

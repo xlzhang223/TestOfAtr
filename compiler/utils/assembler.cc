@@ -19,34 +19,16 @@
 #include <algorithm>
 #include <vector>
 
-#ifdef ART_ENABLE_CODEGEN_arm
-#include "arm/assembler_thumb2.h"
-#endif
-#ifdef ART_ENABLE_CODEGEN_arm64
-#include "arm64/assembler_arm64.h"
-#endif
-#ifdef ART_ENABLE_CODEGEN_mips
-#include "mips/assembler_mips.h"
-#endif
-#ifdef ART_ENABLE_CODEGEN_mips64
-#include "mips64/assembler_mips64.h"
-#endif
-#ifdef ART_ENABLE_CODEGEN_x86
-#include "x86/assembler_x86.h"
-#endif
-#ifdef ART_ENABLE_CODEGEN_x86_64
-#include "x86_64/assembler_x86_64.h"
-#endif
 #include "base/casts.h"
-#include "globals.h"
-#include "memory_region.h"
+#include "base/globals.h"
+#include "base/memory_region.h"
 
 namespace art {
 
-AssemblerBuffer::AssemblerBuffer(ArenaAllocator* arena)
-    : arena_(arena) {
+AssemblerBuffer::AssemblerBuffer(ArenaAllocator* allocator)
+    : allocator_(allocator) {
   static const size_t kInitialBufferCapacity = 4 * KB;
-  contents_ = arena_->AllocArray<uint8_t>(kInitialBufferCapacity, kArenaAllocAssembler);
+  contents_ = allocator_->AllocArray<uint8_t>(kInitialBufferCapacity, kArenaAllocAssembler);
   cursor_ = contents_;
   limit_ = ComputeLimit(contents_, kInitialBufferCapacity);
   fixup_ = nullptr;
@@ -63,8 +45,8 @@ AssemblerBuffer::AssemblerBuffer(ArenaAllocator* arena)
 
 
 AssemblerBuffer::~AssemblerBuffer() {
-  if (arena_->IsRunningOnMemoryTool()) {
-    arena_->MakeInaccessible(contents_, Capacity());
+  if (allocator_->IsRunningOnMemoryTool()) {
+    allocator_->MakeInaccessible(contents_, Capacity());
   }
 }
 
@@ -99,7 +81,7 @@ void AssemblerBuffer::ExtendCapacity(size_t min_capacity) {
 
   // Allocate the new data area and copy contents of the old one to it.
   contents_ = reinterpret_cast<uint8_t*>(
-      arena_->Realloc(contents_, old_capacity, new_capacity, kArenaAllocAssembler));
+      allocator_->Realloc(contents_, old_capacity, new_capacity, kArenaAllocAssembler));
 
   // Update the cursor and recompute the limit.
   cursor_ = contents_ + old_size;

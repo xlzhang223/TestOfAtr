@@ -17,10 +17,11 @@
 #ifndef ART_COMPILER_JIT_JIT_LOGGER_H_
 #define ART_COMPILER_JIT_JIT_LOGGER_H_
 
+#include <memory>
+
 #include "base/mutex.h"
+#include "base/os.h"
 #include "compiled_method.h"
-#include "driver/compiler_driver.h"
-#include "driver/compiler_options.h"
 
 namespace art {
 
@@ -86,7 +87,7 @@ namespace jit {
 //         so that jitted code can be displayed in assembly view.
 //
 class JitLogger {
-  public:
+ public:
     JitLogger() : code_index_(0), marker_address_(nullptr) {}
 
     void OpenLog() {
@@ -94,10 +95,10 @@ class JitLogger {
       OpenJitDumpLog();
     }
 
-    void WriteLog(JitCodeCache* code_cache, ArtMethod* method, bool osr)
+    void WriteLog(const void* ptr, size_t code_size, ArtMethod* method)
         REQUIRES_SHARED(Locks::mutator_lock_) {
-      WritePerfMapLog(code_cache, method, osr);
-      WriteJitDumpLog(code_cache, method, osr);
+      WritePerfMapLog(ptr, code_size, method);
+      WriteJitDumpLog(ptr, code_size, method);
     }
 
     void CloseLog() {
@@ -105,16 +106,16 @@ class JitLogger {
       CloseJitDumpLog();
     }
 
-  private:
+ private:
     // For perf-map profiling
     void OpenPerfMapLog();
-    void WritePerfMapLog(JitCodeCache* code_cache, ArtMethod* method, bool osr)
+    void WritePerfMapLog(const void* ptr, size_t code_size, ArtMethod* method)
         REQUIRES_SHARED(Locks::mutator_lock_);
     void ClosePerfMapLog();
 
     // For perf-inject profiling
     void OpenJitDumpLog();
-    void WriteJitDumpLog(JitCodeCache* code_cache, ArtMethod* method, bool osr)
+    void WriteJitDumpLog(const void* ptr, size_t code_size, ArtMethod* method)
         REQUIRES_SHARED(Locks::mutator_lock_);
     void CloseJitDumpLog();
 

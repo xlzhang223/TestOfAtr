@@ -17,34 +17,41 @@
 #ifndef ART_RUNTIME_READ_BARRIER_H_
 #define ART_RUNTIME_READ_BARRIER_H_
 
-#include "base/mutex.h"
+#include <android-base/logging.h>
+
+#include "base/locks.h"
 #include "base/macros.h"
+#include "base/runtime_debug.h"
 #include "gc_root.h"
 #include "jni.h"
 #include "mirror/object_reference.h"
 #include "offsets.h"
-#include "read_barrier_c.h"
-
-// This is a C++ (not C) header file, separate from read_barrier_c.h
-// which needs to be a C header file for asm_support.h.
+#include "read_barrier_config.h"
 
 namespace art {
 namespace mirror {
-  class Object;
-  template<typename MirrorType> class HeapReference;
+class Object;
+template<typename MirrorType> class HeapReference;
 }  // namespace mirror
 class ArtMethod;
 
 class ReadBarrier {
  public:
-  // Enable the to-space invariant checks.
-  static constexpr bool kEnableToSpaceInvariantChecks = kIsDebugBuild;
-  // Enable the read barrier checks.
-  static constexpr bool kEnableReadBarrierInvariantChecks = kIsDebugBuild;
+  // Enable the to-space invariant checks. This is slow and happens very often. Do not enable in
+  // fast-debug environment.
+  DECLARE_RUNTIME_DEBUG_FLAG(kEnableToSpaceInvariantChecks);
 
+  // Enable the read barrier checks. This is slow and happens very often. Do not enable in
+  // fast-debug environment.
+  DECLARE_RUNTIME_DEBUG_FLAG(kEnableReadBarrierInvariantChecks);
+
+  // Return the reference at ref_addr, invoking read barrier as appropriate.
+  // Ref_addr is an address within obj.
   // It's up to the implementation whether the given field gets updated whereas the return value
   // must be an updated reference unless kAlwaysUpdateField is true.
-  template <typename MirrorType, ReadBarrierOption kReadBarrierOption = kWithReadBarrier,
+  template <typename MirrorType,
+            bool kIsVolatile,
+            ReadBarrierOption kReadBarrierOption = kWithReadBarrier,
             bool kAlwaysUpdateField = false>
   ALWAYS_INLINE static MirrorType* Barrier(
       mirror::Object* obj, MemberOffset offset, mirror::HeapReference<MirrorType>* ref_addr)
@@ -84,14 +91,22 @@ class ReadBarrier {
   static void AssertToSpaceInvariant(GcRootSource* gc_root_source, mirror::Object* ref)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
+  // Without the holder object, and only with the read barrier configuration (no-op otherwise).
+  static void MaybeAssertToSpaceInvariant(mirror::Object* ref)
+      REQUIRES_SHARED(Locks::mutator_lock_) {
+    if (kUseReadBarrier) {
+      AssertToSpaceInvariant(ref);
+    }
+  }
+
   // ALWAYS_INLINE on this caused a performance regression b/26744236.
   static mirror::Object* Mark(mirror::Object* obj) REQUIRES_SHARED(Locks::mutator_lock_);
 
-  static constexpr uint32_t WhiteState() {
-    return white_state_;
+  static constexpr uint32_t NonGrayState() {
+    return kNonGrayState;
   }
   static constexpr uint32_t GrayState() {
-    return gray_state_;
+    return kGrayState;
   }
 
   // fake_address_dependency will be zero which should be bitwise-or'ed with the address of the
@@ -107,12 +122,13 @@ class ReadBarrier {
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   static bool IsValidReadBarrierState(uint32_t rb_state) {
-    return rb_state == white_state_ || rb_state == gray_state_;
+    return rb_state == kNonGrayState || rb_state == kGrayState;
   }
 
-  static constexpr uint32_t white_state_ = 0x0;    // Not marked.
-  static constexpr uint32_t gray_state_ = 0x1;     // Marked, but not marked through. On mark stack.
-  static constexpr uint32_t rb_state_mask_ = 0x1;  // The low bits for white|gray.
+ private:
+  static constexpr uint32_t kNonGrayState = 0x0;  // White (not marked) or black (marked through).
+  static constexpr uint32_t kGrayState = 0x1;     // Marked, but not marked through. On mark stack.
+  static constexpr uint32_t kRBStateMask = 0x1;   // The low bits for non-gray|gray.
 };
 
 }  // namespace art

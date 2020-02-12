@@ -21,7 +21,7 @@
 #include <vector>
 
 #include "base/scoped_flock.h"
-#include "jit/profile_compilation_info.h"
+#include "profile/profile_compilation_info.h"
 
 namespace art {
 
@@ -53,16 +53,24 @@ class ProfileAssistant {
   //
   static ProcessingResult ProcessProfiles(
       const std::vector<std::string>& profile_files,
-      const std::string& reference_profile_file);
+      const std::string& reference_profile_file,
+      const ProfileCompilationInfo::ProfileLoadFilterFn& filter_fn
+          = ProfileCompilationInfo::ProfileFilterFnAcceptAll,
+      bool store_aggregation_counters = false);
 
   static ProcessingResult ProcessProfiles(
       const std::vector<int>& profile_files_fd_,
-      int reference_profile_file_fd);
+      int reference_profile_file_fd,
+      const ProfileCompilationInfo::ProfileLoadFilterFn& filter_fn
+          = ProfileCompilationInfo::ProfileFilterFnAcceptAll,
+      bool store_aggregation_counters = false);
 
  private:
   static ProcessingResult ProcessProfilesInternal(
       const std::vector<ScopedFlock>& profile_files,
-      const ScopedFlock& reference_profile_file);
+      const ScopedFlock& reference_profile_file,
+      const ProfileCompilationInfo::ProfileLoadFilterFn& filter_fn,
+      bool store_aggregation_counters);
 
   DISALLOW_COPY_AND_ASSIGN(ProfileAssistant);
 };

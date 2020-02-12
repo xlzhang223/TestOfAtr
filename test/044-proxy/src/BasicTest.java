@@ -22,7 +22,6 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.util.Arrays;
-import java.util.Comparator;
 
 /**
  * Do some basic tests.
@@ -34,9 +33,9 @@ public class BasicTest {
         Object proxy = createProxy(proxyMe);
 
         if (!Proxy.isProxyClass(proxy.getClass()))
-            System.err.println("not a proxy class?");
+            System.out.println("not a proxy class?");
         if (Proxy.getInvocationHandler(proxy) == null)
-            System.err.println("ERROR: Proxy.getInvocationHandler is null");
+            System.out.println("ERROR: Proxy.getInvocationHandler is null");
 
         /* take it for a spin; verifies instanceof constraint */
         Shapes shapes = (Shapes) proxy;
@@ -53,6 +52,11 @@ public class BasicTest {
         colors.blob();
         Trace trace = (Trace) proxy;
         trace.getTrace();
+
+        // Test the proxy spec: These Object functions are supposed to be given to the handler.
+        int unusedHashCode = ((Object)trace).hashCode();
+        boolean unusedEquals = ((Object)trace).equals(trace);
+        String unusedString = ((Object)trace).toString();
 
         try {
             shapes.upChuck();
@@ -73,15 +77,7 @@ public class BasicTest {
          */
         System.out.println("");
         Method[] methods = proxy.getClass().getDeclaredMethods();
-        Arrays.sort(methods, new Comparator<Method>() {
-          public int compare(Method o1, Method o2) {
-            int result = o1.getName().compareTo(o2.getName());
-            if (result != 0) {
-                return result;
-            }
-            return o1.getReturnType().getName().compareTo(o2.getReturnType().getName());
-          }
-        });
+        Arrays.sort(methods, new MethodComparator());
         System.out.println("Proxy interfaces: " +
             Arrays.deepToString(proxy.getClass().getInterfaces()));
         System.out.println("Proxy methods: " +
@@ -110,13 +106,13 @@ public class BasicTest {
             //System.out.println("Constructor is " + cons);
             proxy = cons.newInstance(handler);
         } catch (NoSuchMethodException nsme) {
-            System.err.println("failed: " + nsme);
+            System.out.println("failed: " + nsme);
         } catch (InstantiationException ie) {
-            System.err.println("failed: " + ie);
+            System.out.println("failed: " + ie);
         } catch (IllegalAccessException ie) {
-            System.err.println("failed: " + ie);
+            System.out.println("failed: " + ie);
         } catch (InvocationTargetException ite) {
-            System.err.println("failed: " + ite);
+            System.out.println("failed: " + ite);
         }
 
         return proxy;
@@ -239,6 +235,8 @@ class MyInvocationHandler implements InvocationHandler {
     public Object invoke(Object proxy, Method method, Object[] args)
         throws Throwable {
 
+        System.out.println("Invoke " + method);
+
         Object result = null;
 
         // Trap Object calls.  This is important here to avoid a recursive
@@ -286,7 +284,6 @@ class MyInvocationHandler implements InvocationHandler {
           }
         }
 
-        System.out.println("Invoke " + method);
         if (args == null || args.length == 0) {
             System.out.println(" (no args)");
         } else {

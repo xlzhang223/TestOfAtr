@@ -24,26 +24,29 @@
 
 namespace art {
 
-class HMultiplyAccumulate FINAL : public HExpression<3> {
+class HMultiplyAccumulate final : public HExpression<3> {
  public:
-  HMultiplyAccumulate(Primitive::Type type,
+  HMultiplyAccumulate(DataType::Type type,
                       InstructionKind op,
                       HInstruction* accumulator,
                       HInstruction* mul_left,
                       HInstruction* mul_right,
                       uint32_t dex_pc = kNoDexPc)
-      : HExpression(type, SideEffects::None(), dex_pc), op_kind_(op) {
+      : HExpression(kMultiplyAccumulate, type, SideEffects::None(), dex_pc),
+        op_kind_(op) {
     SetRawInputAt(kInputAccumulatorIndex, accumulator);
     SetRawInputAt(kInputMulLeftIndex, mul_left);
     SetRawInputAt(kInputMulRightIndex, mul_right);
   }
 
+  bool IsClonable() const override { return true; }
+
   static constexpr int kInputAccumulatorIndex = 0;
   static constexpr int kInputMulLeftIndex = 1;
   static constexpr int kInputMulRightIndex = 2;
 
-  bool CanBeMoved() const OVERRIDE { return true; }
-  bool InstructionDataEquals(const HInstruction* other) const OVERRIDE {
+  bool CanBeMoved() const override { return true; }
+  bool InstructionDataEquals(const HInstruction* other) const override {
     return op_kind_ == other->AsMultiplyAccumulate()->op_kind_;
   }
 
@@ -51,21 +54,27 @@ class HMultiplyAccumulate FINAL : public HExpression<3> {
 
   DECLARE_INSTRUCTION(MultiplyAccumulate);
 
+ protected:
+  DEFAULT_COPY_CONSTRUCTOR(MultiplyAccumulate);
+
  private:
   // Indicates if this is a MADD or MSUB.
   const InstructionKind op_kind_;
-
-  DISALLOW_COPY_AND_ASSIGN(HMultiplyAccumulate);
 };
 
-class HBitwiseNegatedRight FINAL : public HBinaryOperation {
+class HBitwiseNegatedRight final : public HBinaryOperation {
  public:
-  HBitwiseNegatedRight(Primitive::Type result_type,
-                            InstructionKind op,
-                            HInstruction* left,
-                            HInstruction* right,
-                            uint32_t dex_pc = kNoDexPc)
-    : HBinaryOperation(result_type, left, right, SideEffects::None(), dex_pc),
+  HBitwiseNegatedRight(DataType::Type result_type,
+                       InstructionKind op,
+                       HInstruction* left,
+                       HInstruction* right,
+                       uint32_t dex_pc = kNoDexPc)
+    : HBinaryOperation(kBitwiseNegatedRight,
+                       result_type,
+                       left,
+                       right,
+                       SideEffects::None(),
+                       dex_pc),
       op_kind_(op) {
     DCHECK(op == HInstruction::kAnd || op == HInstruction::kOr || op == HInstruction::kXor) << op;
   }
@@ -88,21 +97,21 @@ class HBitwiseNegatedRight FINAL : public HBinaryOperation {
     }
   }
 
-  HConstant* Evaluate(HIntConstant* x, HIntConstant* y) const OVERRIDE {
+  HConstant* Evaluate(HIntConstant* x, HIntConstant* y) const override {
     return GetBlock()->GetGraph()->GetIntConstant(
         Compute(x->GetValue(), y->GetValue()), GetDexPc());
   }
-  HConstant* Evaluate(HLongConstant* x, HLongConstant* y) const OVERRIDE {
+  HConstant* Evaluate(HLongConstant* x, HLongConstant* y) const override {
     return GetBlock()->GetGraph()->GetLongConstant(
         Compute(x->GetValue(), y->GetValue()), GetDexPc());
   }
   HConstant* Evaluate(HFloatConstant* x ATTRIBUTE_UNUSED,
-                      HFloatConstant* y ATTRIBUTE_UNUSED) const OVERRIDE {
+                      HFloatConstant* y ATTRIBUTE_UNUSED) const override {
     LOG(FATAL) << DebugName() << " is not defined for float values";
     UNREACHABLE();
   }
   HConstant* Evaluate(HDoubleConstant* x ATTRIBUTE_UNUSED,
-                      HDoubleConstant* y ATTRIBUTE_UNUSED) const OVERRIDE {
+                      HDoubleConstant* y ATTRIBUTE_UNUSED) const override {
     LOG(FATAL) << DebugName() << " is not defined for double values";
     UNREACHABLE();
   }
@@ -111,46 +120,62 @@ class HBitwiseNegatedRight FINAL : public HBinaryOperation {
 
   DECLARE_INSTRUCTION(BitwiseNegatedRight);
 
+ protected:
+  DEFAULT_COPY_CONSTRUCTOR(BitwiseNegatedRight);
+
  private:
   // Specifies the bitwise operation, which will be then negated.
   const InstructionKind op_kind_;
-
-  DISALLOW_COPY_AND_ASSIGN(HBitwiseNegatedRight);
 };
 
-
-// This instruction computes an intermediate address pointing in the 'middle' of an object. The
-// result pointer cannot be handled by GC, so extra care is taken to make sure that this value is
-// never used across anything that can trigger GC.
-// The result of this instruction is not a pointer in the sense of `Primitive::kPrimNot`. So we
-// represent it by the type `Primitive::kPrimInt`.
-class HIntermediateAddress FINAL : public HExpression<2> {
+// This instruction computes part of the array access offset (data and index offset).
+//
+// For array accesses the element address has the following structure:
+// Address = CONST_OFFSET + base_addr + index << ELEM_SHIFT. Taking into account LDR/STR addressing
+// modes address part (CONST_OFFSET + index << ELEM_SHIFT) can be shared across array access with
+// the same data type and index. For example, for the following loop 5 accesses can share address
+// computation:
+//
+// void foo(int[] a, int[] b, int[] c) {
+//   for (i...) {
+//     a[i] = a[i] + 5;
+//     b[i] = b[i] + c[i];
+//   }
+// }
+//
+// Note: as the instruction doesn't involve base array address into computations it has no side
+// effects (in comparison of HIntermediateAddress).
+class HIntermediateAddressIndex final : public HExpression<3> {
  public:
-  HIntermediateAddress(HInstruction* base_address, HInstruction* offset, uint32_t dex_pc)
-      : HExpression(Primitive::kPrimInt, SideEffects::DependsOnGC(), dex_pc) {
-        DCHECK_EQ(Primitive::ComponentSize(Primitive::kPrimInt),
-                  Primitive::ComponentSize(Primitive::kPrimNot))
-            << "kPrimInt and kPrimNot have different sizes.";
-    SetRawInputAt(0, base_address);
+  HIntermediateAddressIndex(
+      HInstruction* index, HInstruction* offset, HInstruction* shift, uint32_t dex_pc)
+      : HExpression(kIntermediateAddressIndex,
+                    DataType::Type::kInt32,
+                    SideEffects::None(),
+                    dex_pc) {
+    SetRawInputAt(0, index);
     SetRawInputAt(1, offset);
+    SetRawInputAt(2, shift);
   }
 
-  bool CanBeMoved() const OVERRIDE { return true; }
-  bool InstructionDataEquals(const HInstruction* other ATTRIBUTE_UNUSED) const OVERRIDE {
+  bool IsClonable() const override { return true; }
+  bool CanBeMoved() const override { return true; }
+  bool InstructionDataEquals(const HInstruction* other ATTRIBUTE_UNUSED) const override {
     return true;
   }
-  bool IsActualObject() const OVERRIDE { return false; }
+  bool IsActualObject() const override { return false; }
 
-  HInstruction* GetBaseAddress() const { return InputAt(0); }
+  HInstruction* GetIndex() const { return InputAt(0); }
   HInstruction* GetOffset() const { return InputAt(1); }
+  HInstruction* GetShift() const { return InputAt(2); }
 
-  DECLARE_INSTRUCTION(IntermediateAddress);
+  DECLARE_INSTRUCTION(IntermediateAddressIndex);
 
- private:
-  DISALLOW_COPY_AND_ASSIGN(HIntermediateAddress);
+ protected:
+  DEFAULT_COPY_CONSTRUCTOR(IntermediateAddressIndex);
 };
 
-class HDataProcWithShifterOp FINAL : public HExpression<2> {
+class HDataProcWithShifterOp final : public HExpression<2> {
  public:
   enum OpKind {
     kLSL,   // Logical shift left.
@@ -177,9 +202,9 @@ class HDataProcWithShifterOp FINAL : public HExpression<2> {
                          // is an extension.
                          int shift = 0,
                          uint32_t dex_pc = kNoDexPc)
-      : HExpression(instr->GetType(), SideEffects::None(), dex_pc),
+      : HExpression(kDataProcWithShifterOp, instr->GetType(), SideEffects::None(), dex_pc),
         instr_kind_(instr->GetKind()), op_kind_(op),
-        shift_amount_(shift & (instr->GetType() == Primitive::kPrimInt
+        shift_amount_(shift & (instr->GetType() == DataType::Type::kInt32
             ? kMaxIntShiftDistance
             : kMaxLongShiftDistance)) {
     DCHECK(!instr->HasSideEffects());
@@ -187,8 +212,9 @@ class HDataProcWithShifterOp FINAL : public HExpression<2> {
     SetRawInputAt(1, right);
   }
 
-  bool CanBeMoved() const OVERRIDE { return true; }
-  bool InstructionDataEquals(const HInstruction* other_instr) const OVERRIDE {
+  bool IsClonable() const override { return true; }
+  bool CanBeMoved() const override { return true; }
+  bool InstructionDataEquals(const HInstruction* other_instr) const override {
     const HDataProcWithShifterOp* other = other_instr->AsDataProcWithShifterOp();
     return instr_kind_ == other->instr_kind_ &&
         op_kind_ == other->op_kind_ &&
@@ -214,14 +240,15 @@ class HDataProcWithShifterOp FINAL : public HExpression<2> {
 
   DECLARE_INSTRUCTION(DataProcWithShifterOp);
 
+ protected:
+  DEFAULT_COPY_CONSTRUCTOR(DataProcWithShifterOp);
+
  private:
   InstructionKind instr_kind_;
   OpKind op_kind_;
   int shift_amount_;
 
   friend std::ostream& operator<<(std::ostream& os, OpKind op);
-
-  DISALLOW_COPY_AND_ASSIGN(HDataProcWithShifterOp);
 };
 
 std::ostream& operator<<(std::ostream& os, const HDataProcWithShifterOp::OpKind op);

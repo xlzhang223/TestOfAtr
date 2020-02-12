@@ -17,14 +17,14 @@
 #ifndef ART_RUNTIME_GC_REFERENCE_PROCESSOR_H_
 #define ART_RUNTIME_GC_REFERENCE_PROCESSOR_H_
 
-#include "base/mutex.h"
-#include "globals.h"
+#include "base/locks.h"
 #include "jni.h"
-#include "object_callbacks.h"
 #include "reference_queue.h"
+#include "runtime_globals.h"
 
 namespace art {
 
+class IsMarkedVisitor;
 class TimingLogger;
 
 namespace mirror {
@@ -45,7 +45,7 @@ class Heap;
 // Used to process java.lang.ref.Reference instances concurrently or paused.
 class ReferenceProcessor {
  public:
-  explicit ReferenceProcessor();
+  ReferenceProcessor();
   void ProcessReferences(bool concurrent,
                          TimingLogger* timings,
                          bool clear_soft_references,
@@ -61,7 +61,9 @@ class ReferenceProcessor {
   // Decode the referent, may block if references are being processed.
   ObjPtr<mirror::Object> GetReferent(Thread* self, ObjPtr<mirror::Reference> reference)
       REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!Locks::reference_processor_lock_);
-  void EnqueueClearedReferences(Thread* self) REQUIRES(!Locks::mutator_lock_);
+  // Collects the cleared references and returns a task, to be executed after FinishGC, that will
+  // enqueue all of them.
+  SelfDeletingTask* CollectClearedReferences(Thread* self) REQUIRES(!Locks::mutator_lock_);
   void DelayReferenceReferent(ObjPtr<mirror::Class> klass,
                               ObjPtr<mirror::Reference> ref,
                               collector::GarbageCollector* collector)

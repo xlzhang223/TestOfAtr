@@ -14,13 +14,13 @@
  * limitations under the License.
  */
 
-#include "inttypes.h"
+#include <inttypes.h>
+#include <pthread.h>
 
+#include <cstdio>
 #include <iomanip>
 #include <iostream>
-#include <pthread.h>
 #include <sstream>
-#include <stdio.h>
 #include <vector>
 
 #include "android-base/logging.h"
@@ -87,7 +87,7 @@ extern "C" JNIEXPORT jint JNICALL Java_art_Test906_iterateThroughHeapCount(
     jint Handle(jlong class_tag ATTRIBUTE_UNUSED,
                 jlong size ATTRIBUTE_UNUSED,
                 jlong* tag_ptr ATTRIBUTE_UNUSED,
-                jint length ATTRIBUTE_UNUSED) OVERRIDE {
+                jint length ATTRIBUTE_UNUSED) override {
       counter++;
       if (counter == stop_after) {
         return JVMTI_VISIT_ABORT;
@@ -120,7 +120,7 @@ extern "C" JNIEXPORT jint JNICALL Java_art_Test906_iterateThroughHeapData(
     jintArray lengths) {
   class DataIterationConfig : public IterationConfig {
    public:
-    jint Handle(jlong class_tag, jlong size, jlong* tag_ptr, jint length) OVERRIDE {
+    jint Handle(jlong class_tag, jlong size, jlong* tag_ptr, jint length) override {
       class_tags_.push_back(class_tag);
       sizes_.push_back(size);
       tags_.push_back(*tag_ptr);
@@ -164,7 +164,7 @@ extern "C" JNIEXPORT void JNICALL Java_art_Test906_iterateThroughHeapAdd(
     jint Handle(jlong class_tag ATTRIBUTE_UNUSED,
                 jlong size ATTRIBUTE_UNUSED,
                 jlong* tag_ptr,
-                jint length ATTRIBUTE_UNUSED) OVERRIDE {
+                jint length ATTRIBUTE_UNUSED) override {
       jlong current_tag = *tag_ptr;
       if (current_tag != 0) {
         *tag_ptr = current_tag + 10;
@@ -406,6 +406,32 @@ extern "C" JNIEXPORT jstring JNICALL Java_art_Test906_iterateThroughHeapPrimitiv
     return nullptr;
   }
   return env->NewStringUTF(ffc.data.c_str());
+}
+
+extern "C" JNIEXPORT jboolean JNICALL Java_art_Test906_checkInitialized(
+    JNIEnv* env, jclass, jclass c) {
+  jint status;
+  jvmtiError error = jvmti_env->GetClassStatus(c, &status);
+  if (JvmtiErrorToException(env, jvmti_env, error)) {
+    return false;
+  }
+  return (status & JVMTI_CLASS_STATUS_INITIALIZED) != 0;
+}
+
+extern "C" JNIEXPORT jint JNICALL Java_art_Test906_iterateOverInstancesCount(
+    JNIEnv* env, jclass, jclass target) {
+  jint cnt = 0;
+  auto count_func = [](jlong, jlong, jlong*, void* user_data) -> jvmtiIterationControl {
+    *reinterpret_cast<jint*>(user_data) += 1;
+    return JVMTI_ITERATION_CONTINUE;
+  };
+  JvmtiErrorToException(env,
+                        jvmti_env,
+                        jvmti_env->IterateOverInstancesOfClass(target,
+                                                               JVMTI_HEAP_OBJECT_EITHER,
+                                                               count_func,
+                                                               &cnt));
+  return cnt;
 }
 
 }  // namespace Test906IterateHeap

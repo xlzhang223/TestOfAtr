@@ -14,9 +14,11 @@
  * limitations under the License.
  */
 
-#include <iostream>
 #include <pthread.h>
-#include <stdio.h>
+
+#include <cstdio>
+#include <iostream>
+#include <mutex>
 #include <vector>
 
 #include "android-base/logging.h"
@@ -32,17 +34,23 @@
 namespace art {
 namespace Test905ObjectFree {
 
+// The ObjectFree functions aren't required to be called on any particular thread so use these
+// mutexs to control access to the collected_tags lists.
+std::mutex ct1_mutex;
 static std::vector<jlong> collected_tags1;
+std::mutex ct2_mutex;
 static std::vector<jlong> collected_tags2;
 
 jvmtiEnv* jvmti_env2;
 
 static void JNICALL ObjectFree1(jvmtiEnv* ti_env, jlong tag) {
+  std::lock_guard<std::mutex> mu(ct1_mutex);
   CHECK_EQ(ti_env, jvmti_env);
   collected_tags1.push_back(tag);
 }
 
 static void JNICALL ObjectFree2(jvmtiEnv* ti_env, jlong tag) {
+  std::lock_guard<std::mutex> mu(ct2_mutex);
   CHECK_EQ(ti_env, jvmti_env2);
   collected_tags2.push_back(tag);
 }
@@ -61,7 +69,7 @@ extern "C" JNIEXPORT void JNICALL Java_art_Test905_setupObjectFreeCallback(
   JavaVM* jvm = nullptr;
   env->GetJavaVM(&jvm);
   CHECK_EQ(jvm->GetEnv(reinterpret_cast<void**>(&jvmti_env2), JVMTI_VERSION_1_2), 0);
-  SetAllCapabilities(jvmti_env2);
+  SetStandardCapabilities(jvmti_env2);
   setupObjectFreeCallback(env, jvmti_env2, ObjectFree2);
 }
 
@@ -83,6 +91,7 @@ extern "C" JNIEXPORT void JNICALL Java_art_Test905_enableFreeTracking(
 
 extern "C" JNIEXPORT jlongArray JNICALL Java_art_Test905_getCollectedTags(
     JNIEnv* env, jclass klass ATTRIBUTE_UNUSED, jint index) {
+  std::lock_guard<std::mutex> mu((index == 0) ? ct1_mutex : ct2_mutex);
   std::vector<jlong>& tags = (index == 0) ? collected_tags1 : collected_tags2;
   jlongArray ret = env->NewLongArray(tags.size());
   if (ret == nullptr) {
@@ -93,6 +102,14 @@ extern "C" JNIEXPORT jlongArray JNICALL Java_art_Test905_getCollectedTags(
   tags.clear();
 
   return ret;
+}
+
+extern "C" JNIEXPORT jlong JNICALL Java_art_Test905_getTag2(
+    JNIEnv* env, jclass klass ATTRIBUTE_UNUSED, jobject obj) {
+  jlong tag;
+  jvmtiError ret = jvmti_env2->GetTag(obj, &tag);
+  JvmtiErrorToException(env, jvmti_env, ret);
+  return tag;
 }
 
 extern "C" JNIEXPORT void JNICALL Java_art_Test905_setTag2(

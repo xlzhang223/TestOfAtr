@@ -19,9 +19,11 @@
 #include <algorithm>
 #include <memory>
 
-#include "base/logging.h"
-#include "dex_file.h"
-#include "dex_instruction-inl.h"
+#include <android-base/logging.h>
+
+#include "dex/code_item_accessors-inl.h"
+#include "dex/dex_file.h"
+#include "dex/dex_instruction-inl.h"
 #include "runtime.h"
 #include "verifier/method_verifier-inl.h"
 #include "verifier/reg_type-inl.h"
@@ -49,7 +51,10 @@ const VerifiedMethod* VerifiedMethod::Create(verifier::MethodVerifier* method_ve
 }
 
 bool VerifiedMethod::IsSafeCast(uint32_t pc) const {
-  return std::binary_search(safe_cast_set_.begin(), safe_cast_set_.end(), pc);
+  if (safe_cast_set_ == nullptr) {
+    return false;
+  }
+  return std::binary_search(safe_cast_set_->begin(), safe_cast_set_->end(), pc);
 }
 
 void VerifiedMethod::GenerateSafeCastSet(verifier::MethodVerifier* method_verifier) {
@@ -61,27 +66,23 @@ void VerifiedMethod::GenerateSafeCastSet(verifier::MethodVerifier* method_verifi
   if (method_verifier->HasFailures()) {
     return;
   }
-  const DexFile::CodeItem* code_item = method_verifier->CodeItem();
-  const Instruction* inst = Instruction::At(code_item->insns_);
-  const Instruction* end = Instruction::At(code_item->insns_ +
-                                           code_item->insns_size_in_code_units_);
-
-  for (; inst < end; inst = inst->Next()) {
-    Instruction::Code code = inst->Opcode();
+  for (const DexInstructionPcPair& pair : method_verifier->CodeItem()) {
+    const Instruction& inst = pair.Inst();
+    const Instruction::Code code = inst.Opcode();
     if (code == Instruction::CHECK_CAST) {
-      uint32_t dex_pc = inst->GetDexPc(code_item->insns_);
+      const uint32_t dex_pc = pair.DexPc();
       if (!method_verifier->GetInstructionFlags(dex_pc).IsVisited()) {
         // Do not attempt to quicken this instruction, it's unreachable anyway.
         continue;
       }
       const verifier::RegisterLine* line = method_verifier->GetRegLine(dex_pc);
       const verifier::RegType& reg_type(line->GetRegisterType(method_verifier,
-                                                              inst->VRegA_21c()));
+                                                              inst.VRegA_21c()));
       const verifier::RegType& cast_type =
-          method_verifier->ResolveCheckedClass(dex::TypeIndex(inst->VRegB_21c()));
+          method_verifier->ResolveCheckedClass(dex::TypeIndex(inst.VRegB_21c()));
       // Pass null for the method verifier to not record the VerifierDeps dependency
       // if the types are not assignable.
-      if (cast_type.IsStrictlyAssignableFrom(reg_type, /* method_verifier */ nullptr)) {
+      if (cast_type.IsStrictlyAssignableFrom(reg_type, /* verifier= */ nullptr)) {
         // The types are assignable, we record that dependency in the VerifierDeps so
         // that if this changes after OTA, we will re-verify again.
         // We check if reg_type has a class, as the verifier may have inferred it's
@@ -91,15 +92,19 @@ void VerifiedMethod::GenerateSafeCastSet(verifier::MethodVerifier* method_verifi
           verifier::VerifierDeps::MaybeRecordAssignability(method_verifier->GetDexFile(),
                                                            cast_type.GetClass(),
                                                            reg_type.GetClass(),
-                                                           /* strict */ true,
-                                                           /* assignable */ true);
+                                                           /* is_strict= */ true,
+                                                           /* is_assignable= */ true);
+        }
+        if (safe_cast_set_ == nullptr) {
+          safe_cast_set_.reset(new SafeCastSet());
         }
         // Verify ordering for push_back() to the sorted vector.
-        DCHECK(safe_cast_set_.empty() || safe_cast_set_.back() < dex_pc);
-        safe_cast_set_.push_back(dex_pc);
+        DCHECK(safe_cast_set_->empty() || safe_cast_set_->back() < dex_pc);
+        safe_cast_set_->push_back(dex_pc);
       }
     }
   }
+  DCHECK(safe_cast_set_ == nullptr || !safe_cast_set_->empty());
 }
 
 }  // namespace art

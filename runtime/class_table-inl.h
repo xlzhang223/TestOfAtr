@@ -18,6 +18,10 @@
 #define ART_RUNTIME_CLASS_TABLE_INL_H_
 
 #include "class_table.h"
+
+#include "base/mutex-inl.h"
+#include "gc_root-inl.h"
+#include "mirror/class.h"
 #include "oat_file.h"
 
 namespace art {
@@ -58,12 +62,12 @@ void ClassTable::VisitRoots(const Visitor& visitor) {
   }
 }
 
-template <typename Visitor>
+template <typename Visitor, ReadBarrierOption kReadBarrierOption>
 bool ClassTable::Visit(Visitor& visitor) {
   ReaderMutexLock mu(Thread::Current(), lock_);
   for (ClassSet& class_set : classes_) {
     for (TableSlot& table_slot : class_set) {
-      if (!visitor(table_slot.Read())) {
+      if (!visitor(table_slot.Read<kReadBarrierOption>())) {
         return false;
       }
     }
@@ -71,12 +75,12 @@ bool ClassTable::Visit(Visitor& visitor) {
   return true;
 }
 
-template <typename Visitor>
+template <typename Visitor, ReadBarrierOption kReadBarrierOption>
 bool ClassTable::Visit(const Visitor& visitor) {
   ReaderMutexLock mu(Thread::Current(), lock_);
   for (ClassSet& class_set : classes_) {
     for (TableSlot& table_slot : class_set) {
-      if (!visitor(table_slot.Read())) {
+      if (!visitor(table_slot.Read<kReadBarrierOption>())) {
         return false;
       }
     }
@@ -86,21 +90,21 @@ bool ClassTable::Visit(const Visitor& visitor) {
 
 template<ReadBarrierOption kReadBarrierOption>
 inline mirror::Class* ClassTable::TableSlot::Read() const {
-  const uint32_t before = data_.LoadRelaxed();
-  ObjPtr<mirror::Class> const before_ptr(ExtractPtr(before));
-  ObjPtr<mirror::Class> const after_ptr(
+  const uint32_t before = data_.load(std::memory_order_relaxed);
+  const ObjPtr<mirror::Class> before_ptr(ExtractPtr(before));
+  const ObjPtr<mirror::Class> after_ptr(
       GcRoot<mirror::Class>(before_ptr).Read<kReadBarrierOption>());
   if (kReadBarrierOption != kWithoutReadBarrier && before_ptr != after_ptr) {
     // If another thread raced and updated the reference, do not store the read barrier updated
     // one.
-    data_.CompareExchangeStrongRelease(before, Encode(after_ptr, MaskHash(before)));
+    data_.CompareAndSetStrongRelease(before, Encode(after_ptr, MaskHash(before)));
   }
   return after_ptr.Ptr();
 }
 
 template<typename Visitor>
 inline void ClassTable::TableSlot::VisitRoot(const Visitor& visitor) const {
-  const uint32_t before = data_.LoadRelaxed();
+  const uint32_t before = data_.load(std::memory_order_relaxed);
   ObjPtr<mirror::Class> before_ptr(ExtractPtr(before));
   GcRoot<mirror::Class> root(before_ptr);
   visitor.VisitRoot(root.AddressWithoutBarrier());
@@ -108,7 +112,7 @@ inline void ClassTable::TableSlot::VisitRoot(const Visitor& visitor) const {
   if (before_ptr != after_ptr) {
     // If another thread raced and updated the reference, do not store the read barrier updated
     // one.
-    data_.CompareExchangeStrongRelease(before, Encode(after_ptr, MaskHash(before)));
+    data_.CompareAndSetStrongRelease(before, Encode(after_ptr, MaskHash(before)));
   }
 }
 
@@ -128,6 +132,13 @@ inline ClassTable::TableSlot::TableSlot(ObjPtr<mirror::Class> klass, uint32_t de
     const uint32_t hash = ComputeModifiedUtf8Hash(klass->GetDescriptor(&temp));
     CHECK_EQ(descriptor_hash, hash);
   }
+}
+
+template <typename Filter>
+inline void ClassTable::RemoveStrongRoots(const Filter& filter) {
+  WriterMutexLock mu(Thread::Current(), lock_);
+  strong_roots_.erase(std::remove_if(strong_roots_.begin(), strong_roots_.end(), filter),
+                      strong_roots_.end());
 }
 
 }  // namespace art

@@ -26,6 +26,10 @@ public class Main {
   static short[] sB2 = new short[M];
   static short[] sBo = new short[M];
 
+  private static int $inline$mone() {
+    return -1;
+  }
+
   /// CHECK-START: void Main.halving_add_signed(short[], short[], short[]) loop_optimization (before)
   /// CHECK-DAG: <<I1:i\d+>>   IntConstant 1                       loop:none
   /// CHECK-DAG: <<Phi:i\d+>>  Phi                                 loop:<<Loop:B\d+>> outer_loop:none
@@ -36,12 +40,11 @@ public class Main {
   /// CHECK-DAG: <<Cnv:s\d+>>  TypeConversion [<<Shr>>]            loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG:               ArraySet [{{l\d+}},<<Phi>>,<<Cnv>>] loop:<<Loop>>      outer_loop:none
   //
-  /// CHECK-START-ARM64: void Main.halving_add_signed(short[], short[], short[]) loop_optimization (after)
-  /// CHECK-DAG: <<Phi:i\d+>>  Phi                                  loop:<<Loop:B\d+>> outer_loop:none
-  /// CHECK-DAG: <<Get1:d\d+>> VecLoad                              loop:<<Loop>>      outer_loop:none
-  /// CHECK-DAG: <<Get2:d\d+>> VecLoad                              loop:<<Loop>>      outer_loop:none
-  /// CHECK-DAG: <<HAdd:d\d+>> VecHalvingAdd [<<Get1>>,<<Get2>>] unsigned:false rounded:false loop:<<Loop>> outer_loop:none
-  /// CHECK-DAG:               VecStore [{{l\d+}},<<Phi>>,<<HAdd>>] loop:<<Loop>>      outer_loop:none
+  /// CHECK-START-{ARM,ARM64,MIPS64}: void Main.halving_add_signed(short[], short[], short[]) loop_optimization (after)
+  /// CHECK-DAG: <<Get1:d\d+>> VecLoad                               loop:<<Loop:B\d+>> outer_loop:none
+  /// CHECK-DAG: <<Get2:d\d+>> VecLoad                               loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<HAdd:d\d+>> VecHalvingAdd [<<Get1>>,<<Get2>>] packed_type:Int16 rounded:false loop:<<Loop>> outer_loop:none
+  /// CHECK-DAG:               VecStore [{{l\d+}},{{i\d+}},<<HAdd>>] loop:<<Loop>>      outer_loop:none
   private static void halving_add_signed(short[] b1, short[] b2, short[] bo) {
     int min_length = Math.min(bo.length, Math.min(b1.length, b2.length));
     for (int i = 0; i < min_length; i++) {
@@ -49,29 +52,67 @@ public class Main {
     }
   }
 
-  /// CHECK-START: void Main.halving_add_unsigned(short[], short[], short[]) loop_optimization (before)
+  /// CHECK-START: void Main.halving_add_signed_alt(short[], short[], short[]) loop_optimization (before)
+  /// CHECK-DAG: <<I1:i\d+>>   IntConstant 1                       loop:none
+  /// CHECK-DAG: <<I10:i\d+>>  IntConstant 10                      loop:none
+  /// CHECK-DAG: <<M10:i\d+>>  IntConstant -10                     loop:none
+  /// CHECK-DAG: <<Phi:i\d+>>  Phi                                 loop:<<Loop:B\d+>> outer_loop:none
+  /// CHECK-DAG: <<Get1:s\d+>> ArrayGet                            loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Get2:s\d+>> ArrayGet                            loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Add1:i\d+>> Add [<<Get1>>,<<I10>>]              loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Add2:i\d+>> Add [<<Get2>>,<<M10>>]              loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Add3:i\d+>> Add [<<Add1>>,<<Add2>>]             loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Shr:i\d+>>  Shr [<<Add3>>,<<I1>>]               loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Cnv:s\d+>>  TypeConversion [<<Shr>>]            loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG:               ArraySet [{{l\d+}},<<Phi>>,<<Cnv>>] loop:<<Loop>>      outer_loop:none
+  //
+  /// CHECK-START-{ARM,ARM64,MIPS64}: void Main.halving_add_signed_alt(short[], short[], short[]) loop_optimization (after)
+  /// CHECK-DAG: <<Get1:d\d+>> VecLoad                               loop:<<Loop:B\d+>> outer_loop:none
+  /// CHECK-DAG: <<Get2:d\d+>> VecLoad                               loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<HAdd:d\d+>> VecHalvingAdd [<<Get1>>,<<Get2>>] packed_type:Int16 rounded:false loop:<<Loop>> outer_loop:none
+  /// CHECK-DAG:               VecStore [{{l\d+}},{{i\d+}},<<HAdd>>] loop:<<Loop>>      outer_loop:none
+  private static void halving_add_signed_alt(short[] b1, short[] b2, short[] bo) {
+    int min_length = Math.min(bo.length, Math.min(b1.length, b2.length));
+    for (int i = 0; i < min_length; i++) {
+      // Cancelling constant computations do not confuse recognition.
+      bo[i] = (short) (((b1[i] + 10) + (b2[i] - 10)) >> 1);
+    }
+  }
+
+  /// CHECK-START: void Main.halving_add_unsigned(short[], short[], short[]) instruction_simplifier (before)
   /// CHECK-DAG: <<I1:i\d+>>   IntConstant 1                       loop:none
   /// CHECK-DAG: <<UMAX:i\d+>> IntConstant 65535                   loop:none
   /// CHECK-DAG: <<Phi:i\d+>>  Phi                                 loop:<<Loop:B\d+>> outer_loop:none
   /// CHECK-DAG: <<Get1:s\d+>> ArrayGet                            loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG: <<Get2:s\d+>> ArrayGet                            loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG: <<And1:i\d+>> And [<<Get1>>,<<UMAX>>]             loop:<<Loop>>      outer_loop:none
-  /// CHECK-DAG: <<And2:i\d+>> And [<<Get2>>,<<UMAX>>]             loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<And2:i\d+>> And [<<UMAX>>,<<Get2>>]             loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG: <<Add:i\d+>>  Add [<<And1>>,<<And2>>]             loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Shr:i\d+>>  Shr [<<Add>>,<<I1>>]                loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Cnv:s\d+>>  TypeConversion [<<Shr>>]            loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG:               ArraySet [{{l\d+}},{{i\d+}},<<Cnv>>] loop:<<Loop>>      outer_loop:none
+  //
+  /// CHECK-START: void Main.halving_add_unsigned(short[], short[], short[]) loop_optimization (before)
+  /// CHECK-DAG: <<I1:i\d+>>   IntConstant 1                       loop:none
+  /// CHECK-DAG: <<Phi:i\d+>>  Phi                                 loop:<<Loop:B\d+>> outer_loop:none
+  /// CHECK-DAG: <<Get1:c\d+>> ArrayGet                            loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Get2:c\d+>> ArrayGet                            loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Add:i\d+>>  Add [<<Get1>>,<<Get2>>]             loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG: <<Shr:i\d+>>  Shr [<<Add>>,<<I1>>]                loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG: <<Cnv:s\d+>>  TypeConversion [<<Shr>>]            loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG:               ArraySet [{{l\d+}},<<Phi>>,<<Cnv>>] loop:<<Loop>>      outer_loop:none
   //
-  /// CHECK-START-ARM64: void Main.halving_add_unsigned(short[], short[], short[]) loop_optimization (after)
-  /// CHECK-DAG: <<Phi:i\d+>>  Phi                                  loop:<<Loop:B\d+>> outer_loop:none
-  /// CHECK-DAG: <<Get1:d\d+>> VecLoad                              loop:<<Loop>>      outer_loop:none
-  /// CHECK-DAG: <<Get2:d\d+>> VecLoad                              loop:<<Loop>>      outer_loop:none
-  /// CHECK-DAG: <<HAdd:d\d+>> VecHalvingAdd [<<Get1>>,<<Get2>>] unsigned:true rounded:false loop:<<Loop>> outer_loop:none
-  /// CHECK-DAG:               VecStore [{{l\d+}},<<Phi>>,<<HAdd>>] loop:<<Loop>>      outer_loop:none
+  /// CHECK-START-{ARM,ARM64,MIPS64}: void Main.halving_add_unsigned(short[], short[], short[]) loop_optimization (after)
+  /// CHECK-DAG: <<Get1:d\d+>> VecLoad                               loop:<<Loop:B\d+>> outer_loop:none
+  /// CHECK-DAG: <<Get2:d\d+>> VecLoad                               loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<HAdd:d\d+>> VecHalvingAdd [<<Get1>>,<<Get2>>] packed_type:Uint16 rounded:false loop:<<Loop>> outer_loop:none
+  /// CHECK-DAG:               VecStore [{{l\d+}},{{i\d+}},<<HAdd>>] loop:<<Loop>>      outer_loop:none
   private static void halving_add_unsigned(short[] b1, short[] b2, short[] bo) {
     int min_length = Math.min(bo.length, Math.min(b1.length, b2.length));
     for (int i = 0; i < min_length; i++) {
-      bo[i] = (short) (((b1[i] & 0xffff) + (b2[i] & 0xffff)) >> 1);
+      int v1 = b1[i] & 0xffff;
+      int v2 = b2[i] & 0xffff;
+      bo[i] = (short) ((v1 + v2) >> 1);
     }
   }
 
@@ -86,12 +127,11 @@ public class Main {
   /// CHECK-DAG: <<Cnv:s\d+>>  TypeConversion [<<Shr>>]            loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG:               ArraySet [{{l\d+}},<<Phi>>,<<Cnv>>] loop:<<Loop>>      outer_loop:none
   //
-  /// CHECK-START-ARM64: void Main.rounding_halving_add_signed(short[], short[], short[]) loop_optimization (after)
-  /// CHECK-DAG: <<Phi:i\d+>>  Phi                                  loop:<<Loop:B\d+>> outer_loop:none
-  /// CHECK-DAG: <<Get1:d\d+>> VecLoad                              loop:<<Loop>>      outer_loop:none
-  /// CHECK-DAG: <<Get2:d\d+>> VecLoad                              loop:<<Loop>>      outer_loop:none
-  /// CHECK-DAG: <<HAdd:d\d+>> VecHalvingAdd [<<Get1>>,<<Get2>>] unsigned:false rounded:true loop:<<Loop>> outer_loop:none
-  /// CHECK-DAG:               VecStore [{{l\d+}},<<Phi>>,<<HAdd>>] loop:<<Loop>>      outer_loop:none
+  /// CHECK-START-{ARM,ARM64,MIPS64}: void Main.rounding_halving_add_signed(short[], short[], short[]) loop_optimization (after)
+  /// CHECK-DAG: <<Get1:d\d+>> VecLoad                               loop:<<Loop:B\d+>> outer_loop:none
+  /// CHECK-DAG: <<Get2:d\d+>> VecLoad                               loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<HAdd:d\d+>> VecHalvingAdd [<<Get1>>,<<Get2>>] packed_type:Int16 rounded:true loop:<<Loop>> outer_loop:none
+  /// CHECK-DAG:               VecStore [{{l\d+}},{{i\d+}},<<HAdd>>] loop:<<Loop>>      outer_loop:none
   private static void rounding_halving_add_signed(short[] b1, short[] b2, short[] bo) {
     int min_length = Math.min(bo.length, Math.min(b1.length, b2.length));
     for (int i = 0; i < min_length; i++) {
@@ -99,30 +139,162 @@ public class Main {
     }
   }
 
-  /// CHECK-START: void Main.rounding_halving_add_unsigned(short[], short[], short[]) loop_optimization (before)
+  /// CHECK-START: void Main.rounding_halving_add_signed_alt(short[], short[], short[]) loop_optimization (before)
+  /// CHECK-DAG: <<I1:i\d+>>   IntConstant 1                       loop:none
+  /// CHECK-DAG: <<Phi:i\d+>>  Phi                                 loop:<<Loop:B\d+>> outer_loop:none
+  /// CHECK-DAG: <<Get1:s\d+>> ArrayGet                            loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Get2:s\d+>> ArrayGet                            loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Add1:i\d+>> Add [<<Get1>>,<<I1>>]               loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Add2:i\d+>> Add [<<Add1>>,<<Get2>>]             loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Shr:i\d+>>  Shr [<<Add2>>,<<I1>>]               loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Cnv:s\d+>>  TypeConversion [<<Shr>>]            loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG:               ArraySet [{{l\d+}},<<Phi>>,<<Cnv>>] loop:<<Loop>>      outer_loop:none
+  //
+  /// CHECK-START-{ARM,ARM64,MIPS64}: void Main.rounding_halving_add_signed_alt(short[], short[], short[]) loop_optimization (after)
+  /// CHECK-DAG: <<Get1:d\d+>> VecLoad                               loop:<<Loop:B\d+>> outer_loop:none
+  /// CHECK-DAG: <<Get2:d\d+>> VecLoad                               loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<HAdd:d\d+>> VecHalvingAdd [<<Get1>>,<<Get2>>] packed_type:Int16 rounded:true loop:<<Loop>> outer_loop:none
+  /// CHECK-DAG:               VecStore [{{l\d+}},{{i\d+}},<<HAdd>>] loop:<<Loop>>      outer_loop:none
+  private static void rounding_halving_add_signed_alt(short[] b1, short[] b2, short[] bo) {
+    int min_length = Math.min(bo.length, Math.min(b1.length, b2.length));
+    for (int i = 0; i < min_length; i++) {
+      // Slightly different order in idiom does not confuse recognition.
+      bo[i] = (short) (((1 + b1[i]) + b2[i]) >> 1);
+    }
+  }
+
+  /// CHECK-START: void Main.rounding_halving_add_signed_alt2(short[], short[], short[]) loop_optimization (before)
+  /// CHECK-DAG: <<I1:i\d+>>   IntConstant 1                       loop:none
+  /// CHECK-DAG: <<I10:i\d+>>  IntConstant 10                      loop:none
+  /// CHECK-DAG: <<M9:i\d+>>   IntConstant -9                      loop:none
+  /// CHECK-DAG: <<Phi:i\d+>>  Phi                                 loop:<<Loop:B\d+>> outer_loop:none
+  /// CHECK-DAG: <<Get1:s\d+>> ArrayGet                            loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Get2:s\d+>> ArrayGet                            loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Add1:i\d+>> Add [<<Get1>>,<<I10>>]              loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Add2:i\d+>> Add [<<Get2>>,<<M9>>]               loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Add3:i\d+>> Add [<<Add1>>,<<Add2>>]             loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Shr:i\d+>>  Shr [<<Add3>>,<<I1>>]               loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Cnv:s\d+>>  TypeConversion [<<Shr>>]            loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG:               ArraySet [{{l\d+}},<<Phi>>,<<Cnv>>] loop:<<Loop>>      outer_loop:none
+  //
+  /// CHECK-START-{ARM,ARM64,MIPS64}: void Main.rounding_halving_add_signed_alt2(short[], short[], short[]) loop_optimization (after)
+  /// CHECK-DAG: <<Get1:d\d+>> VecLoad                               loop:<<Loop:B\d+>> outer_loop:none
+  /// CHECK-DAG: <<Get2:d\d+>> VecLoad                               loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<HAdd:d\d+>> VecHalvingAdd [<<Get1>>,<<Get2>>] packed_type:Int16 rounded:true loop:<<Loop>> outer_loop:none
+  /// CHECK-DAG:               VecStore [{{l\d+}},{{i\d+}},<<HAdd>>] loop:<<Loop>>      outer_loop:none
+  private static void rounding_halving_add_signed_alt2(short[] b1, short[] b2, short[] bo) {
+    int min_length = Math.min(bo.length, Math.min(b1.length, b2.length));
+    for (int i = 0; i < min_length; i++) {
+      // Computations that cancel to adding 1 also do not confuse recognition.
+      bo[i] = (short) (((b1[i] + 10) + (b2[i] - 9)) >> 1);
+    }
+  }
+
+  /// CHECK-START: void Main.rounding_halving_add_signed_alt3(short[], short[], short[]) loop_optimization (before)
+  /// CHECK-DAG: <<I1:i\d+>>   IntConstant 1                       loop:none
+  /// CHECK-DAG: <<M1:i\d+>>   IntConstant -1                      loop:none
+  /// CHECK-DAG: <<I9:i\d+>>   IntConstant 9                       loop:none
+  /// CHECK-DAG: <<M9:i\d+>>   IntConstant -9                      loop:none
+  /// CHECK-DAG: <<Phi:i\d+>>  Phi                                 loop:<<Loop:B\d+>> outer_loop:none
+  /// CHECK-DAG: <<Get1:s\d+>> ArrayGet                            loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Get2:s\d+>> ArrayGet                            loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Add1:i\d+>> Add [<<Get1>>,<<I9>>]               loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Add2:i\d+>> Add [<<Get2>>,<<M9>>]               loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Add3:i\d+>> Add [<<Add1>>,<<Add2>>]             loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Sub:i\d+>>  Sub [<<Add3>>,<<M1>>]               loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Shr:i\d+>>  Shr [<<Sub>>,<<I1>>]                loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Cnv:s\d+>>  TypeConversion [<<Shr>>]            loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG:               ArraySet [{{l\d+}},<<Phi>>,<<Cnv>>] loop:<<Loop>>      outer_loop:none
+  //
+  /// CHECK-START-{ARM,ARM64,MIPS64}: void Main.rounding_halving_add_signed_alt3(short[], short[], short[]) loop_optimization (after)
+  /// CHECK-DAG: <<Get1:d\d+>> VecLoad                               loop:<<Loop:B\d+>> outer_loop:none
+  /// CHECK-DAG: <<Get2:d\d+>> VecLoad                               loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<HAdd:d\d+>> VecHalvingAdd [<<Get1>>,<<Get2>>] packed_type:Int16 rounded:true loop:<<Loop>> outer_loop:none
+  /// CHECK-DAG:               VecStore [{{l\d+}},{{i\d+}},<<HAdd>>] loop:<<Loop>>      outer_loop:none
+  private static void rounding_halving_add_signed_alt3(short[] b1, short[] b2, short[] bo) {
+    int min_length = Math.min(bo.length, Math.min(b1.length, b2.length));
+    for (int i = 0; i < min_length; i++) {
+      // Computations that cancel to adding 1 also do not confuse recognition.
+      bo[i] = (short) (((b1[i] + 9) + (b2[i] - 9) - $inline$mone()) >> 1);
+    }
+  }
+
+  /// CHECK-START: void Main.rounding_halving_add_unsigned(short[], short[], short[]) instruction_simplifier (before)
   /// CHECK-DAG: <<I1:i\d+>>   IntConstant 1                       loop:none
   /// CHECK-DAG: <<UMAX:i\d+>> IntConstant 65535                   loop:none
   /// CHECK-DAG: <<Phi:i\d+>>  Phi                                 loop:<<Loop:B\d+>> outer_loop:none
   /// CHECK-DAG: <<Get1:s\d+>> ArrayGet                            loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG: <<Get2:s\d+>> ArrayGet                            loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG: <<And1:i\d+>> And [<<Get1>>,<<UMAX>>]             loop:<<Loop>>      outer_loop:none
-  /// CHECK-DAG: <<And2:i\d+>> And [<<Get2>>,<<UMAX>>]             loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<And2:i\d+>> And [<<UMAX>>,<<Get2>>]             loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG: <<Add1:i\d+>> Add [<<And1>>,<<And2>>]             loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Add2:i\d+>> Add [<<Add1>>,<<I1>>]               loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Shr:i\d+>>  Shr [<<Add2>>,<<I1>>]               loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Cnv:s\d+>>  TypeConversion [<<Shr>>]            loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG:               ArraySet [{{l\d+}},{{i\d+}},<<Cnv>>] loop:<<Loop>>      outer_loop:none
+  //
+  /// CHECK-START: void Main.rounding_halving_add_unsigned(short[], short[], short[]) loop_optimization (before)
+  /// CHECK-DAG: <<I1:i\d+>>   IntConstant 1                       loop:none
+  /// CHECK-DAG: <<Phi:i\d+>>  Phi                                 loop:<<Loop:B\d+>> outer_loop:none
+  /// CHECK-DAG: <<Get1:c\d+>> ArrayGet                            loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Get2:c\d+>> ArrayGet                            loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Add1:i\d+>> Add [<<Get1>>,<<Get2>>]             loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG: <<Add2:i\d+>> Add [<<Add1>>,<<I1>>]               loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG: <<Shr:i\d+>>  Shr [<<Add2>>,<<I1>>]               loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG: <<Cnv:s\d+>>  TypeConversion [<<Shr>>]            loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG:               ArraySet [{{l\d+}},<<Phi>>,<<Cnv>>] loop:<<Loop>>      outer_loop:none
   //
-  /// CHECK-START-ARM64: void Main.rounding_halving_add_unsigned(short[], short[], short[]) loop_optimization (after)
-  /// CHECK-DAG: <<Phi:i\d+>>  Phi                                  loop:<<Loop:B\d+>> outer_loop:none
-  /// CHECK-DAG: <<Get1:d\d+>> VecLoad                              loop:<<Loop>>      outer_loop:none
-  /// CHECK-DAG: <<Get2:d\d+>> VecLoad                              loop:<<Loop>>      outer_loop:none
-  /// CHECK-DAG: <<HAdd:d\d+>> VecHalvingAdd [<<Get1>>,<<Get2>>] unsigned:true rounded:true loop:<<Loop>> outer_loop:none
-  /// CHECK-DAG:               VecStore [{{l\d+}},<<Phi>>,<<HAdd>>] loop:<<Loop>>      outer_loop:none
+  /// CHECK-START-{ARM,ARM64,MIPS64}: void Main.rounding_halving_add_unsigned(short[], short[], short[]) loop_optimization (after)
+  /// CHECK-DAG: <<Get1:d\d+>> VecLoad                               loop:<<Loop:B\d+>> outer_loop:none
+  /// CHECK-DAG: <<Get2:d\d+>> VecLoad                               loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<HAdd:d\d+>> VecHalvingAdd [<<Get1>>,<<Get2>>] packed_type:Uint16 rounded:true loop:<<Loop>> outer_loop:none
+  /// CHECK-DAG:               VecStore [{{l\d+}},{{i\d+}},<<HAdd>>] loop:<<Loop>>      outer_loop:none
   private static void rounding_halving_add_unsigned(short[] b1, short[] b2, short[] bo) {
     int min_length = Math.min(bo.length, Math.min(b1.length, b2.length));
     for (int i = 0; i < min_length; i++) {
-      bo[i] = (short) (((b1[i] & 0xffff) + (b2[i] & 0xffff) + 1) >> 1);
+      int v1 = b1[i] & 0xffff;
+      int v2 = b2[i] & 0xffff;
+      bo[i] = (short) ((v1 + v2 + 1) >> 1);
+    }
+  }
+
+  /// CHECK-START: void Main.rounding_halving_add_unsigned_alt(short[], short[], short[]) instruction_simplifier (before)
+  /// CHECK-DAG: <<I1:i\d+>>   IntConstant 1                       loop:none
+  /// CHECK-DAG: <<UMAX:i\d+>> IntConstant 65535                   loop:none
+  /// CHECK-DAG: <<Phi:i\d+>>  Phi                                 loop:<<Loop:B\d+>> outer_loop:none
+  /// CHECK-DAG: <<Get1:s\d+>> ArrayGet                            loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Get2:s\d+>> ArrayGet                            loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<And1:i\d+>> And [<<Get1>>,<<UMAX>>]             loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<And2:i\d+>> And [<<UMAX>>,<<Get2>>]             loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Add1:i\d+>> Add [<<And2>>,<<I1>>]               loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Add2:i\d+>> Add [<<Add1>>,<<And1>>]             loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Shr:i\d+>>  Shr [<<Add2>>,<<I1>>]               loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Cnv:s\d+>>  TypeConversion [<<Shr>>]            loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG:               ArraySet [{{l\d+}},{{i\d+}},<<Cnv>>] loop:<<Loop>>      outer_loop:none
+  //
+  /// CHECK-START: void Main.rounding_halving_add_unsigned_alt(short[], short[], short[]) loop_optimization (before)
+  /// CHECK-DAG: <<I1:i\d+>>   IntConstant 1                       loop:none
+  /// CHECK-DAG: <<Phi:i\d+>>  Phi                                 loop:<<Loop:B\d+>> outer_loop:none
+  /// CHECK-DAG: <<Get1:c\d+>> ArrayGet                            loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Get2:c\d+>> ArrayGet                            loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Add1:i\d+>> Add [<<Get2>>,<<I1>>]               loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Add2:i\d+>> Add [<<Get1>>,<<Add1>>]             loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Shr:i\d+>>  Shr [<<Add2>>,<<I1>>]               loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Cnv:s\d+>>  TypeConversion [<<Shr>>]            loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG:               ArraySet [{{l\d+}},<<Phi>>,<<Cnv>>] loop:<<Loop>>      outer_loop:none
+  //
+  /// CHECK-START-{ARM,ARM64,MIPS64}: void Main.rounding_halving_add_unsigned_alt(short[], short[], short[]) loop_optimization (after)
+  /// CHECK-DAG: <<Get1:d\d+>> VecLoad                               loop:<<Loop:B\d+>> outer_loop:none
+  /// CHECK-DAG: <<Get2:d\d+>> VecLoad                               loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<HAdd:d\d+>> VecHalvingAdd [<<Get1>>,<<Get2>>] packed_type:Uint16 rounded:true loop:<<Loop>> outer_loop:none
+  /// CHECK-DAG:               VecStore [{{l\d+}},{{i\d+}},<<HAdd>>] loop:<<Loop>>      outer_loop:none
+  private static void rounding_halving_add_unsigned_alt(short[] b1, short[] b2, short[] bo) {
+    int min_length = Math.min(bo.length, Math.min(b1.length, b2.length));
+    for (int i = 0; i < min_length; i++) {
+      // Slightly different order in idiom does not confuse recognition.
+      int v1 = b1[i] & 0xffff;
+      int v2 = b2[i] & 0xffff;
+      bo[i] = (short) (v1 + (v2 + 1) >> 1);
     }
   }
 
@@ -136,13 +308,12 @@ public class Main {
   /// CHECK-DAG: <<Cnv:s\d+>>  TypeConversion [<<Shr>>]            loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG:               ArraySet [{{l\d+}},<<Phi>>,<<Cnv>>] loop:<<Loop>>      outer_loop:none
   //
-  /// CHECK-START-ARM64: void Main.halving_add_signed_constant(short[], short[]) loop_optimization (after)
-  /// CHECK-DAG: <<SMAX:i\d+>> IntConstant 32767                    loop:none
-  /// CHECK-DAG: <<Repl:d\d+>> VecReplicateScalar [<<SMAX>>]        loop:none
-  /// CHECK-DAG: <<Phi:i\d+>>  Phi                                  loop:<<Loop:B\d+>> outer_loop:none
-  /// CHECK-DAG: <<Get:d\d+>>  VecLoad                              loop:<<Loop>>      outer_loop:none
-  /// CHECK-DAG: <<HAdd:d\d+>> VecHalvingAdd [<<Get>>,<<Repl>>] unsigned:false rounded:false loop:<<Loop>> outer_loop:none
-  /// CHECK-DAG:               VecStore [{{l\d+}},<<Phi>>,<<HAdd>>] loop:<<Loop>>      outer_loop:none
+  /// CHECK-START-{ARM,ARM64,MIPS64}: void Main.halving_add_signed_constant(short[], short[]) loop_optimization (after)
+  /// CHECK-DAG: <<SMAX:i\d+>> IntConstant 32767                     loop:none
+  /// CHECK-DAG: <<Repl:d\d+>> VecReplicateScalar [<<SMAX>>]         loop:none
+  /// CHECK-DAG: <<Get:d\d+>>  VecLoad                               loop:<<Loop:B\d+>> outer_loop:none
+  /// CHECK-DAG: <<HAdd:d\d+>> VecHalvingAdd [<<Get>>,<<Repl>>] packed_type:Int16 rounded:false loop:<<Loop>> outer_loop:none
+  /// CHECK-DAG:               VecStore [{{l\d+}},{{i\d+}},<<HAdd>>] loop:<<Loop>>      outer_loop:none
   private static void halving_add_signed_constant(short[] b1, short[] bo) {
     int min_length = Math.min(bo.length, b1.length);
     for (int i = 0; i < min_length; i++) {
@@ -150,7 +321,7 @@ public class Main {
     }
   }
 
-  /// CHECK-START: void Main.halving_add_unsigned_constant(short[], short[]) loop_optimization (before)
+  /// CHECK-START: void Main.halving_add_unsigned_constant(short[], short[]) instruction_simplifier (before)
   /// CHECK-DAG: <<I1:i\d+>>   IntConstant 1                       loop:none
   /// CHECK-DAG: <<UMAX:i\d+>> IntConstant 65535                   loop:none
   /// CHECK-DAG: <<Phi:i\d+>>  Phi                                 loop:<<Loop:B\d+>> outer_loop:none
@@ -159,15 +330,24 @@ public class Main {
   /// CHECK-DAG: <<Add:i\d+>>  Add [<<And>>,<<UMAX>>]              loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG: <<Shr:i\d+>>  Shr [<<Add>>,<<I1>>]                loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG: <<Cnv:s\d+>>  TypeConversion [<<Shr>>]            loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG:               ArraySet [{{l\d+}},{{i\d+}},<<Cnv>>] loop:<<Loop>>      outer_loop:none
+  //
+  /// CHECK-START: void Main.halving_add_unsigned_constant(short[], short[]) loop_optimization (before)
+  /// CHECK-DAG: <<I1:i\d+>>   IntConstant 1                       loop:none
+  /// CHECK-DAG: <<UMAX:i\d+>> IntConstant 65535                   loop:none
+  /// CHECK-DAG: <<Phi:i\d+>>  Phi                                 loop:<<Loop:B\d+>> outer_loop:none
+  /// CHECK-DAG: <<Get:c\d+>>  ArrayGet                            loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Add:i\d+>>  Add [<<Get>>,<<UMAX>>]              loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Shr:i\d+>>  Shr [<<Add>>,<<I1>>]                loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: <<Cnv:s\d+>>  TypeConversion [<<Shr>>]            loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG:               ArraySet [{{l\d+}},<<Phi>>,<<Cnv>>] loop:<<Loop>>      outer_loop:none
   //
-  /// CHECK-START-ARM64: void Main.halving_add_unsigned_constant(short[], short[]) loop_optimization (after)
-  /// CHECK-DAG: <<UMAX:i\d+>> IntConstant 65535                    loop:none
-  /// CHECK-DAG: <<Repl:d\d+>> VecReplicateScalar [<<UMAX>>]        loop:none
-  /// CHECK-DAG: <<Phi:i\d+>>  Phi                                  loop:<<Loop:B\d+>> outer_loop:none
-  /// CHECK-DAG: <<Get:d\d+>>  VecLoad                              loop:<<Loop>>      outer_loop:none
-  /// CHECK-DAG: <<HAdd:d\d+>> VecHalvingAdd [<<Get>>,<<Repl>>] unsigned:true rounded:false loop:<<Loop>> outer_loop:none
-  /// CHECK-DAG:               VecStore [{{l\d+}},<<Phi>>,<<HAdd>>] loop:<<Loop>>      outer_loop:none
+  /// CHECK-START-{ARM,ARM64,MIPS64}: void Main.halving_add_unsigned_constant(short[], short[]) loop_optimization (after)
+  /// CHECK-DAG: <<UMAX:i\d+>> IntConstant 65535                     loop:none
+  /// CHECK-DAG: <<Repl:d\d+>> VecReplicateScalar [<<UMAX>>]         loop:none
+  /// CHECK-DAG: <<Get:d\d+>>  VecLoad                               loop:<<Loop:B\d+>> outer_loop:none
+  /// CHECK-DAG: <<HAdd:d\d+>> VecHalvingAdd [<<Get>>,<<Repl>>] packed_type:Uint16 rounded:false loop:<<Loop>> outer_loop:none
+  /// CHECK-DAG:               VecStore [{{l\d+}},{{i\d+}},<<HAdd>>] loop:<<Loop>>      outer_loop:none
   private static void halving_add_unsigned_constant(short[] b1, short[] bo) {
     int min_length = Math.min(bo.length, b1.length);
     for (int i = 0; i < min_length; i++) {
@@ -200,6 +380,11 @@ public class Main {
       short e = (short) ((sB1[i] + sB2[i]) >> 1);
       expectEquals(e, sBo[i]);
     }
+    halving_add_signed_alt(sB1, sB2, sBo);
+    for (int i = 0; i < M; i++) {
+      short e = (short) ((sB1[i] + sB2[i]) >> 1);
+      expectEquals(e, sBo[i]);
+    }
     halving_add_unsigned(sB1, sB2, sBo);
     for (int i = 0; i < M; i++) {
       short e = (short) (((sB1[i] & 0xffff) + (sB2[i] & 0xffff)) >> 1);
@@ -210,7 +395,27 @@ public class Main {
       short e = (short) ((sB1[i] + sB2[i] + 1) >> 1);
       expectEquals(e, sBo[i]);
     }
+    rounding_halving_add_signed_alt(sB1, sB2, sBo);
+    for (int i = 0; i < M; i++) {
+      short e = (short) ((sB1[i] + sB2[i] + 1) >> 1);
+      expectEquals(e, sBo[i]);
+    }
+    rounding_halving_add_signed_alt2(sB1, sB2, sBo);
+    for (int i = 0; i < M; i++) {
+      short e = (short) ((sB1[i] + sB2[i] + 1) >> 1);
+      expectEquals(e, sBo[i]);
+    }
+    rounding_halving_add_signed_alt3(sB1, sB2, sBo);
+    for (int i = 0; i < M; i++) {
+      short e = (short) ((sB1[i] + sB2[i] + 1) >> 1);
+      expectEquals(e, sBo[i]);
+    }
     rounding_halving_add_unsigned(sB1, sB2, sBo);
+    for (int i = 0; i < M; i++) {
+      short e = (short) (((sB1[i] & 0xffff) + (sB2[i] & 0xffff) + 1) >> 1);
+      expectEquals(e, sBo[i]);
+    }
+    rounding_halving_add_unsigned_alt(sB1, sB2, sBo);
     for (int i = 0; i < M; i++) {
       short e = (short) (((sB1[i] & 0xffff) + (sB2[i] & 0xffff) + 1) >> 1);
       expectEquals(e, sBo[i]);

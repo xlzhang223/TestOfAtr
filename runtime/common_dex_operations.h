@@ -17,10 +17,24 @@
 #ifndef ART_RUNTIME_COMMON_DEX_OPERATIONS_H_
 #define ART_RUNTIME_COMMON_DEX_OPERATIONS_H_
 
+#include "android-base/logging.h"
 #include "art_field.h"
 #include "art_method.h"
+#include "base/locks.h"
+#include "base/macros.h"
 #include "class_linker.h"
+#include "dex/code_item_accessors.h"
+#include "dex/dex_file_structs.h"
+#include "dex/primitive.h"
+#include "handle_scope-inl.h"
+#include "instrumentation.h"
+#include "interpreter/interpreter.h"
+#include "interpreter/shadow_frame.h"
 #include "interpreter/unstarted_runtime.h"
+#include "jvalue-inl.h"
+#include "mirror/class.h"
+#include "mirror/object.h"
+#include "obj_ptr-inl.h"
 #include "runtime.h"
 #include "stack.h"
 #include "thread.h"
@@ -29,48 +43,58 @@ namespace art {
 
 namespace interpreter {
   void ArtInterpreterToInterpreterBridge(Thread* self,
-                                        const DexFile::CodeItem* code_item,
+                                        const dex::CodeItem* code_item,
                                         ShadowFrame* shadow_frame,
                                         JValue* result)
      REQUIRES_SHARED(Locks::mutator_lock_);
 
   void ArtInterpreterToCompiledCodeBridge(Thread* self,
                                           ArtMethod* caller,
-                                          const DexFile::CodeItem* code_item,
                                           ShadowFrame* shadow_frame,
+                                          uint16_t arg_offset,
                                           JValue* result);
 }  // namespace interpreter
 
 inline void PerformCall(Thread* self,
-                        const DexFile::CodeItem* code_item,
+                        const CodeItemDataAccessor& accessor,
                         ArtMethod* caller_method,
                         const size_t first_dest_reg,
                         ShadowFrame* callee_frame,
-                        JValue* result)
+                        JValue* result,
+                        bool use_interpreter_entrypoint)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   if (LIKELY(Runtime::Current()->IsStarted())) {
-    ArtMethod* target = callee_frame->GetMethod();
-    if (ClassLinker::ShouldUseInterpreterEntrypoint(
-        target,
-        target->GetEntryPointFromQuickCompiledCode())) {
-      interpreter::ArtInterpreterToInterpreterBridge(self, code_item, callee_frame, result);
+    if (use_interpreter_entrypoint) {
+      interpreter::ArtInterpreterToInterpreterBridge(self, accessor, callee_frame, result);
     } else {
       interpreter::ArtInterpreterToCompiledCodeBridge(
-          self, caller_method, code_item, callee_frame, result);
+          self, caller_method, callee_frame, first_dest_reg, result);
     }
   } else {
-    interpreter::UnstartedRuntime::Invoke(self, code_item, callee_frame, result, first_dest_reg);
+    interpreter::UnstartedRuntime::Invoke(self, accessor, callee_frame, result, first_dest_reg);
+  }
+}
+
+template <typename T>
+inline void DCheckStaticState(Thread* self, T* entity) REQUIRES_SHARED(Locks::mutator_lock_) {
+  if (kIsDebugBuild) {
+    ObjPtr<mirror::Class> klass = entity->GetDeclaringClass();
+    if (entity->IsStatic()) {
+      klass->AssertInitializedOrInitializingInThread(self);
+    } else {
+      CHECK(klass->IsInitializing() || klass->IsErroneousResolved());
+    }
   }
 }
 
 template<Primitive::Type field_type>
-static ALWAYS_INLINE void DoFieldGetCommon(Thread* self,
+static ALWAYS_INLINE bool DoFieldGetCommon(Thread* self,
                                            const ShadowFrame& shadow_frame,
                                            ObjPtr<mirror::Object> obj,
                                            ArtField* field,
                                            JValue* result)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  field->GetDeclaringClass()->AssertInitializedOrInitializingInThread(self);
+  DCheckStaticState(self, field);
 
   // Report this field access to instrumentation if needed.
   instrumentation::Instrumentation* instrumentation = Runtime::Current()->GetInstrumentation();
@@ -87,6 +111,9 @@ static ALWAYS_INLINE void DoFieldGetCommon(Thread* self,
                                     shadow_frame.GetMethod(),
                                     shadow_frame.GetDexPC(),
                                     field);
+    if (UNLIKELY(self->IsExceptionPending())) {
+      return false;
+    }
   }
 
   switch (field_type) {
@@ -115,6 +142,7 @@ static ALWAYS_INLINE void DoFieldGetCommon(Thread* self,
       LOG(FATAL) << "Unreachable " << field_type;
       break;
   }
+  return true;
 }
 
 template<Primitive::Type field_type, bool do_assignability_check, bool transaction_active>
@@ -122,23 +150,38 @@ ALWAYS_INLINE bool DoFieldPutCommon(Thread* self,
                                     const ShadowFrame& shadow_frame,
                                     ObjPtr<mirror::Object> obj,
                                     ArtField* field,
-                                    const JValue& value)
+                                    JValue& value)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  field->GetDeclaringClass()->AssertInitializedOrInitializingInThread(self);
+  DCheckStaticState(self, field);
 
   // Report this field access to instrumentation if needed. Since we only have the offset of
   // the field from the base of the object, we need to look for it first.
   instrumentation::Instrumentation* instrumentation = Runtime::Current()->GetInstrumentation();
   if (UNLIKELY(instrumentation->HasFieldWriteListeners())) {
-    StackHandleScope<1> hs(self);
-    // Wrap in handle wrapper in case the listener does thread suspension.
+    StackHandleScope<2> hs(self);
+    // Save this and return value (if needed) in case the instrumentation causes a suspend.
     HandleWrapperObjPtr<mirror::Object> h(hs.NewHandleWrapper(&obj));
     ObjPtr<mirror::Object> this_object = field->IsStatic() ? nullptr : obj;
-    instrumentation->FieldWriteEvent(self, this_object.Ptr(),
+    mirror::Object* fake_root = nullptr;
+    HandleWrapper<mirror::Object> ret(hs.NewHandleWrapper<mirror::Object>(
+        field_type == Primitive::kPrimNot ? value.GetGCRoot() : &fake_root));
+    instrumentation->FieldWriteEvent(self,
+                                     this_object.Ptr(),
                                      shadow_frame.GetMethod(),
                                      shadow_frame.GetDexPC(),
                                      field,
                                      value);
+    if (UNLIKELY(self->IsExceptionPending())) {
+      return false;
+    }
+    if (shadow_frame.GetForcePopFrame()) {
+      // We need to check this here since we expect that the FieldWriteEvent happens before the
+      // actual field write. If one pops the stack we should not modify the field.  The next
+      // instruction will force a pop. Return true.
+      DCHECK(Runtime::Current()->AreNonStandardExitsEnabled());
+      DCHECK(interpreter::PrevFrameWillRetry(self, shadow_frame));
+      return true;
+    }
   }
 
   switch (field_type) {
@@ -170,9 +213,14 @@ ALWAYS_INLINE bool DoFieldPutCommon(Thread* self,
           StackHandleScope<2> hs(self);
           HandleWrapperObjPtr<mirror::Object> h_reg(hs.NewHandleWrapper(&reg));
           HandleWrapperObjPtr<mirror::Object> h_obj(hs.NewHandleWrapper(&obj));
-          field_class = field->GetType<true>();
+          field_class = field->ResolveType();
         }
-        if (!reg->VerifierInstanceOf(field_class.Ptr())) {
+        // ArtField::ResolveType() may fail as evidenced with a dexing bug (b/78788577).
+        if (UNLIKELY(field_class.IsNull())) {
+          Thread::Current()->AssertPendingException();
+          return false;
+        }
+        if (UNLIKELY(!reg->VerifierInstanceOf(field_class.Ptr()))) {
           // This should never happen.
           std::string temp1, temp2, temp3;
           self->ThrowNewExceptionF("Ljava/lang/InternalError;",
@@ -189,6 +237,11 @@ ALWAYS_INLINE bool DoFieldPutCommon(Thread* self,
     case Primitive::kPrimVoid: {
       LOG(FATAL) << "Unreachable " << field_type;
       break;
+    }
+  }
+  if (transaction_active) {
+    if (UNLIKELY(self->IsExceptionPending())) {
+      return false;
     }
   }
   return true;

@@ -22,7 +22,7 @@
 #include <sstream>
 #include <vector>
 
-#include "base/logging.h"
+#include "base/logging.h"  // For VLOG.
 #include "base/macros.h"
 #include "base/mutex-inl.h"
 #include "base/timing_logger.h"
@@ -32,22 +32,23 @@
 #include "gc/accounting/space_bitmap-inl.h"
 #include "gc/heap.h"
 #include "gc/reference_processor.h"
-#include "gc/space/bump_pointer_space.h"
 #include "gc/space/bump_pointer_space-inl.h"
+#include "gc/space/bump_pointer_space.h"
 #include "gc/space/image_space.h"
 #include "gc/space/large_object_space.h"
 #include "gc/space/space-inl.h"
 #include "indirect_reference_table.h"
 #include "intern_table.h"
-#include "jni_internal.h"
+#include "jni/jni_internal.h"
 #include "mark_sweep-inl.h"
-#include "monitor.h"
-#include "mirror/reference-inl.h"
 #include "mirror/object-inl.h"
 #include "mirror/object-refvisitor-inl.h"
+#include "mirror/reference-inl.h"
+#include "monitor.h"
 #include "runtime.h"
 #include "thread-inl.h"
 #include "thread_list.h"
+#include "write_barrier-inl.h"
 
 using ::art::mirror::Object;
 
@@ -114,9 +115,6 @@ SemiSpace::SemiSpace(Heap* heap, bool generational, const std::string& name_pref
 }
 
 void SemiSpace::RunPhases() {
-  //zhangxianlong
-  // leakleak::dump_str("SemiSpace GC");
-  //end
   Thread* self = Thread::Current();
   InitializePhase();
   // Semi-space collector is special since it is sometimes called with the mutators suspended
@@ -253,6 +251,7 @@ void SemiSpace::MarkingPhase() {
     ReaderMutexLock mu(self_, *Locks::heap_bitmap_lock_);
     SweepSystemWeaks();
   }
+  Runtime::Current()->BroadcastForNewSystemWeaks();
   Runtime::Current()->GetClassLinker()->CleanupClassLoaders();
   // Revoke buffers before measuring how many objects were moved since the TLABs need to be revoked
   // before they are properly counted.
@@ -534,7 +533,7 @@ mirror::Object* SemiSpace::MarkNonForwardedObject(mirror::Object* obj) {
       // Dirty the card at the destionation as it may contain
       // references (including the class pointer) to the bump pointer
       // space.
-      GetHeap()->WriteBarrierEveryFieldOf(forward_address);
+      WriteBarrier::ForEveryFieldWrite(forward_address);
       // Handle the bitmaps marking.
       accounting::ContinuousSpaceBitmap* live_bitmap = promo_dest_space_->GetLiveBitmap();
       DCHECK(live_bitmap != nullptr);
@@ -729,7 +728,7 @@ void SemiSpace::ScanObject(Object* obj) {
   DCHECK(!from_space_->HasAddress(obj)) << "Scanning object " << obj << " in from space";
   MarkObjectVisitor visitor(this);
   // Turn off read barrier. ZygoteCompactingCollector doesn't use it (even in the CC build.)
-  obj->VisitReferences</*kVisitNativeRoots*/true, kDefaultVerifyFlags, kWithoutReadBarrier>(
+  obj->VisitReferences</*kVisitNativeRoots=*/true, kDefaultVerifyFlags, kWithoutReadBarrier>(
       visitor, visitor);
 }
 
@@ -737,7 +736,8 @@ void SemiSpace::ScanObject(Object* obj) {
 void SemiSpace::ProcessMarkStack() {
   TimingLogger::ScopedTiming t(__FUNCTION__, GetTimings());
   accounting::ContinuousSpaceBitmap* live_bitmap = nullptr;
-  if (collect_from_space_only_) {
+  const bool collect_from_space_only = collect_from_space_only_;
+  if (collect_from_space_only) {
     // If a bump pointer space only collection (and the promotion is
     // enabled,) we delay the live-bitmap marking of promoted objects
     // from MarkObject() until this function.
@@ -749,7 +749,7 @@ void SemiSpace::ProcessMarkStack() {
   }
   while (!mark_stack_->IsEmpty()) {
     Object* obj = mark_stack_->PopBack();
-    if (collect_from_space_only_ && promo_dest_space_->HasAddress(obj)) {
+    if (collect_from_space_only && promo_dest_space_->HasAddress(obj)) {
       // obj has just been promoted. Mark the live bitmap for it,
       // which is delayed from MarkObject().
       DCHECK(!live_bitmap->Test(obj));

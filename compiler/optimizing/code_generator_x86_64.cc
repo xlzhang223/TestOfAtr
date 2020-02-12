@@ -17,12 +17,17 @@
 #include "code_generator_x86_64.h"
 
 #include "art_method.h"
+#include "class_table.h"
 #include "code_generator_utils.h"
 #include "compiled_method.h"
 #include "entrypoints/quick/quick_entrypoints.h"
 #include "gc/accounting/card_table.h"
+#include "gc/space/image_space.h"
+#include "heap_poisoning.h"
 #include "intrinsics.h"
 #include "intrinsics_x86_64.h"
+#include "linker/linker_patch.h"
+#include "lock_word.h"
 #include "mirror/array-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/object_reference.h"
@@ -51,6 +56,13 @@ static constexpr FloatRegister kFpuCalleeSaves[] = { XMM12, XMM13, XMM14, XMM15 
 
 static constexpr int kC2ConditionMask = 0x400;
 
+static RegisterSet OneRegInReferenceOutSaveEverythingCallerSaves() {
+  // Custom calling convention: RAX serves as both input and output.
+  RegisterSet caller_saves = RegisterSet::Empty();
+  caller_saves.Add(Location::RegisterLocation(RAX));
+  return caller_saves;
+}
+
 // NOLINT on __ macro to suppress wrong warning/fix (misc-macro-parentheses) from clang-tidy.
 #define __ down_cast<X86_64Assembler*>(codegen->GetAssembler())->  // NOLINT
 #define QUICK_ENTRY_POINT(x) QUICK_ENTRYPOINT_OFFSET(kX86_64PointerSize, x).Int32Value()
@@ -59,7 +71,7 @@ class NullCheckSlowPathX86_64 : public SlowPathCode {
  public:
   explicit NullCheckSlowPathX86_64(HNullCheck* instruction) : SlowPathCode(instruction) {}
 
-  void EmitNativeCode(CodeGenerator* codegen) OVERRIDE {
+  void EmitNativeCode(CodeGenerator* codegen) override {
     CodeGeneratorX86_64* x86_64_codegen = down_cast<CodeGeneratorX86_64*>(codegen);
     __ Bind(GetEntryLabel());
     if (instruction_->CanThrowIntoCatchBlock()) {
@@ -73,9 +85,9 @@ class NullCheckSlowPathX86_64 : public SlowPathCode {
     CheckEntrypointTypes<kQuickThrowNullPointer, void, void>();
   }
 
-  bool IsFatal() const OVERRIDE { return true; }
+  bool IsFatal() const override { return true; }
 
-  const char* GetDescription() const OVERRIDE { return "NullCheckSlowPathX86_64"; }
+  const char* GetDescription() const override { return "NullCheckSlowPathX86_64"; }
 
  private:
   DISALLOW_COPY_AND_ASSIGN(NullCheckSlowPathX86_64);
@@ -85,16 +97,16 @@ class DivZeroCheckSlowPathX86_64 : public SlowPathCode {
  public:
   explicit DivZeroCheckSlowPathX86_64(HDivZeroCheck* instruction) : SlowPathCode(instruction) {}
 
-  void EmitNativeCode(CodeGenerator* codegen) OVERRIDE {
+  void EmitNativeCode(CodeGenerator* codegen) override {
     CodeGeneratorX86_64* x86_64_codegen = down_cast<CodeGeneratorX86_64*>(codegen);
     __ Bind(GetEntryLabel());
     x86_64_codegen->InvokeRuntime(kQuickThrowDivZero, instruction_, instruction_->GetDexPc(), this);
     CheckEntrypointTypes<kQuickThrowDivZero, void, void>();
   }
 
-  bool IsFatal() const OVERRIDE { return true; }
+  bool IsFatal() const override { return true; }
 
-  const char* GetDescription() const OVERRIDE { return "DivZeroCheckSlowPathX86_64"; }
+  const char* GetDescription() const override { return "DivZeroCheckSlowPathX86_64"; }
 
  private:
   DISALLOW_COPY_AND_ASSIGN(DivZeroCheckSlowPathX86_64);
@@ -102,12 +114,12 @@ class DivZeroCheckSlowPathX86_64 : public SlowPathCode {
 
 class DivRemMinusOneSlowPathX86_64 : public SlowPathCode {
  public:
-  DivRemMinusOneSlowPathX86_64(HInstruction* at, Register reg, Primitive::Type type, bool is_div)
+  DivRemMinusOneSlowPathX86_64(HInstruction* at, Register reg, DataType::Type type, bool is_div)
       : SlowPathCode(at), cpu_reg_(CpuRegister(reg)), type_(type), is_div_(is_div) {}
 
-  void EmitNativeCode(CodeGenerator* codegen) OVERRIDE {
+  void EmitNativeCode(CodeGenerator* codegen) override {
     __ Bind(GetEntryLabel());
-    if (type_ == Primitive::kPrimInt) {
+    if (type_ == DataType::Type::kInt32) {
       if (is_div_) {
         __ negl(cpu_reg_);
       } else {
@@ -115,7 +127,7 @@ class DivRemMinusOneSlowPathX86_64 : public SlowPathCode {
       }
 
     } else {
-      DCHECK_EQ(Primitive::kPrimLong, type_);
+      DCHECK_EQ(DataType::Type::kInt64, type_);
       if (is_div_) {
         __ negq(cpu_reg_);
       } else {
@@ -125,11 +137,11 @@ class DivRemMinusOneSlowPathX86_64 : public SlowPathCode {
     __ jmp(GetExitLabel());
   }
 
-  const char* GetDescription() const OVERRIDE { return "DivRemMinusOneSlowPathX86_64"; }
+  const char* GetDescription() const override { return "DivRemMinusOneSlowPathX86_64"; }
 
  private:
   const CpuRegister cpu_reg_;
-  const Primitive::Type type_;
+  const DataType::Type type_;
   const bool is_div_;
   DISALLOW_COPY_AND_ASSIGN(DivRemMinusOneSlowPathX86_64);
 };
@@ -139,7 +151,7 @@ class SuspendCheckSlowPathX86_64 : public SlowPathCode {
   SuspendCheckSlowPathX86_64(HSuspendCheck* instruction, HBasicBlock* successor)
       : SlowPathCode(instruction), successor_(successor) {}
 
-  void EmitNativeCode(CodeGenerator* codegen) OVERRIDE {
+  void EmitNativeCode(CodeGenerator* codegen) override {
     LocationSummary* locations = instruction_->GetLocations();
     CodeGeneratorX86_64* x86_64_codegen = down_cast<CodeGeneratorX86_64*>(codegen);
     __ Bind(GetEntryLabel());
@@ -163,7 +175,7 @@ class SuspendCheckSlowPathX86_64 : public SlowPathCode {
     return successor_;
   }
 
-  const char* GetDescription() const OVERRIDE { return "SuspendCheckSlowPathX86_64"; }
+  const char* GetDescription() const override { return "SuspendCheckSlowPathX86_64"; }
 
  private:
   HBasicBlock* const successor_;
@@ -177,7 +189,7 @@ class BoundsCheckSlowPathX86_64 : public SlowPathCode {
   explicit BoundsCheckSlowPathX86_64(HBoundsCheck* instruction)
     : SlowPathCode(instruction) {}
 
-  void EmitNativeCode(CodeGenerator* codegen) OVERRIDE {
+  void EmitNativeCode(CodeGenerator* codegen) override {
     LocationSummary* locations = instruction_->GetLocations();
     CodeGeneratorX86_64* x86_64_codegen = down_cast<CodeGeneratorX86_64*>(codegen);
     __ Bind(GetEntryLabel());
@@ -191,7 +203,8 @@ class BoundsCheckSlowPathX86_64 : public SlowPathCode {
     InvokeRuntimeCallingConvention calling_convention;
     if (array_length->IsArrayLength() && array_length->IsEmittedAtUseSite()) {
       // Load the array length into our temporary.
-      uint32_t len_offset = CodeGenerator::GetArrayLengthOffset(array_length->AsArrayLength());
+      HArrayLength* length = array_length->AsArrayLength();
+      uint32_t len_offset = CodeGenerator::GetArrayLengthOffset(length);
       Location array_loc = array_length->GetLocations()->InAt(0);
       Address array_len(array_loc.AsRegister<CpuRegister>(), len_offset);
       length_loc = Location::RegisterLocation(calling_convention.GetRegisterAt(1));
@@ -201,7 +214,7 @@ class BoundsCheckSlowPathX86_64 : public SlowPathCode {
         length_loc = Location::RegisterLocation(calling_convention.GetRegisterAt(2));
       }
       __ movl(length_loc.AsRegister<CpuRegister>(), array_len);
-      if (mirror::kUseStringCompression) {
+      if (mirror::kUseStringCompression && length->IsStringLength()) {
         __ shrl(length_loc.AsRegister<CpuRegister>(), Immediate(1));
       }
     }
@@ -211,10 +224,10 @@ class BoundsCheckSlowPathX86_64 : public SlowPathCode {
     codegen->EmitParallelMoves(
         locations->InAt(0),
         Location::RegisterLocation(calling_convention.GetRegisterAt(0)),
-        Primitive::kPrimInt,
+        DataType::Type::kInt32,
         length_loc,
         Location::RegisterLocation(calling_convention.GetRegisterAt(1)),
-        Primitive::kPrimInt);
+        DataType::Type::kInt32);
     QuickEntrypointEnum entrypoint = instruction_->AsBoundsCheck()->IsStringCharAt()
         ? kQuickThrowStringBounds
         : kQuickThrowArrayBounds;
@@ -223,9 +236,9 @@ class BoundsCheckSlowPathX86_64 : public SlowPathCode {
     CheckEntrypointTypes<kQuickThrowArrayBounds, void, int32_t, int32_t>();
   }
 
-  bool IsFatal() const OVERRIDE { return true; }
+  bool IsFatal() const override { return true; }
 
-  const char* GetDescription() const OVERRIDE { return "BoundsCheckSlowPathX86_64"; }
+  const char* GetDescription() const override { return "BoundsCheckSlowPathX86_64"; }
 
  private:
   DISALLOW_COPY_AND_ASSIGN(BoundsCheckSlowPathX86_64);
@@ -233,34 +246,41 @@ class BoundsCheckSlowPathX86_64 : public SlowPathCode {
 
 class LoadClassSlowPathX86_64 : public SlowPathCode {
  public:
-  LoadClassSlowPathX86_64(HLoadClass* cls,
-                          HInstruction* at,
-                          uint32_t dex_pc,
-                          bool do_clinit)
-      : SlowPathCode(at), cls_(cls), dex_pc_(dex_pc), do_clinit_(do_clinit) {
+  LoadClassSlowPathX86_64(HLoadClass* cls, HInstruction* at)
+      : SlowPathCode(at), cls_(cls) {
     DCHECK(at->IsLoadClass() || at->IsClinitCheck());
+    DCHECK_EQ(instruction_->IsLoadClass(), cls_ == instruction_);
   }
 
-  void EmitNativeCode(CodeGenerator* codegen) OVERRIDE {
+  void EmitNativeCode(CodeGenerator* codegen) override {
     LocationSummary* locations = instruction_->GetLocations();
+    Location out = locations->Out();
+    const uint32_t dex_pc = instruction_->GetDexPc();
+    bool must_resolve_type = instruction_->IsLoadClass() && cls_->MustResolveTypeOnSlowPath();
+    bool must_do_clinit = instruction_->IsClinitCheck() || cls_->MustGenerateClinitCheck();
+
     CodeGeneratorX86_64* x86_64_codegen = down_cast<CodeGeneratorX86_64*>(codegen);
     __ Bind(GetEntryLabel());
-
     SaveLiveRegisters(codegen, locations);
 
     // Custom calling convention: RAX serves as both input and output.
-    __ movl(CpuRegister(RAX), Immediate(cls_->GetTypeIndex().index_));
-    x86_64_codegen->InvokeRuntime(do_clinit_ ? kQuickInitializeStaticStorage : kQuickInitializeType,
-                                  instruction_,
-                                  dex_pc_,
-                                  this);
-    if (do_clinit_) {
-      CheckEntrypointTypes<kQuickInitializeStaticStorage, void*, uint32_t>();
+    if (must_resolve_type) {
+      DCHECK(IsSameDexFile(cls_->GetDexFile(), x86_64_codegen->GetGraph()->GetDexFile()));
+      dex::TypeIndex type_index = cls_->GetTypeIndex();
+      __ movl(CpuRegister(RAX), Immediate(type_index.index_));
+      x86_64_codegen->InvokeRuntime(kQuickResolveType, instruction_, dex_pc, this);
+      CheckEntrypointTypes<kQuickResolveType, void*, uint32_t>();
+      // If we also must_do_clinit, the resolved type is now in the correct register.
     } else {
-      CheckEntrypointTypes<kQuickInitializeType, void*, uint32_t>();
+      DCHECK(must_do_clinit);
+      Location source = instruction_->IsLoadClass() ? out : locations->InAt(0);
+      x86_64_codegen->Move(Location::RegisterLocation(RAX), source);
+    }
+    if (must_do_clinit) {
+      x86_64_codegen->InvokeRuntime(kQuickInitializeStaticStorage, instruction_, dex_pc, this);
+      CheckEntrypointTypes<kQuickInitializeStaticStorage, void*, mirror::Class*>();
     }
 
-    Location out = locations->Out();
     // Move the class to the desired location.
     if (out.IsValid()) {
       DCHECK(out.IsRegister() && !locations->GetLiveRegisters()->ContainsCoreRegister(out.reg()));
@@ -268,29 +288,14 @@ class LoadClassSlowPathX86_64 : public SlowPathCode {
     }
 
     RestoreLiveRegisters(codegen, locations);
-    // For HLoadClass/kBssEntry, store the resolved Class to the BSS entry.
-    DCHECK_EQ(instruction_->IsLoadClass(), cls_ == instruction_);
-    if (cls_ == instruction_ && cls_->GetLoadKind() == HLoadClass::LoadKind::kBssEntry) {
-      DCHECK(out.IsValid());
-      __ movl(Address::Absolute(CodeGeneratorX86_64::kDummy32BitOffset, /* no_rip */ false),
-              locations->Out().AsRegister<CpuRegister>());
-      Label* fixup_label = x86_64_codegen->NewTypeBssEntryPatch(cls_);
-      __ Bind(fixup_label);
-    }
     __ jmp(GetExitLabel());
   }
 
-  const char* GetDescription() const OVERRIDE { return "LoadClassSlowPathX86_64"; }
+  const char* GetDescription() const override { return "LoadClassSlowPathX86_64"; }
 
  private:
   // The class this slow path will load.
   HLoadClass* const cls_;
-
-  // The dex PC of `at_`.
-  const uint32_t dex_pc_;
-
-  // Whether to initialize the class.
-  const bool do_clinit_;
 
   DISALLOW_COPY_AND_ASSIGN(LoadClassSlowPathX86_64);
 };
@@ -299,7 +304,7 @@ class LoadStringSlowPathX86_64 : public SlowPathCode {
  public:
   explicit LoadStringSlowPathX86_64(HLoadString* instruction) : SlowPathCode(instruction) {}
 
-  void EmitNativeCode(CodeGenerator* codegen) OVERRIDE {
+  void EmitNativeCode(CodeGenerator* codegen) override {
     LocationSummary* locations = instruction_->GetLocations();
     DCHECK(!locations->GetLiveRegisters()->ContainsCoreRegister(locations->Out().reg()));
 
@@ -318,16 +323,10 @@ class LoadStringSlowPathX86_64 : public SlowPathCode {
     x86_64_codegen->Move(locations->Out(), Location::RegisterLocation(RAX));
     RestoreLiveRegisters(codegen, locations);
 
-    // Store the resolved String to the BSS entry.
-    __ movl(Address::Absolute(CodeGeneratorX86_64::kDummy32BitOffset, /* no_rip */ false),
-            locations->Out().AsRegister<CpuRegister>());
-    Label* fixup_label = x86_64_codegen->NewStringBssEntryPatch(instruction_->AsLoadString());
-    __ Bind(fixup_label);
-
     __ jmp(GetExitLabel());
   }
 
-  const char* GetDescription() const OVERRIDE { return "LoadStringSlowPathX86_64"; }
+  const char* GetDescription() const override { return "LoadStringSlowPathX86_64"; }
 
  private:
   DISALLOW_COPY_AND_ASSIGN(LoadStringSlowPathX86_64);
@@ -338,7 +337,7 @@ class TypeCheckSlowPathX86_64 : public SlowPathCode {
   TypeCheckSlowPathX86_64(HInstruction* instruction, bool is_fatal)
       : SlowPathCode(instruction), is_fatal_(is_fatal) {}
 
-  void EmitNativeCode(CodeGenerator* codegen) OVERRIDE {
+  void EmitNativeCode(CodeGenerator* codegen) override {
     LocationSummary* locations = instruction_->GetLocations();
     uint32_t dex_pc = instruction_->GetDexPc();
     DCHECK(instruction_->IsCheckCast()
@@ -347,7 +346,14 @@ class TypeCheckSlowPathX86_64 : public SlowPathCode {
     CodeGeneratorX86_64* x86_64_codegen = down_cast<CodeGeneratorX86_64*>(codegen);
     __ Bind(GetEntryLabel());
 
-    if (!is_fatal_) {
+    if (kPoisonHeapReferences &&
+        instruction_->IsCheckCast() &&
+        instruction_->AsCheckCast()->GetTypeCheckKind() == TypeCheckKind::kInterfaceCheck) {
+      // First, unpoison the `cls` reference that was poisoned for direct memory comparison.
+      __ UnpoisonHeapReference(locations->InAt(1).AsRegister<CpuRegister>());
+    }
+
+    if (!is_fatal_ || instruction_->CanThrowIntoCatchBlock()) {
       SaveLiveRegisters(codegen, locations);
     }
 
@@ -356,10 +362,10 @@ class TypeCheckSlowPathX86_64 : public SlowPathCode {
     InvokeRuntimeCallingConvention calling_convention;
     codegen->EmitParallelMoves(locations->InAt(0),
                                Location::RegisterLocation(calling_convention.GetRegisterAt(0)),
-                               Primitive::kPrimNot,
+                               DataType::Type::kReference,
                                locations->InAt(1),
                                Location::RegisterLocation(calling_convention.GetRegisterAt(1)),
-                               Primitive::kPrimNot);
+                               DataType::Type::kReference);
     if (instruction_->IsInstanceOf()) {
       x86_64_codegen->InvokeRuntime(kQuickInstanceofNonTrivial, instruction_, dex_pc, this);
       CheckEntrypointTypes<kQuickInstanceofNonTrivial, size_t, mirror::Object*, mirror::Class*>();
@@ -379,9 +385,9 @@ class TypeCheckSlowPathX86_64 : public SlowPathCode {
     }
   }
 
-  const char* GetDescription() const OVERRIDE { return "TypeCheckSlowPathX86_64"; }
+  const char* GetDescription() const override { return "TypeCheckSlowPathX86_64"; }
 
-  bool IsFatal() const OVERRIDE { return is_fatal_; }
+  bool IsFatal() const override { return is_fatal_; }
 
  private:
   const bool is_fatal_;
@@ -394,7 +400,7 @@ class DeoptimizationSlowPathX86_64 : public SlowPathCode {
   explicit DeoptimizationSlowPathX86_64(HDeoptimize* instruction)
       : SlowPathCode(instruction) {}
 
-  void EmitNativeCode(CodeGenerator* codegen) OVERRIDE {
+  void EmitNativeCode(CodeGenerator* codegen) override {
     CodeGeneratorX86_64* x86_64_codegen = down_cast<CodeGeneratorX86_64*>(codegen);
     __ Bind(GetEntryLabel());
     LocationSummary* locations = instruction_->GetLocations();
@@ -407,7 +413,7 @@ class DeoptimizationSlowPathX86_64 : public SlowPathCode {
     CheckEntrypointTypes<kQuickDeoptimize, void, DeoptimizationKind>();
   }
 
-  const char* GetDescription() const OVERRIDE { return "DeoptimizationSlowPathX86_64"; }
+  const char* GetDescription() const override { return "DeoptimizationSlowPathX86_64"; }
 
  private:
   DISALLOW_COPY_AND_ASSIGN(DeoptimizationSlowPathX86_64);
@@ -417,27 +423,27 @@ class ArraySetSlowPathX86_64 : public SlowPathCode {
  public:
   explicit ArraySetSlowPathX86_64(HInstruction* instruction) : SlowPathCode(instruction) {}
 
-  void EmitNativeCode(CodeGenerator* codegen) OVERRIDE {
+  void EmitNativeCode(CodeGenerator* codegen) override {
     LocationSummary* locations = instruction_->GetLocations();
     __ Bind(GetEntryLabel());
     SaveLiveRegisters(codegen, locations);
 
     InvokeRuntimeCallingConvention calling_convention;
-    HParallelMove parallel_move(codegen->GetGraph()->GetArena());
+    HParallelMove parallel_move(codegen->GetGraph()->GetAllocator());
     parallel_move.AddMove(
         locations->InAt(0),
         Location::RegisterLocation(calling_convention.GetRegisterAt(0)),
-        Primitive::kPrimNot,
+        DataType::Type::kReference,
         nullptr);
     parallel_move.AddMove(
         locations->InAt(1),
         Location::RegisterLocation(calling_convention.GetRegisterAt(1)),
-        Primitive::kPrimInt,
+        DataType::Type::kInt32,
         nullptr);
     parallel_move.AddMove(
         locations->InAt(2),
         Location::RegisterLocation(calling_convention.GetRegisterAt(2)),
-        Primitive::kPrimNot,
+        DataType::Type::kReference,
         nullptr);
     codegen->GetMoveResolver()->EmitNativeCode(&parallel_move);
 
@@ -448,7 +454,7 @@ class ArraySetSlowPathX86_64 : public SlowPathCode {
     __ jmp(GetExitLabel());
   }
 
-  const char* GetDescription() const OVERRIDE { return "ArraySetSlowPathX86_64"; }
+  const char* GetDescription() const override { return "ArraySetSlowPathX86_64"; }
 
  private:
   DISALLOW_COPY_AND_ASSIGN(ArraySetSlowPathX86_64);
@@ -476,9 +482,9 @@ class ReadBarrierMarkSlowPathX86_64 : public SlowPathCode {
     DCHECK(kEmitCompilerReadBarrier);
   }
 
-  const char* GetDescription() const OVERRIDE { return "ReadBarrierMarkSlowPathX86_64"; }
+  const char* GetDescription() const override { return "ReadBarrierMarkSlowPathX86_64"; }
 
-  void EmitNativeCode(CodeGenerator* codegen) OVERRIDE {
+  void EmitNativeCode(CodeGenerator* codegen) override {
     LocationSummary* locations = instruction_->GetLocations();
     CpuRegister ref_cpu_reg = ref_.AsRegister<CpuRegister>();
     Register ref_reg = ref_cpu_reg.AsRegister();
@@ -523,7 +529,7 @@ class ReadBarrierMarkSlowPathX86_64 : public SlowPathCode {
     //   rX <- ReadBarrierMarkRegX(rX)
     //
     int32_t entry_point_offset =
-        CodeGenerator::GetReadBarrierMarkEntryPointsOffset<kX86_64PointerSize>(ref_reg);
+        Thread::ReadBarrierMarkEntryPointsOffset<kX86_64PointerSize>(ref_reg);
     // This runtime call does not require a stack map.
     x86_64_codegen->InvokeRuntimeWithoutRecordingPcInfo(entry_point_offset, instruction_, this);
     __ jmp(GetExitLabel());
@@ -567,11 +573,11 @@ class ReadBarrierMarkAndUpdateFieldSlowPathX86_64 : public SlowPathCode {
     DCHECK(kEmitCompilerReadBarrier);
   }
 
-  const char* GetDescription() const OVERRIDE {
+  const char* GetDescription() const override {
     return "ReadBarrierMarkAndUpdateFieldSlowPathX86_64";
   }
 
-  void EmitNativeCode(CodeGenerator* codegen) OVERRIDE {
+  void EmitNativeCode(CodeGenerator* codegen) override {
     LocationSummary* locations = instruction_->GetLocations();
     CpuRegister ref_cpu_reg = ref_.AsRegister<CpuRegister>();
     Register ref_reg = ref_cpu_reg.AsRegister();
@@ -614,7 +620,7 @@ class ReadBarrierMarkAndUpdateFieldSlowPathX86_64 : public SlowPathCode {
     //   rX <- ReadBarrierMarkRegX(rX)
     //
     int32_t entry_point_offset =
-        CodeGenerator::GetReadBarrierMarkEntryPointsOffset<kX86_64PointerSize>(ref_reg);
+        Thread::ReadBarrierMarkEntryPointsOffset<kX86_64PointerSize>(ref_reg);
     // This runtime call does not require a stack map.
     x86_64_codegen->InvokeRuntimeWithoutRecordingPcInfo(entry_point_offset, instruction_, this);
 
@@ -739,7 +745,7 @@ class ReadBarrierForHeapReferenceSlowPathX86_64 : public SlowPathCode {
     DCHECK(!obj.Equals(ref)) << "obj=" << obj << " ref=" << ref;
 }
 
-  void EmitNativeCode(CodeGenerator* codegen) OVERRIDE {
+  void EmitNativeCode(CodeGenerator* codegen) override {
     CodeGeneratorX86_64* x86_64_codegen = down_cast<CodeGeneratorX86_64*>(codegen);
     LocationSummary* locations = instruction_->GetLocations();
     CpuRegister reg_out = out_.AsRegister<CpuRegister>();
@@ -827,19 +833,19 @@ class ReadBarrierForHeapReferenceSlowPathX86_64 : public SlowPathCode {
     // We're moving two or three locations to locations that could
     // overlap, so we need a parallel move resolver.
     InvokeRuntimeCallingConvention calling_convention;
-    HParallelMove parallel_move(codegen->GetGraph()->GetArena());
+    HParallelMove parallel_move(codegen->GetGraph()->GetAllocator());
     parallel_move.AddMove(ref_,
                           Location::RegisterLocation(calling_convention.GetRegisterAt(0)),
-                          Primitive::kPrimNot,
+                          DataType::Type::kReference,
                           nullptr);
     parallel_move.AddMove(obj_,
                           Location::RegisterLocation(calling_convention.GetRegisterAt(1)),
-                          Primitive::kPrimNot,
+                          DataType::Type::kReference,
                           nullptr);
     if (index.IsValid()) {
       parallel_move.AddMove(index,
                             Location::RegisterLocation(calling_convention.GetRegisterAt(2)),
-                            Primitive::kPrimInt,
+                            DataType::Type::kInt32,
                             nullptr);
       codegen->GetMoveResolver()->EmitNativeCode(&parallel_move);
     } else {
@@ -858,7 +864,7 @@ class ReadBarrierForHeapReferenceSlowPathX86_64 : public SlowPathCode {
     __ jmp(GetExitLabel());
   }
 
-  const char* GetDescription() const OVERRIDE {
+  const char* GetDescription() const override {
     return "ReadBarrierForHeapReferenceSlowPathX86_64";
   }
 
@@ -900,7 +906,7 @@ class ReadBarrierForRootSlowPathX86_64 : public SlowPathCode {
     DCHECK(kEmitCompilerReadBarrier);
   }
 
-  void EmitNativeCode(CodeGenerator* codegen) OVERRIDE {
+  void EmitNativeCode(CodeGenerator* codegen) override {
     LocationSummary* locations = instruction_->GetLocations();
     DCHECK(locations->CanCall());
     DCHECK(!locations->GetLiveRegisters()->ContainsCoreRegister(out_.reg()));
@@ -925,7 +931,7 @@ class ReadBarrierForRootSlowPathX86_64 : public SlowPathCode {
     __ jmp(GetExitLabel());
   }
 
-  const char* GetDescription() const OVERRIDE { return "ReadBarrierForRootSlowPathX86_64"; }
+  const char* GetDescription() const override { return "ReadBarrierForRootSlowPathX86_64"; }
 
  private:
   const Location out_;
@@ -965,73 +971,60 @@ inline Condition X86_64FPCondition(IfCondition cond) {
     case kCondGT: return kAbove;
     case kCondGE: return kAboveEqual;
     default:      break;  // should not happen
-  };
+  }
   LOG(FATAL) << "Unreachable";
   UNREACHABLE();
 }
 
 HInvokeStaticOrDirect::DispatchInfo CodeGeneratorX86_64::GetSupportedInvokeStaticOrDirectDispatch(
       const HInvokeStaticOrDirect::DispatchInfo& desired_dispatch_info,
-      HInvokeStaticOrDirect* invoke ATTRIBUTE_UNUSED) {
+      ArtMethod* method ATTRIBUTE_UNUSED) {
   return desired_dispatch_info;
 }
 
-Location CodeGeneratorX86_64::GenerateCalleeMethodStaticOrDirectCall(HInvokeStaticOrDirect* invoke,
-                                                                     Location temp) {
+void CodeGeneratorX86_64::GenerateStaticOrDirectCall(
+    HInvokeStaticOrDirect* invoke, Location temp, SlowPathCode* slow_path) {
   // All registers are assumed to be correctly set up.
+
   Location callee_method = temp;  // For all kinds except kRecursive, callee will be in temp.
   switch (invoke->GetMethodLoadKind()) {
     case HInvokeStaticOrDirect::MethodLoadKind::kStringInit: {
       // temp = thread->string_init_entrypoint
       uint32_t offset =
           GetThreadOffset<kX86_64PointerSize>(invoke->GetStringInitEntryPoint()).Int32Value();
-      __ gs()->movq(temp.AsRegister<CpuRegister>(), Address::Absolute(offset, /* no_rip */ true));
+      __ gs()->movq(temp.AsRegister<CpuRegister>(), Address::Absolute(offset, /* no_rip= */ true));
       break;
     }
     case HInvokeStaticOrDirect::MethodLoadKind::kRecursive:
       callee_method = invoke->GetLocations()->InAt(invoke->GetSpecialInputIndex());
       break;
-    case HInvokeStaticOrDirect::MethodLoadKind::kDirectAddress:
+    case HInvokeStaticOrDirect::MethodLoadKind::kBootImageLinkTimePcRelative:
+      DCHECK(GetCompilerOptions().IsBootImage());
+      __ leal(temp.AsRegister<CpuRegister>(),
+              Address::Absolute(kDummy32BitOffset, /* no_rip= */ false));
+      RecordBootImageMethodPatch(invoke);
+      break;
+    case HInvokeStaticOrDirect::MethodLoadKind::kBootImageRelRo: {
+      // Note: Boot image is in the low 4GiB and the entry is 32-bit, so emit a 32-bit load.
+      __ movl(temp.AsRegister<CpuRegister>(),
+              Address::Absolute(kDummy32BitOffset, /* no_rip= */ false));
+      RecordBootImageRelRoPatch(GetBootImageOffset(invoke));
+      break;
+    }
+    case HInvokeStaticOrDirect::MethodLoadKind::kBssEntry: {
+      __ movq(temp.AsRegister<CpuRegister>(),
+              Address::Absolute(kDummy32BitOffset, /* no_rip= */ false));
+      RecordMethodBssEntryPatch(invoke);
+      break;
+    }
+    case HInvokeStaticOrDirect::MethodLoadKind::kJitDirectAddress:
       Load64BitValue(temp.AsRegister<CpuRegister>(), invoke->GetMethodAddress());
       break;
-    case HInvokeStaticOrDirect::MethodLoadKind::kDexCachePcRelative: {
-      __ movq(temp.AsRegister<CpuRegister>(),
-              Address::Absolute(kDummy32BitOffset, /* no_rip */ false));
-      // Bind a new fixup label at the end of the "movl" insn.
-      uint32_t offset = invoke->GetDexCacheArrayOffset();
-      __ Bind(NewPcRelativeDexCacheArrayPatch(invoke->GetDexFileForPcRelativeDexCache(), offset));
-      break;
-    }
-    case HInvokeStaticOrDirect::MethodLoadKind::kDexCacheViaMethod: {
-      Location current_method = invoke->GetLocations()->InAt(invoke->GetSpecialInputIndex());
-      Register method_reg;
-      CpuRegister reg = temp.AsRegister<CpuRegister>();
-      if (current_method.IsRegister()) {
-        method_reg = current_method.AsRegister<Register>();
-      } else {
-        DCHECK(invoke->GetLocations()->Intrinsified());
-        DCHECK(!current_method.IsValid());
-        method_reg = reg.AsRegister();
-        __ movq(reg, Address(CpuRegister(RSP), kCurrentMethodStackOffset));
-      }
-      // /* ArtMethod*[] */ temp = temp.ptr_sized_fields_->dex_cache_resolved_methods_;
-      __ movq(reg,
-              Address(CpuRegister(method_reg),
-                      ArtMethod::DexCacheResolvedMethodsOffset(kX86_64PointerSize).SizeValue()));
-      // temp = temp[index_in_cache];
-      // Note: Don't use invoke->GetTargetMethod() as it may point to a different dex file.
-      uint32_t index_in_cache = invoke->GetDexMethodIndex();
-      __ movq(reg, Address(reg, CodeGenerator::GetCachePointerOffset(index_in_cache)));
-      break;
+    case HInvokeStaticOrDirect::MethodLoadKind::kRuntimeCall: {
+      GenerateInvokeStaticOrDirectRuntimeCall(invoke, temp, slow_path);
+      return;  // No code pointer retrieval; the runtime performs the call directly.
     }
   }
-  return callee_method;
-}
-
-void CodeGeneratorX86_64::GenerateStaticOrDirectCall(HInvokeStaticOrDirect* invoke,
-                                                     Location temp) {
-  // All registers are assumed to be correctly set up.
-  Location callee_method = GenerateCalleeMethodStaticOrDirectCall(invoke, temp);
 
   switch (invoke->GetCodePtrLocation()) {
     case HInvokeStaticOrDirect::CodePtrLocation::kCallSelf:
@@ -1044,11 +1037,13 @@ void CodeGeneratorX86_64::GenerateStaticOrDirectCall(HInvokeStaticOrDirect* invo
                           kX86_64PointerSize).SizeValue()));
       break;
   }
+  RecordPcInfo(invoke, invoke->GetDexPc(), slow_path);
 
   DCHECK(!IsLeafMethod());
 }
 
-void CodeGeneratorX86_64::GenerateVirtualCall(HInvokeVirtual* invoke, Location temp_in) {
+void CodeGeneratorX86_64::GenerateVirtualCall(
+    HInvokeVirtual* invoke, Location temp_in, SlowPathCode* slow_path) {
   CpuRegister temp = temp_in.AsRegister<CpuRegister>();
   size_t method_offset = mirror::Class::EmbeddedVTableEntryOffset(
       invoke->GetVTableIndex(), kX86_64PointerSize).SizeValue();
@@ -1077,74 +1072,148 @@ void CodeGeneratorX86_64::GenerateVirtualCall(HInvokeVirtual* invoke, Location t
   // call temp->GetEntryPoint();
   __ call(Address(temp, ArtMethod::EntryPointFromQuickCompiledCodeOffset(
       kX86_64PointerSize).SizeValue()));
+  RecordPcInfo(invoke, invoke->GetDexPc(), slow_path);
 }
 
-void CodeGeneratorX86_64::RecordBootStringPatch(HLoadString* load_string) {
-  DCHECK(GetCompilerOptions().IsBootImage());
-  string_patches_.emplace_back(load_string->GetDexFile(), load_string->GetStringIndex().index_);
-  __ Bind(&string_patches_.back().label);
+void CodeGeneratorX86_64::RecordBootImageIntrinsicPatch(uint32_t intrinsic_data) {
+  boot_image_intrinsic_patches_.emplace_back(/* target_dex_file= */ nullptr, intrinsic_data);
+  __ Bind(&boot_image_intrinsic_patches_.back().label);
 }
 
-void CodeGeneratorX86_64::RecordBootTypePatch(HLoadClass* load_class) {
-  boot_image_type_patches_.emplace_back(load_class->GetDexFile(),
-                                        load_class->GetTypeIndex().index_);
+void CodeGeneratorX86_64::RecordBootImageRelRoPatch(uint32_t boot_image_offset) {
+  boot_image_method_patches_.emplace_back(/* target_dex_file= */ nullptr, boot_image_offset);
+  __ Bind(&boot_image_method_patches_.back().label);
+}
+
+void CodeGeneratorX86_64::RecordBootImageMethodPatch(HInvokeStaticOrDirect* invoke) {
+  boot_image_method_patches_.emplace_back(
+      invoke->GetTargetMethod().dex_file, invoke->GetTargetMethod().index);
+  __ Bind(&boot_image_method_patches_.back().label);
+}
+
+void CodeGeneratorX86_64::RecordMethodBssEntryPatch(HInvokeStaticOrDirect* invoke) {
+  method_bss_entry_patches_.emplace_back(&GetGraph()->GetDexFile(), invoke->GetDexMethodIndex());
+  __ Bind(&method_bss_entry_patches_.back().label);
+}
+
+void CodeGeneratorX86_64::RecordBootImageTypePatch(HLoadClass* load_class) {
+  boot_image_type_patches_.emplace_back(
+      &load_class->GetDexFile(), load_class->GetTypeIndex().index_);
   __ Bind(&boot_image_type_patches_.back().label);
 }
 
 Label* CodeGeneratorX86_64::NewTypeBssEntryPatch(HLoadClass* load_class) {
-  type_bss_entry_patches_.emplace_back(load_class->GetDexFile(), load_class->GetTypeIndex().index_);
+  type_bss_entry_patches_.emplace_back(
+      &load_class->GetDexFile(), load_class->GetTypeIndex().index_);
   return &type_bss_entry_patches_.back().label;
 }
 
-Label* CodeGeneratorX86_64::NewStringBssEntryPatch(HLoadString* load_string) {
-  DCHECK(!GetCompilerOptions().IsBootImage());
-  string_patches_.emplace_back(load_string->GetDexFile(), load_string->GetStringIndex().index_);
-  return &string_patches_.back().label;
+void CodeGeneratorX86_64::RecordBootImageStringPatch(HLoadString* load_string) {
+  boot_image_string_patches_.emplace_back(
+      &load_string->GetDexFile(), load_string->GetStringIndex().index_);
+  __ Bind(&boot_image_string_patches_.back().label);
 }
 
-Label* CodeGeneratorX86_64::NewPcRelativeDexCacheArrayPatch(const DexFile& dex_file,
-                                                            uint32_t element_offset) {
-  // Add a patch entry and return the label.
-  pc_relative_dex_cache_patches_.emplace_back(dex_file, element_offset);
-  return &pc_relative_dex_cache_patches_.back().label;
+Label* CodeGeneratorX86_64::NewStringBssEntryPatch(HLoadString* load_string) {
+  string_bss_entry_patches_.emplace_back(
+      &load_string->GetDexFile(), load_string->GetStringIndex().index_);
+  return &string_bss_entry_patches_.back().label;
+}
+
+void CodeGeneratorX86_64::LoadBootImageAddress(CpuRegister reg, uint32_t boot_image_reference) {
+  if (GetCompilerOptions().IsBootImage()) {
+    __ leal(reg, Address::Absolute(CodeGeneratorX86_64::kDummy32BitOffset, /* no_rip= */ false));
+    RecordBootImageIntrinsicPatch(boot_image_reference);
+  } else if (GetCompilerOptions().GetCompilePic()) {
+    __ movl(reg, Address::Absolute(CodeGeneratorX86_64::kDummy32BitOffset, /* no_rip= */ false));
+    RecordBootImageRelRoPatch(boot_image_reference);
+  } else {
+    DCHECK(Runtime::Current()->UseJitCompilation());
+    gc::Heap* heap = Runtime::Current()->GetHeap();
+    DCHECK(!heap->GetBootImageSpaces().empty());
+    const uint8_t* address = heap->GetBootImageSpaces()[0]->Begin() + boot_image_reference;
+    __ movl(reg, Immediate(dchecked_integral_cast<uint32_t>(reinterpret_cast<uintptr_t>(address))));
+  }
+}
+
+void CodeGeneratorX86_64::AllocateInstanceForIntrinsic(HInvokeStaticOrDirect* invoke,
+                                                       uint32_t boot_image_offset) {
+  DCHECK(invoke->IsStatic());
+  InvokeRuntimeCallingConvention calling_convention;
+  CpuRegister argument = CpuRegister(calling_convention.GetRegisterAt(0));
+  if (GetCompilerOptions().IsBootImage()) {
+    DCHECK_EQ(boot_image_offset, IntrinsicVisitor::IntegerValueOfInfo::kInvalidReference);
+    // Load the class the same way as for HLoadClass::LoadKind::kBootImageLinkTimePcRelative.
+    __ leal(argument,
+            Address::Absolute(CodeGeneratorX86_64::kDummy32BitOffset, /* no_rip= */ false));
+    MethodReference target_method = invoke->GetTargetMethod();
+    dex::TypeIndex type_idx = target_method.dex_file->GetMethodId(target_method.index).class_idx_;
+    boot_image_type_patches_.emplace_back(target_method.dex_file, type_idx.index_);
+    __ Bind(&boot_image_type_patches_.back().label);
+  } else {
+    LoadBootImageAddress(argument, boot_image_offset);
+  }
+  InvokeRuntime(kQuickAllocObjectInitialized, invoke, invoke->GetDexPc());
+  CheckEntrypointTypes<kQuickAllocObjectWithChecks, void*, mirror::Class*>();
 }
 
 // The label points to the end of the "movl" or another instruction but the literal offset
 // for method patch needs to point to the embedded constant which occupies the last 4 bytes.
 constexpr uint32_t kLabelPositionToLiteralOffsetAdjustment = 4u;
 
-template <LinkerPatch (*Factory)(size_t, const DexFile*, uint32_t, uint32_t)>
+template <linker::LinkerPatch (*Factory)(size_t, const DexFile*, uint32_t, uint32_t)>
 inline void CodeGeneratorX86_64::EmitPcRelativeLinkerPatches(
     const ArenaDeque<PatchInfo<Label>>& infos,
-    ArenaVector<LinkerPatch>* linker_patches) {
+    ArenaVector<linker::LinkerPatch>* linker_patches) {
   for (const PatchInfo<Label>& info : infos) {
     uint32_t literal_offset = info.label.Position() - kLabelPositionToLiteralOffsetAdjustment;
     linker_patches->push_back(
-        Factory(literal_offset, &info.dex_file, info.label.Position(), info.index));
+        Factory(literal_offset, info.target_dex_file, info.label.Position(), info.offset_or_index));
   }
 }
 
-void CodeGeneratorX86_64::EmitLinkerPatches(ArenaVector<LinkerPatch>* linker_patches) {
+template <linker::LinkerPatch (*Factory)(size_t, uint32_t, uint32_t)>
+linker::LinkerPatch NoDexFileAdapter(size_t literal_offset,
+                                     const DexFile* target_dex_file,
+                                     uint32_t pc_insn_offset,
+                                     uint32_t boot_image_offset) {
+  DCHECK(target_dex_file == nullptr);  // Unused for these patches, should be null.
+  return Factory(literal_offset, pc_insn_offset, boot_image_offset);
+}
+
+void CodeGeneratorX86_64::EmitLinkerPatches(ArenaVector<linker::LinkerPatch>* linker_patches) {
   DCHECK(linker_patches->empty());
   size_t size =
-      pc_relative_dex_cache_patches_.size() +
-      string_patches_.size() +
+      boot_image_method_patches_.size() +
+      method_bss_entry_patches_.size() +
       boot_image_type_patches_.size() +
-      type_bss_entry_patches_.size();
+      type_bss_entry_patches_.size() +
+      boot_image_string_patches_.size() +
+      string_bss_entry_patches_.size() +
+      boot_image_intrinsic_patches_.size();
   linker_patches->reserve(size);
-  EmitPcRelativeLinkerPatches<LinkerPatch::DexCacheArrayPatch>(pc_relative_dex_cache_patches_,
-                                                               linker_patches);
-  if (!GetCompilerOptions().IsBootImage()) {
-    DCHECK(boot_image_type_patches_.empty());
-    EmitPcRelativeLinkerPatches<LinkerPatch::StringBssEntryPatch>(string_patches_, linker_patches);
+  if (GetCompilerOptions().IsBootImage()) {
+    EmitPcRelativeLinkerPatches<linker::LinkerPatch::RelativeMethodPatch>(
+        boot_image_method_patches_, linker_patches);
+    EmitPcRelativeLinkerPatches<linker::LinkerPatch::RelativeTypePatch>(
+        boot_image_type_patches_, linker_patches);
+    EmitPcRelativeLinkerPatches<linker::LinkerPatch::RelativeStringPatch>(
+        boot_image_string_patches_, linker_patches);
+    EmitPcRelativeLinkerPatches<NoDexFileAdapter<linker::LinkerPatch::IntrinsicReferencePatch>>(
+        boot_image_intrinsic_patches_, linker_patches);
   } else {
-    // These are always PC-relative, see GetSupportedLoadClassKind()/GetSupportedLoadStringKind().
-    EmitPcRelativeLinkerPatches<LinkerPatch::RelativeTypePatch>(boot_image_type_patches_,
-                                                                linker_patches);
-    EmitPcRelativeLinkerPatches<LinkerPatch::RelativeStringPatch>(string_patches_, linker_patches);
+    EmitPcRelativeLinkerPatches<NoDexFileAdapter<linker::LinkerPatch::DataBimgRelRoPatch>>(
+        boot_image_method_patches_, linker_patches);
+    DCHECK(boot_image_type_patches_.empty());
+    DCHECK(boot_image_string_patches_.empty());
+    DCHECK(boot_image_intrinsic_patches_.empty());
   }
-  EmitPcRelativeLinkerPatches<LinkerPatch::TypeBssEntryPatch>(type_bss_entry_patches_,
-                                                              linker_patches);
+  EmitPcRelativeLinkerPatches<linker::LinkerPatch::MethodBssEntryPatch>(
+      method_bss_entry_patches_, linker_patches);
+  EmitPcRelativeLinkerPatches<linker::LinkerPatch::TypeBssEntryPatch>(
+      type_bss_entry_patches_, linker_patches);
+  EmitPcRelativeLinkerPatches<linker::LinkerPatch::StringBssEntryPatch>(
+      string_bss_entry_patches_, linker_patches);
   DCHECK_EQ(size, linker_patches->size());
 }
 
@@ -1154,6 +1223,10 @@ void CodeGeneratorX86_64::DumpCoreRegister(std::ostream& stream, int reg) const 
 
 void CodeGeneratorX86_64::DumpFloatingPointRegister(std::ostream& stream, int reg) const {
   stream << FloatRegister(reg);
+}
+
+const X86_64InstructionSetFeatures& CodeGeneratorX86_64::GetInstructionSetFeatures() const {
+  return *GetCompilerOptions().GetInstructionSetFeatures()->AsX86_64InstructionSetFeatures();
 }
 
 size_t CodeGeneratorX86_64::SaveCoreRegister(size_t stack_index, uint32_t reg_id) {
@@ -1203,14 +1276,13 @@ void CodeGeneratorX86_64::InvokeRuntimeWithoutRecordingPcInfo(int32_t entry_poin
 }
 
 void CodeGeneratorX86_64::GenerateInvokeRuntime(int32_t entry_point_offset) {
-  __ gs()->call(Address::Absolute(entry_point_offset, /* no_rip */ true));
+  __ gs()->call(Address::Absolute(entry_point_offset, /* no_rip= */ true));
 }
 
 static constexpr int kNumberOfCpuRegisterPairs = 0;
 // Use a fake return address register to mimic Quick.
 static constexpr Register kFakeReturnRegister = Register(kLastCpuRegister + 1);
 CodeGeneratorX86_64::CodeGeneratorX86_64(HGraph* graph,
-                                         const X86_64InstructionSetFeatures& isa_features,
                                          const CompilerOptions& compiler_options,
                                          OptimizingCompilerStats* stats)
       : CodeGenerator(graph,
@@ -1227,17 +1299,19 @@ CodeGeneratorX86_64::CodeGeneratorX86_64(HGraph* graph,
         block_labels_(nullptr),
         location_builder_(graph, this),
         instruction_visitor_(graph, this),
-        move_resolver_(graph->GetArena(), this),
-        assembler_(graph->GetArena()),
-        isa_features_(isa_features),
+        move_resolver_(graph->GetAllocator(), this),
+        assembler_(graph->GetAllocator()),
         constant_area_start_(0),
-        pc_relative_dex_cache_patches_(graph->GetArena()->Adapter(kArenaAllocCodeGenerator)),
-        string_patches_(graph->GetArena()->Adapter(kArenaAllocCodeGenerator)),
-        boot_image_type_patches_(graph->GetArena()->Adapter(kArenaAllocCodeGenerator)),
-        type_bss_entry_patches_(graph->GetArena()->Adapter(kArenaAllocCodeGenerator)),
-        fixups_to_jump_tables_(graph->GetArena()->Adapter(kArenaAllocCodeGenerator)),
-        jit_string_patches_(graph->GetArena()->Adapter(kArenaAllocCodeGenerator)),
-        jit_class_patches_(graph->GetArena()->Adapter(kArenaAllocCodeGenerator)) {
+        boot_image_method_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
+        method_bss_entry_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
+        boot_image_type_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
+        type_bss_entry_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
+        boot_image_string_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
+        string_bss_entry_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
+        boot_image_intrinsic_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
+        jit_string_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
+        jit_class_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
+        fixups_to_jump_tables_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)) {
   AddAllocatedRegister(Location::RegisterLocation(kFakeReturnRegister));
 }
 
@@ -1270,9 +1344,15 @@ void CodeGeneratorX86_64::GenerateFrameEntry() {
       && !FrameNeedsStackCheck(GetFrameSize(), InstructionSet::kX86_64);
   DCHECK(GetCompilerOptions().GetImplicitStackOverflowChecks());
 
+  if (GetCompilerOptions().CountHotnessInCompiledCode()) {
+    __ addw(Address(CpuRegister(kMethodRegisterArgument),
+                    ArtMethod::HotnessCountOffset().Int32Value()),
+            Immediate(1));
+  }
+
   if (!skip_overflow_check) {
-    __ testq(CpuRegister(RAX), Address(
-        CpuRegister(RSP), -static_cast<int32_t>(GetStackOverflowReservedBytes(kX86_64))));
+    size_t reserved_bytes = GetStackOverflowReservedBytes(InstructionSet::kX86_64);
+    __ testq(CpuRegister(RAX), Address(CpuRegister(RSP), -static_cast<int32_t>(reserved_bytes)));
     RecordPcInfo(nullptr, 0);
   }
 
@@ -1303,18 +1383,17 @@ void CodeGeneratorX86_64::GenerateFrameEntry() {
     }
   }
 
-  if (GetGraph()->HasShouldDeoptimizeFlag()) {
-    // Initialize should_deoptimize flag to 0.
-    __ movl(Address(CpuRegister(RSP), xmm_spill_location - kShouldDeoptimizeFlagSize),
-            Immediate(0));
-  }
-
   // Save the current method if we need it. Note that we do not
   // do this in HCurrentMethod, as the instruction might have been removed
   // in the SSA graph.
   if (RequiresCurrentMethod()) {
     __ movq(Address(CpuRegister(RSP), kCurrentMethodStackOffset),
             CpuRegister(kMethodRegisterArgument));
+  }
+
+  if (GetGraph()->HasShouldDeoptimizeFlag()) {
+    // Initialize should_deoptimize flag to 0.
+    __ movl(Address(CpuRegister(RSP), GetStackOffsetOfShouldDeoptimizeFlag()), Immediate(0));
   }
 }
 
@@ -1439,7 +1518,7 @@ void CodeGeneratorX86_64::MoveConstant(Location location, int32_t value) {
 }
 
 void CodeGeneratorX86_64::MoveLocation(
-    Location dst, Location src, Primitive::Type dst_type ATTRIBUTE_UNUSED) {
+    Location dst, Location src, DataType::Type dst_type ATTRIBUTE_UNUSED) {
   Move(dst, src);
 }
 
@@ -1452,13 +1531,21 @@ void CodeGeneratorX86_64::AddLocationAsTemp(Location location, LocationSummary* 
 }
 
 void InstructionCodeGeneratorX86_64::HandleGoto(HInstruction* got, HBasicBlock* successor) {
-  DCHECK(!successor->IsExitBlock());
+  if (successor->IsExitBlock()) {
+    DCHECK(got->GetPrevious()->AlwaysThrows());
+    return;  // no code needed
+  }
 
   HBasicBlock* block = got->GetBlock();
   HInstruction* previous = got->GetPrevious();
 
   HLoopInformation* info = block->GetLoopInformation();
   if (info != nullptr && info->IsBackEdge(*block) && info->HasSuspendCheck()) {
+    if (codegen_->GetCompilerOptions().CountHotnessInCompiledCode()) {
+      __ movq(CpuRegister(TMP), Address(CpuRegister(RSP), 0));
+      __ addw(Address(CpuRegister(TMP), ArtMethod::HotnessCountOffset().Int32Value()),
+              Immediate(1));
+    }
     GenerateSuspendCheck(info->GetSuspendCheck(), successor);
     return;
   }
@@ -1514,22 +1601,23 @@ void InstructionCodeGeneratorX86_64::GenerateCompareTest(HCondition* condition) 
 
   Location left = locations->InAt(0);
   Location right = locations->InAt(1);
-  Primitive::Type type = condition->InputAt(0)->GetType();
+  DataType::Type type = condition->InputAt(0)->GetType();
   switch (type) {
-    case Primitive::kPrimBoolean:
-    case Primitive::kPrimByte:
-    case Primitive::kPrimChar:
-    case Primitive::kPrimShort:
-    case Primitive::kPrimInt:
-    case Primitive::kPrimNot: {
+    case DataType::Type::kBool:
+    case DataType::Type::kUint8:
+    case DataType::Type::kInt8:
+    case DataType::Type::kUint16:
+    case DataType::Type::kInt16:
+    case DataType::Type::kInt32:
+    case DataType::Type::kReference: {
       codegen_->GenerateIntCompare(left, right);
       break;
     }
-    case Primitive::kPrimLong: {
+    case DataType::Type::kInt64: {
       codegen_->GenerateLongCompare(left, right);
       break;
     }
-    case Primitive::kPrimFloat: {
+    case DataType::Type::kFloat32: {
       if (right.IsFpuRegister()) {
         __ ucomiss(left.AsFpuRegister<XmmRegister>(), right.AsFpuRegister<XmmRegister>());
       } else if (right.IsConstant()) {
@@ -1543,7 +1631,7 @@ void InstructionCodeGeneratorX86_64::GenerateCompareTest(HCondition* condition) 
       }
       break;
     }
-    case Primitive::kPrimDouble: {
+    case DataType::Type::kFloat64: {
       if (right.IsFpuRegister()) {
         __ ucomisd(left.AsFpuRegister<XmmRegister>(), right.AsFpuRegister<XmmRegister>());
       } else if (right.IsConstant()) {
@@ -1576,17 +1664,17 @@ void InstructionCodeGeneratorX86_64::GenerateCompareTestAndBranch(HCondition* co
   GenerateCompareTest(condition);
 
   // Now generate the correct jump(s).
-  Primitive::Type type = condition->InputAt(0)->GetType();
+  DataType::Type type = condition->InputAt(0)->GetType();
   switch (type) {
-    case Primitive::kPrimLong: {
+    case DataType::Type::kInt64: {
       __ j(X86_64IntegerCondition(condition->GetCondition()), true_target);
       break;
     }
-    case Primitive::kPrimFloat: {
+    case DataType::Type::kFloat32: {
       GenerateFPJumps(condition, true_target, false_target);
       break;
     }
-    case Primitive::kPrimDouble: {
+    case DataType::Type::kFloat64: {
       GenerateFPJumps(condition, true_target, false_target);
       break;
     }
@@ -1609,7 +1697,7 @@ static bool AreEflagsSetFrom(HInstruction* cond, HInstruction* branch) {
   // conditions if they are materialized due to the complex branching.
   return cond->IsCondition() &&
          cond->GetNext() == branch &&
-         !Primitive::IsFloatingPointType(cond->InputAt(0)->GetType());
+         !DataType::IsFloatingPointType(cond->InputAt(0)->GetType());
 }
 
 template<class LabelType>
@@ -1673,8 +1761,8 @@ void InstructionCodeGeneratorX86_64::GenerateTestAndBranch(HInstruction* instruc
 
     // If this is a long or FP comparison that has been folded into
     // the HCondition, generate the comparison directly.
-    Primitive::Type type = condition->InputAt(0)->GetType();
-    if (type == Primitive::kPrimLong || Primitive::IsFloatingPointType(type)) {
+    DataType::Type type = condition->InputAt(0)->GetType();
+    if (type == DataType::Type::kInt64 || DataType::IsFloatingPointType(type)) {
       GenerateCompareTestAndBranch(condition, true_target, false_target);
       return;
     }
@@ -1697,7 +1785,7 @@ void InstructionCodeGeneratorX86_64::GenerateTestAndBranch(HInstruction* instruc
 }
 
 void LocationsBuilderX86_64::VisitIf(HIf* if_instr) {
-  LocationSummary* locations = new (GetGraph()->GetArena()) LocationSummary(if_instr);
+  LocationSummary* locations = new (GetGraph()->GetAllocator()) LocationSummary(if_instr);
   if (IsBooleanValueOrMaterializedCondition(if_instr->InputAt(0))) {
     locations->SetInAt(0, Location::Any());
   }
@@ -1710,11 +1798,11 @@ void InstructionCodeGeneratorX86_64::VisitIf(HIf* if_instr) {
       nullptr : codegen_->GetLabelOf(true_successor);
   Label* false_target = codegen_->GoesToNextBlock(if_instr->GetBlock(), false_successor) ?
       nullptr : codegen_->GetLabelOf(false_successor);
-  GenerateTestAndBranch(if_instr, /* condition_input_index */ 0, true_target, false_target);
+  GenerateTestAndBranch(if_instr, /* condition_input_index= */ 0, true_target, false_target);
 }
 
 void LocationsBuilderX86_64::VisitDeoptimize(HDeoptimize* deoptimize) {
-  LocationSummary* locations = new (GetGraph()->GetArena())
+  LocationSummary* locations = new (GetGraph()->GetAllocator())
       LocationSummary(deoptimize, LocationSummary::kCallOnSlowPath);
   InvokeRuntimeCallingConvention calling_convention;
   RegisterSet caller_saves = RegisterSet::Empty();
@@ -1728,13 +1816,13 @@ void LocationsBuilderX86_64::VisitDeoptimize(HDeoptimize* deoptimize) {
 void InstructionCodeGeneratorX86_64::VisitDeoptimize(HDeoptimize* deoptimize) {
   SlowPathCode* slow_path = deopt_slow_paths_.NewSlowPath<DeoptimizationSlowPathX86_64>(deoptimize);
   GenerateTestAndBranch<Label>(deoptimize,
-                               /* condition_input_index */ 0,
+                               /* condition_input_index= */ 0,
                                slow_path->GetEntryLabel(),
-                               /* false_target */ nullptr);
+                               /* false_target= */ nullptr);
 }
 
 void LocationsBuilderX86_64::VisitShouldDeoptimizeFlag(HShouldDeoptimizeFlag* flag) {
-  LocationSummary* locations = new (GetGraph()->GetArena())
+  LocationSummary* locations = new (GetGraph()->GetAllocator())
       LocationSummary(flag, LocationSummary::kNoCall);
   locations->SetOut(Location::RequiresRegister());
 }
@@ -1746,14 +1834,14 @@ void InstructionCodeGeneratorX86_64::VisitShouldDeoptimizeFlag(HShouldDeoptimize
 
 static bool SelectCanUseCMOV(HSelect* select) {
   // There are no conditional move instructions for XMMs.
-  if (Primitive::IsFloatingPointType(select->GetType())) {
+  if (DataType::IsFloatingPointType(select->GetType())) {
     return false;
   }
 
   // A FP condition doesn't generate the single CC that we need.
   HInstruction* condition = select->GetCondition();
   if (condition->IsCondition() &&
-      Primitive::IsFloatingPointType(condition->InputAt(0)->GetType())) {
+      DataType::IsFloatingPointType(condition->InputAt(0)->GetType())) {
     return false;
   }
 
@@ -1762,8 +1850,8 @@ static bool SelectCanUseCMOV(HSelect* select) {
 }
 
 void LocationsBuilderX86_64::VisitSelect(HSelect* select) {
-  LocationSummary* locations = new (GetGraph()->GetArena()) LocationSummary(select);
-  if (Primitive::IsFloatingPointType(select->GetType())) {
+  LocationSummary* locations = new (GetGraph()->GetAllocator()) LocationSummary(select);
+  if (DataType::IsFloatingPointType(select->GetType())) {
     locations->SetInAt(0, Location::RequiresFpuRegister());
     locations->SetInAt(1, Location::Any());
   } else {
@@ -1822,7 +1910,7 @@ void InstructionCodeGeneratorX86_64::VisitSelect(HSelect* select) {
 
     // If the condition is true, overwrite the output, which already contains false.
     // Generate the correct sized CMOV.
-    bool is_64_bit = Primitive::Is64BitType(select->GetType());
+    bool is_64_bit = DataType::Is64BitType(select->GetType());
     if (value_true_loc.IsRegister()) {
       __ cmov(cond, value_false, value_true_loc.AsRegister<CpuRegister>(), is_64_bit);
     } else {
@@ -1833,8 +1921,8 @@ void InstructionCodeGeneratorX86_64::VisitSelect(HSelect* select) {
   } else {
     NearLabel false_target;
     GenerateTestAndBranch<NearLabel>(select,
-                                     /* condition_input_index */ 2,
-                                     /* true_target */ nullptr,
+                                     /* condition_input_index= */ 2,
+                                     /* true_target= */ nullptr,
                                      &false_target);
     codegen_->MoveLocation(locations->Out(), locations->InAt(1), select->GetType());
     __ Bind(&false_target);
@@ -1842,7 +1930,7 @@ void InstructionCodeGeneratorX86_64::VisitSelect(HSelect* select) {
 }
 
 void LocationsBuilderX86_64::VisitNativeDebugInfo(HNativeDebugInfo* info) {
-  new (GetGraph()->GetArena()) LocationSummary(info);
+  new (GetGraph()->GetAllocator()) LocationSummary(info);
 }
 
 void InstructionCodeGeneratorX86_64::VisitNativeDebugInfo(HNativeDebugInfo*) {
@@ -1855,15 +1943,15 @@ void CodeGeneratorX86_64::GenerateNop() {
 
 void LocationsBuilderX86_64::HandleCondition(HCondition* cond) {
   LocationSummary* locations =
-      new (GetGraph()->GetArena()) LocationSummary(cond, LocationSummary::kNoCall);
+      new (GetGraph()->GetAllocator()) LocationSummary(cond, LocationSummary::kNoCall);
   // Handle the long/FP comparisons made in instruction simplification.
   switch (cond->InputAt(0)->GetType()) {
-    case Primitive::kPrimLong:
+    case DataType::Type::kInt64:
       locations->SetInAt(0, Location::RequiresRegister());
       locations->SetInAt(1, Location::Any());
       break;
-    case Primitive::kPrimFloat:
-    case Primitive::kPrimDouble:
+    case DataType::Type::kFloat32:
+    case DataType::Type::kFloat64:
       locations->SetInAt(0, Location::RequiresFpuRegister());
       locations->SetInAt(1, Location::Any());
       break;
@@ -1898,14 +1986,14 @@ void InstructionCodeGeneratorX86_64::HandleCondition(HCondition* cond) {
       codegen_->GenerateIntCompare(lhs, rhs);
       __ setcc(X86_64IntegerCondition(cond->GetCondition()), reg);
       return;
-    case Primitive::kPrimLong:
+    case DataType::Type::kInt64:
       // Clear output register: setcc only sets the low byte.
       __ xorl(reg, reg);
 
       codegen_->GenerateLongCompare(lhs, rhs);
       __ setcc(X86_64IntegerCondition(cond->GetCondition()), reg);
       return;
-    case Primitive::kPrimFloat: {
+    case DataType::Type::kFloat32: {
       XmmRegister lhs_reg = lhs.AsFpuRegister<XmmRegister>();
       if (rhs.IsConstant()) {
         float value = rhs.GetConstant()->AsFloatConstant()->GetValue();
@@ -1918,7 +2006,7 @@ void InstructionCodeGeneratorX86_64::HandleCondition(HCondition* cond) {
       GenerateFPJumps(cond, &true_label, &false_label);
       break;
     }
-    case Primitive::kPrimDouble: {
+    case DataType::Type::kFloat64: {
       XmmRegister lhs_reg = lhs.AsFpuRegister<XmmRegister>();
       if (rhs.IsConstant()) {
         double value = rhs.GetConstant()->AsDoubleConstant()->GetValue();
@@ -2029,21 +2117,22 @@ void InstructionCodeGeneratorX86_64::VisitAboveOrEqual(HAboveOrEqual* comp) {
 
 void LocationsBuilderX86_64::VisitCompare(HCompare* compare) {
   LocationSummary* locations =
-      new (GetGraph()->GetArena()) LocationSummary(compare, LocationSummary::kNoCall);
+      new (GetGraph()->GetAllocator()) LocationSummary(compare, LocationSummary::kNoCall);
   switch (compare->InputAt(0)->GetType()) {
-    case Primitive::kPrimBoolean:
-    case Primitive::kPrimByte:
-    case Primitive::kPrimShort:
-    case Primitive::kPrimChar:
-    case Primitive::kPrimInt:
-    case Primitive::kPrimLong: {
+    case DataType::Type::kBool:
+    case DataType::Type::kUint8:
+    case DataType::Type::kInt8:
+    case DataType::Type::kUint16:
+    case DataType::Type::kInt16:
+    case DataType::Type::kInt32:
+    case DataType::Type::kInt64: {
       locations->SetInAt(0, Location::RequiresRegister());
       locations->SetInAt(1, Location::Any());
       locations->SetOut(Location::RequiresRegister(), Location::kNoOutputOverlap);
       break;
     }
-    case Primitive::kPrimFloat:
-    case Primitive::kPrimDouble: {
+    case DataType::Type::kFloat32:
+    case DataType::Type::kFloat64: {
       locations->SetInAt(0, Location::RequiresFpuRegister());
       locations->SetInAt(1, Location::Any());
       locations->SetOut(Location::RequiresRegister());
@@ -2061,23 +2150,24 @@ void InstructionCodeGeneratorX86_64::VisitCompare(HCompare* compare) {
   Location right = locations->InAt(1);
 
   NearLabel less, greater, done;
-  Primitive::Type type = compare->InputAt(0)->GetType();
+  DataType::Type type = compare->InputAt(0)->GetType();
   Condition less_cond = kLess;
 
   switch (type) {
-    case Primitive::kPrimBoolean:
-    case Primitive::kPrimByte:
-    case Primitive::kPrimShort:
-    case Primitive::kPrimChar:
-    case Primitive::kPrimInt: {
+    case DataType::Type::kBool:
+    case DataType::Type::kUint8:
+    case DataType::Type::kInt8:
+    case DataType::Type::kUint16:
+    case DataType::Type::kInt16:
+    case DataType::Type::kInt32: {
       codegen_->GenerateIntCompare(left, right);
       break;
     }
-    case Primitive::kPrimLong: {
+    case DataType::Type::kInt64: {
       codegen_->GenerateLongCompare(left, right);
       break;
     }
-    case Primitive::kPrimFloat: {
+    case DataType::Type::kFloat32: {
       XmmRegister left_reg = left.AsFpuRegister<XmmRegister>();
       if (right.IsConstant()) {
         float value = right.GetConstant()->AsFloatConstant()->GetValue();
@@ -2091,7 +2181,7 @@ void InstructionCodeGeneratorX86_64::VisitCompare(HCompare* compare) {
       less_cond = kBelow;  //  ucomis{s,d} sets CF
       break;
     }
-    case Primitive::kPrimDouble: {
+    case DataType::Type::kFloat64: {
       XmmRegister left_reg = left.AsFpuRegister<XmmRegister>();
       if (right.IsConstant()) {
         double value = right.GetConstant()->AsDoubleConstant()->GetValue();
@@ -2125,7 +2215,7 @@ void InstructionCodeGeneratorX86_64::VisitCompare(HCompare* compare) {
 
 void LocationsBuilderX86_64::VisitIntConstant(HIntConstant* constant) {
   LocationSummary* locations =
-      new (GetGraph()->GetArena()) LocationSummary(constant, LocationSummary::kNoCall);
+      new (GetGraph()->GetAllocator()) LocationSummary(constant, LocationSummary::kNoCall);
   locations->SetOut(Location::ConstantLocation(constant));
 }
 
@@ -2135,7 +2225,7 @@ void InstructionCodeGeneratorX86_64::VisitIntConstant(HIntConstant* constant ATT
 
 void LocationsBuilderX86_64::VisitNullConstant(HNullConstant* constant) {
   LocationSummary* locations =
-      new (GetGraph()->GetArena()) LocationSummary(constant, LocationSummary::kNoCall);
+      new (GetGraph()->GetAllocator()) LocationSummary(constant, LocationSummary::kNoCall);
   locations->SetOut(Location::ConstantLocation(constant));
 }
 
@@ -2145,7 +2235,7 @@ void InstructionCodeGeneratorX86_64::VisitNullConstant(HNullConstant* constant A
 
 void LocationsBuilderX86_64::VisitLongConstant(HLongConstant* constant) {
   LocationSummary* locations =
-      new (GetGraph()->GetArena()) LocationSummary(constant, LocationSummary::kNoCall);
+      new (GetGraph()->GetAllocator()) LocationSummary(constant, LocationSummary::kNoCall);
   locations->SetOut(Location::ConstantLocation(constant));
 }
 
@@ -2155,7 +2245,7 @@ void InstructionCodeGeneratorX86_64::VisitLongConstant(HLongConstant* constant A
 
 void LocationsBuilderX86_64::VisitFloatConstant(HFloatConstant* constant) {
   LocationSummary* locations =
-      new (GetGraph()->GetArena()) LocationSummary(constant, LocationSummary::kNoCall);
+      new (GetGraph()->GetAllocator()) LocationSummary(constant, LocationSummary::kNoCall);
   locations->SetOut(Location::ConstantLocation(constant));
 }
 
@@ -2165,13 +2255,22 @@ void InstructionCodeGeneratorX86_64::VisitFloatConstant(HFloatConstant* constant
 
 void LocationsBuilderX86_64::VisitDoubleConstant(HDoubleConstant* constant) {
   LocationSummary* locations =
-      new (GetGraph()->GetArena()) LocationSummary(constant, LocationSummary::kNoCall);
+      new (GetGraph()->GetAllocator()) LocationSummary(constant, LocationSummary::kNoCall);
   locations->SetOut(Location::ConstantLocation(constant));
 }
 
 void InstructionCodeGeneratorX86_64::VisitDoubleConstant(
     HDoubleConstant* constant ATTRIBUTE_UNUSED) {
   // Will be generated at use site.
+}
+
+void LocationsBuilderX86_64::VisitConstructorFence(HConstructorFence* constructor_fence) {
+  constructor_fence->SetLocations(nullptr);
+}
+
+void InstructionCodeGeneratorX86_64::VisitConstructorFence(
+    HConstructorFence* constructor_fence ATTRIBUTE_UNUSED) {
+  codegen_->GenerateMemoryBarrier(MemBarrierKind::kStoreStore);
 }
 
 void LocationsBuilderX86_64::VisitMemoryBarrier(HMemoryBarrier* memory_barrier) {
@@ -2192,20 +2291,21 @@ void InstructionCodeGeneratorX86_64::VisitReturnVoid(HReturnVoid* ret ATTRIBUTE_
 
 void LocationsBuilderX86_64::VisitReturn(HReturn* ret) {
   LocationSummary* locations =
-      new (GetGraph()->GetArena()) LocationSummary(ret, LocationSummary::kNoCall);
+      new (GetGraph()->GetAllocator()) LocationSummary(ret, LocationSummary::kNoCall);
   switch (ret->InputAt(0)->GetType()) {
-    case Primitive::kPrimBoolean:
-    case Primitive::kPrimByte:
-    case Primitive::kPrimChar:
-    case Primitive::kPrimShort:
-    case Primitive::kPrimInt:
-    case Primitive::kPrimNot:
-    case Primitive::kPrimLong:
+    case DataType::Type::kReference:
+    case DataType::Type::kBool:
+    case DataType::Type::kUint8:
+    case DataType::Type::kInt8:
+    case DataType::Type::kUint16:
+    case DataType::Type::kInt16:
+    case DataType::Type::kInt32:
+    case DataType::Type::kInt64:
       locations->SetInAt(0, Location::RegisterLocation(RAX));
       break;
 
-    case Primitive::kPrimFloat:
-    case Primitive::kPrimDouble:
+    case DataType::Type::kFloat32:
+    case DataType::Type::kFloat64:
       locations->SetInAt(0, Location::FpuRegisterLocation(XMM0));
       break;
 
@@ -2217,18 +2317,19 @@ void LocationsBuilderX86_64::VisitReturn(HReturn* ret) {
 void InstructionCodeGeneratorX86_64::VisitReturn(HReturn* ret) {
   if (kIsDebugBuild) {
     switch (ret->InputAt(0)->GetType()) {
-      case Primitive::kPrimBoolean:
-      case Primitive::kPrimByte:
-      case Primitive::kPrimChar:
-      case Primitive::kPrimShort:
-      case Primitive::kPrimInt:
-      case Primitive::kPrimNot:
-      case Primitive::kPrimLong:
+      case DataType::Type::kReference:
+      case DataType::Type::kBool:
+      case DataType::Type::kUint8:
+      case DataType::Type::kInt8:
+      case DataType::Type::kUint16:
+      case DataType::Type::kInt16:
+      case DataType::Type::kInt32:
+      case DataType::Type::kInt64:
         DCHECK_EQ(ret->GetLocations()->InAt(0).AsRegister<CpuRegister>().AsRegister(), RAX);
         break;
 
-      case Primitive::kPrimFloat:
-      case Primitive::kPrimDouble:
+      case DataType::Type::kFloat32:
+      case DataType::Type::kFloat64:
         DCHECK_EQ(ret->GetLocations()->InAt(0).AsFpuRegister<XmmRegister>().AsFloatRegister(),
                   XMM0);
         break;
@@ -2240,22 +2341,25 @@ void InstructionCodeGeneratorX86_64::VisitReturn(HReturn* ret) {
   codegen_->GenerateFrameExit();
 }
 
-Location InvokeDexCallingConventionVisitorX86_64::GetReturnLocation(Primitive::Type type) const {
+Location InvokeDexCallingConventionVisitorX86_64::GetReturnLocation(DataType::Type type) const {
   switch (type) {
-    case Primitive::kPrimBoolean:
-    case Primitive::kPrimByte:
-    case Primitive::kPrimChar:
-    case Primitive::kPrimShort:
-    case Primitive::kPrimInt:
-    case Primitive::kPrimNot:
-    case Primitive::kPrimLong:
+    case DataType::Type::kReference:
+    case DataType::Type::kBool:
+    case DataType::Type::kUint8:
+    case DataType::Type::kInt8:
+    case DataType::Type::kUint16:
+    case DataType::Type::kInt16:
+    case DataType::Type::kUint32:
+    case DataType::Type::kInt32:
+    case DataType::Type::kUint64:
+    case DataType::Type::kInt64:
       return Location::RegisterLocation(RAX);
 
-    case Primitive::kPrimVoid:
+    case DataType::Type::kVoid:
       return Location::NoLocation();
 
-    case Primitive::kPrimDouble:
-    case Primitive::kPrimFloat:
+    case DataType::Type::kFloat64:
+    case DataType::Type::kFloat32:
       return Location::FpuRegisterLocation(XMM0);
   }
 
@@ -2266,14 +2370,15 @@ Location InvokeDexCallingConventionVisitorX86_64::GetMethodLocation() const {
   return Location::RegisterLocation(kMethodRegisterArgument);
 }
 
-Location InvokeDexCallingConventionVisitorX86_64::GetNextLocation(Primitive::Type type) {
+Location InvokeDexCallingConventionVisitorX86_64::GetNextLocation(DataType::Type type) {
   switch (type) {
-    case Primitive::kPrimBoolean:
-    case Primitive::kPrimByte:
-    case Primitive::kPrimChar:
-    case Primitive::kPrimShort:
-    case Primitive::kPrimInt:
-    case Primitive::kPrimNot: {
+    case DataType::Type::kReference:
+    case DataType::Type::kBool:
+    case DataType::Type::kUint8:
+    case DataType::Type::kInt8:
+    case DataType::Type::kUint16:
+    case DataType::Type::kInt16:
+    case DataType::Type::kInt32: {
       uint32_t index = gp_index_++;
       stack_index_++;
       if (index < calling_convention.GetNumberOfRegisters()) {
@@ -2283,7 +2388,7 @@ Location InvokeDexCallingConventionVisitorX86_64::GetNextLocation(Primitive::Typ
       }
     }
 
-    case Primitive::kPrimLong: {
+    case DataType::Type::kInt64: {
       uint32_t index = gp_index_;
       stack_index_ += 2;
       if (index < calling_convention.GetNumberOfRegisters()) {
@@ -2295,7 +2400,7 @@ Location InvokeDexCallingConventionVisitorX86_64::GetNextLocation(Primitive::Typ
       }
     }
 
-    case Primitive::kPrimFloat: {
+    case DataType::Type::kFloat32: {
       uint32_t index = float_index_++;
       stack_index_++;
       if (index < calling_convention.GetNumberOfFpuRegisters()) {
@@ -2305,7 +2410,7 @@ Location InvokeDexCallingConventionVisitorX86_64::GetNextLocation(Primitive::Typ
       }
     }
 
-    case Primitive::kPrimDouble: {
+    case DataType::Type::kFloat64: {
       uint32_t index = float_index_++;
       stack_index_ += 2;
       if (index < calling_convention.GetNumberOfFpuRegisters()) {
@@ -2315,9 +2420,11 @@ Location InvokeDexCallingConventionVisitorX86_64::GetNextLocation(Primitive::Typ
       }
     }
 
-    case Primitive::kPrimVoid:
+    case DataType::Type::kUint32:
+    case DataType::Type::kUint64:
+    case DataType::Type::kVoid:
       LOG(FATAL) << "Unexpected parameter type " << type;
-      break;
+      UNREACHABLE();
   }
   return Location::NoLocation();
 }
@@ -2367,7 +2474,6 @@ void InstructionCodeGeneratorX86_64::VisitInvokeStaticOrDirect(HInvokeStaticOrDi
   LocationSummary* locations = invoke->GetLocations();
   codegen_->GenerateStaticOrDirectCall(
       invoke, locations->HasTemps() ? locations->GetTemp(0) : Location::NoLocation());
-  codegen_->RecordPcInfo(invoke, invoke->GetDexPc());
 }
 
 void LocationsBuilderX86_64::HandleInvoke(HInvoke* invoke) {
@@ -2391,7 +2497,6 @@ void InstructionCodeGeneratorX86_64::VisitInvokeVirtual(HInvokeVirtual* invoke) 
 
   codegen_->GenerateVirtualCall(invoke, invoke->GetLocations()->GetTemp(0));
   DCHECK(!codegen_->IsLeafMethod());
-  codegen_->RecordPcInfo(invoke, invoke->GetDexPc());
 }
 
 void LocationsBuilderX86_64::VisitInvokeInterface(HInvokeInterface* invoke) {
@@ -2454,18 +2559,26 @@ void InstructionCodeGeneratorX86_64::VisitInvokePolymorphic(HInvokePolymorphic* 
   codegen_->GenerateInvokePolymorphicCall(invoke);
 }
 
+void LocationsBuilderX86_64::VisitInvokeCustom(HInvokeCustom* invoke) {
+  HandleInvoke(invoke);
+}
+
+void InstructionCodeGeneratorX86_64::VisitInvokeCustom(HInvokeCustom* invoke) {
+  codegen_->GenerateInvokeCustomCall(invoke);
+}
+
 void LocationsBuilderX86_64::VisitNeg(HNeg* neg) {
   LocationSummary* locations =
-      new (GetGraph()->GetArena()) LocationSummary(neg, LocationSummary::kNoCall);
+      new (GetGraph()->GetAllocator()) LocationSummary(neg, LocationSummary::kNoCall);
   switch (neg->GetResultType()) {
-    case Primitive::kPrimInt:
-    case Primitive::kPrimLong:
+    case DataType::Type::kInt32:
+    case DataType::Type::kInt64:
       locations->SetInAt(0, Location::RequiresRegister());
       locations->SetOut(Location::SameAsFirstInput());
       break;
 
-    case Primitive::kPrimFloat:
-    case Primitive::kPrimDouble:
+    case DataType::Type::kFloat32:
+    case DataType::Type::kFloat64:
       locations->SetInAt(0, Location::RequiresFpuRegister());
       locations->SetOut(Location::SameAsFirstInput());
       locations->AddTemp(Location::RequiresFpuRegister());
@@ -2481,19 +2594,19 @@ void InstructionCodeGeneratorX86_64::VisitNeg(HNeg* neg) {
   Location out = locations->Out();
   Location in = locations->InAt(0);
   switch (neg->GetResultType()) {
-    case Primitive::kPrimInt:
+    case DataType::Type::kInt32:
       DCHECK(in.IsRegister());
       DCHECK(in.Equals(out));
       __ negl(out.AsRegister<CpuRegister>());
       break;
 
-    case Primitive::kPrimLong:
+    case DataType::Type::kInt64:
       DCHECK(in.IsRegister());
       DCHECK(in.Equals(out));
       __ negq(out.AsRegister<CpuRegister>());
       break;
 
-    case Primitive::kPrimFloat: {
+    case DataType::Type::kFloat32: {
       DCHECK(in.Equals(out));
       XmmRegister mask = locations->GetTemp(0).AsFpuRegister<XmmRegister>();
       // Implement float negation with an exclusive or with value
@@ -2504,7 +2617,7 @@ void InstructionCodeGeneratorX86_64::VisitNeg(HNeg* neg) {
       break;
     }
 
-    case Primitive::kPrimDouble: {
+    case DataType::Type::kFloat64: {
       DCHECK(in.Equals(out));
       XmmRegister mask = locations->GetTemp(0).AsFpuRegister<XmmRegister>();
       // Implement double negation with an exclusive or with value
@@ -2522,71 +2635,35 @@ void InstructionCodeGeneratorX86_64::VisitNeg(HNeg* neg) {
 
 void LocationsBuilderX86_64::VisitTypeConversion(HTypeConversion* conversion) {
   LocationSummary* locations =
-      new (GetGraph()->GetArena()) LocationSummary(conversion, LocationSummary::kNoCall);
-  Primitive::Type result_type = conversion->GetResultType();
-  Primitive::Type input_type = conversion->GetInputType();
-  DCHECK_NE(result_type, input_type);
-
-  // The Java language does not allow treating boolean as an integral type but
-  // our bit representation makes it safe.
+      new (GetGraph()->GetAllocator()) LocationSummary(conversion, LocationSummary::kNoCall);
+  DataType::Type result_type = conversion->GetResultType();
+  DataType::Type input_type = conversion->GetInputType();
+  DCHECK(!DataType::IsTypeConversionImplicit(input_type, result_type))
+      << input_type << " -> " << result_type;
 
   switch (result_type) {
-    case Primitive::kPrimByte:
-      switch (input_type) {
-        case Primitive::kPrimLong:
-          // Type conversion from long to byte is a result of code transformations.
-        case Primitive::kPrimBoolean:
-          // Boolean input is a result of code transformations.
-        case Primitive::kPrimShort:
-        case Primitive::kPrimInt:
-        case Primitive::kPrimChar:
-          // Processing a Dex `int-to-byte' instruction.
-          locations->SetInAt(0, Location::Any());
-          locations->SetOut(Location::RequiresRegister(), Location::kNoOutputOverlap);
-          break;
-
-        default:
-          LOG(FATAL) << "Unexpected type conversion from " << input_type
-                     << " to " << result_type;
-      }
+    case DataType::Type::kUint8:
+    case DataType::Type::kInt8:
+    case DataType::Type::kUint16:
+    case DataType::Type::kInt16:
+      DCHECK(DataType::IsIntegralType(input_type)) << input_type;
+      locations->SetInAt(0, Location::Any());
+      locations->SetOut(Location::RequiresRegister(), Location::kNoOutputOverlap);
       break;
 
-    case Primitive::kPrimShort:
+    case DataType::Type::kInt32:
       switch (input_type) {
-        case Primitive::kPrimLong:
-          // Type conversion from long to short is a result of code transformations.
-        case Primitive::kPrimBoolean:
-          // Boolean input is a result of code transformations.
-        case Primitive::kPrimByte:
-        case Primitive::kPrimInt:
-        case Primitive::kPrimChar:
-          // Processing a Dex `int-to-short' instruction.
+        case DataType::Type::kInt64:
           locations->SetInAt(0, Location::Any());
           locations->SetOut(Location::RequiresRegister(), Location::kNoOutputOverlap);
           break;
 
-        default:
-          LOG(FATAL) << "Unexpected type conversion from " << input_type
-                     << " to " << result_type;
-      }
-      break;
-
-    case Primitive::kPrimInt:
-      switch (input_type) {
-        case Primitive::kPrimLong:
-          // Processing a Dex `long-to-int' instruction.
-          locations->SetInAt(0, Location::Any());
-          locations->SetOut(Location::RequiresRegister(), Location::kNoOutputOverlap);
-          break;
-
-        case Primitive::kPrimFloat:
-          // Processing a Dex `float-to-int' instruction.
+        case DataType::Type::kFloat32:
           locations->SetInAt(0, Location::RequiresFpuRegister());
           locations->SetOut(Location::RequiresRegister());
           break;
 
-        case Primitive::kPrimDouble:
-          // Processing a Dex `double-to-int' instruction.
+        case DataType::Type::kFloat64:
           locations->SetInAt(0, Location::RequiresFpuRegister());
           locations->SetOut(Location::RequiresRegister());
           break;
@@ -2597,29 +2674,26 @@ void LocationsBuilderX86_64::VisitTypeConversion(HTypeConversion* conversion) {
       }
       break;
 
-    case Primitive::kPrimLong:
+    case DataType::Type::kInt64:
       switch (input_type) {
-        case Primitive::kPrimBoolean:
-          // Boolean input is a result of code transformations.
-        case Primitive::kPrimByte:
-        case Primitive::kPrimShort:
-        case Primitive::kPrimInt:
-        case Primitive::kPrimChar:
-          // Processing a Dex `int-to-long' instruction.
+        case DataType::Type::kBool:
+        case DataType::Type::kUint8:
+        case DataType::Type::kInt8:
+        case DataType::Type::kUint16:
+        case DataType::Type::kInt16:
+        case DataType::Type::kInt32:
           // TODO: We would benefit from a (to-be-implemented)
           // Location::RegisterOrStackSlot requirement for this input.
           locations->SetInAt(0, Location::RequiresRegister());
           locations->SetOut(Location::RequiresRegister());
           break;
 
-        case Primitive::kPrimFloat:
-          // Processing a Dex `float-to-long' instruction.
+        case DataType::Type::kFloat32:
           locations->SetInAt(0, Location::RequiresFpuRegister());
           locations->SetOut(Location::RequiresRegister());
           break;
 
-        case Primitive::kPrimDouble:
-          // Processing a Dex `double-to-long' instruction.
+        case DataType::Type::kFloat64:
           locations->SetInAt(0, Location::RequiresFpuRegister());
           locations->SetOut(Location::RequiresRegister());
           break;
@@ -2630,47 +2704,24 @@ void LocationsBuilderX86_64::VisitTypeConversion(HTypeConversion* conversion) {
       }
       break;
 
-    case Primitive::kPrimChar:
+    case DataType::Type::kFloat32:
       switch (input_type) {
-        case Primitive::kPrimLong:
-          // Type conversion from long to char is a result of code transformations.
-        case Primitive::kPrimBoolean:
-          // Boolean input is a result of code transformations.
-        case Primitive::kPrimByte:
-        case Primitive::kPrimShort:
-        case Primitive::kPrimInt:
-          // Processing a Dex `int-to-char' instruction.
-          locations->SetInAt(0, Location::Any());
-          locations->SetOut(Location::RequiresRegister(), Location::kNoOutputOverlap);
-          break;
-
-        default:
-          LOG(FATAL) << "Unexpected type conversion from " << input_type
-                     << " to " << result_type;
-      }
-      break;
-
-    case Primitive::kPrimFloat:
-      switch (input_type) {
-        case Primitive::kPrimBoolean:
-          // Boolean input is a result of code transformations.
-        case Primitive::kPrimByte:
-        case Primitive::kPrimShort:
-        case Primitive::kPrimInt:
-        case Primitive::kPrimChar:
-          // Processing a Dex `int-to-float' instruction.
+        case DataType::Type::kBool:
+        case DataType::Type::kUint8:
+        case DataType::Type::kInt8:
+        case DataType::Type::kUint16:
+        case DataType::Type::kInt16:
+        case DataType::Type::kInt32:
           locations->SetInAt(0, Location::Any());
           locations->SetOut(Location::RequiresFpuRegister());
           break;
 
-        case Primitive::kPrimLong:
-          // Processing a Dex `long-to-float' instruction.
+        case DataType::Type::kInt64:
           locations->SetInAt(0, Location::Any());
           locations->SetOut(Location::RequiresFpuRegister());
           break;
 
-        case Primitive::kPrimDouble:
-          // Processing a Dex `double-to-float' instruction.
+        case DataType::Type::kFloat64:
           locations->SetInAt(0, Location::Any());
           locations->SetOut(Location::RequiresFpuRegister(), Location::kNoOutputOverlap);
           break;
@@ -2678,30 +2729,27 @@ void LocationsBuilderX86_64::VisitTypeConversion(HTypeConversion* conversion) {
         default:
           LOG(FATAL) << "Unexpected type conversion from " << input_type
                      << " to " << result_type;
-      };
+      }
       break;
 
-    case Primitive::kPrimDouble:
+    case DataType::Type::kFloat64:
       switch (input_type) {
-        case Primitive::kPrimBoolean:
-          // Boolean input is a result of code transformations.
-        case Primitive::kPrimByte:
-        case Primitive::kPrimShort:
-        case Primitive::kPrimInt:
-        case Primitive::kPrimChar:
-          // Processing a Dex `int-to-double' instruction.
+        case DataType::Type::kBool:
+        case DataType::Type::kUint8:
+        case DataType::Type::kInt8:
+        case DataType::Type::kUint16:
+        case DataType::Type::kInt16:
+        case DataType::Type::kInt32:
           locations->SetInAt(0, Location::Any());
           locations->SetOut(Location::RequiresFpuRegister());
           break;
 
-        case Primitive::kPrimLong:
-          // Processing a Dex `long-to-double' instruction.
+        case DataType::Type::kInt64:
           locations->SetInAt(0, Location::Any());
           locations->SetOut(Location::RequiresFpuRegister());
           break;
 
-        case Primitive::kPrimFloat:
-          // Processing a Dex `float-to-double' instruction.
+        case DataType::Type::kFloat32:
           locations->SetInAt(0, Location::Any());
           locations->SetOut(Location::RequiresFpuRegister(), Location::kNoOutputOverlap);
           break;
@@ -2722,20 +2770,42 @@ void InstructionCodeGeneratorX86_64::VisitTypeConversion(HTypeConversion* conver
   LocationSummary* locations = conversion->GetLocations();
   Location out = locations->Out();
   Location in = locations->InAt(0);
-  Primitive::Type result_type = conversion->GetResultType();
-  Primitive::Type input_type = conversion->GetInputType();
-  DCHECK_NE(result_type, input_type);
+  DataType::Type result_type = conversion->GetResultType();
+  DataType::Type input_type = conversion->GetInputType();
+  DCHECK(!DataType::IsTypeConversionImplicit(input_type, result_type))
+      << input_type << " -> " << result_type;
   switch (result_type) {
-    case Primitive::kPrimByte:
+    case DataType::Type::kUint8:
       switch (input_type) {
-        case Primitive::kPrimLong:
-          // Type conversion from long to byte is a result of code transformations.
-        case Primitive::kPrimBoolean:
-          // Boolean input is a result of code transformations.
-        case Primitive::kPrimShort:
-        case Primitive::kPrimInt:
-        case Primitive::kPrimChar:
-          // Processing a Dex `int-to-byte' instruction.
+        case DataType::Type::kInt8:
+        case DataType::Type::kUint16:
+        case DataType::Type::kInt16:
+        case DataType::Type::kInt32:
+        case DataType::Type::kInt64:
+          if (in.IsRegister()) {
+            __ movzxb(out.AsRegister<CpuRegister>(), in.AsRegister<CpuRegister>());
+          } else if (in.IsStackSlot() || in.IsDoubleStackSlot()) {
+            __ movzxb(out.AsRegister<CpuRegister>(),
+                      Address(CpuRegister(RSP), in.GetStackIndex()));
+          } else {
+            __ movl(out.AsRegister<CpuRegister>(),
+                    Immediate(static_cast<uint8_t>(Int64FromConstant(in.GetConstant()))));
+          }
+          break;
+
+        default:
+          LOG(FATAL) << "Unexpected type conversion from " << input_type
+                     << " to " << result_type;
+      }
+      break;
+
+    case DataType::Type::kInt8:
+      switch (input_type) {
+        case DataType::Type::kUint8:
+        case DataType::Type::kUint16:
+        case DataType::Type::kInt16:
+        case DataType::Type::kInt32:
+        case DataType::Type::kInt64:
           if (in.IsRegister()) {
             __ movsxb(out.AsRegister<CpuRegister>(), in.AsRegister<CpuRegister>());
           } else if (in.IsStackSlot() || in.IsDoubleStackSlot()) {
@@ -2753,16 +2823,34 @@ void InstructionCodeGeneratorX86_64::VisitTypeConversion(HTypeConversion* conver
       }
       break;
 
-    case Primitive::kPrimShort:
+    case DataType::Type::kUint16:
       switch (input_type) {
-        case Primitive::kPrimLong:
-          // Type conversion from long to short is a result of code transformations.
-        case Primitive::kPrimBoolean:
-          // Boolean input is a result of code transformations.
-        case Primitive::kPrimByte:
-        case Primitive::kPrimInt:
-        case Primitive::kPrimChar:
-          // Processing a Dex `int-to-short' instruction.
+        case DataType::Type::kInt8:
+        case DataType::Type::kInt16:
+        case DataType::Type::kInt32:
+        case DataType::Type::kInt64:
+          if (in.IsRegister()) {
+            __ movzxw(out.AsRegister<CpuRegister>(), in.AsRegister<CpuRegister>());
+          } else if (in.IsStackSlot() || in.IsDoubleStackSlot()) {
+            __ movzxw(out.AsRegister<CpuRegister>(),
+                      Address(CpuRegister(RSP), in.GetStackIndex()));
+          } else {
+            __ movl(out.AsRegister<CpuRegister>(),
+                    Immediate(static_cast<uint16_t>(Int64FromConstant(in.GetConstant()))));
+          }
+          break;
+
+        default:
+          LOG(FATAL) << "Unexpected type conversion from " << input_type
+                     << " to " << result_type;
+      }
+      break;
+
+    case DataType::Type::kInt16:
+      switch (input_type) {
+        case DataType::Type::kUint16:
+        case DataType::Type::kInt32:
+        case DataType::Type::kInt64:
           if (in.IsRegister()) {
             __ movsxw(out.AsRegister<CpuRegister>(), in.AsRegister<CpuRegister>());
           } else if (in.IsStackSlot() || in.IsDoubleStackSlot()) {
@@ -2780,10 +2868,9 @@ void InstructionCodeGeneratorX86_64::VisitTypeConversion(HTypeConversion* conver
       }
       break;
 
-    case Primitive::kPrimInt:
+    case DataType::Type::kInt32:
       switch (input_type) {
-        case Primitive::kPrimLong:
-          // Processing a Dex `long-to-int' instruction.
+        case DataType::Type::kInt64:
           if (in.IsRegister()) {
             __ movl(out.AsRegister<CpuRegister>(), in.AsRegister<CpuRegister>());
           } else if (in.IsDoubleStackSlot()) {
@@ -2797,8 +2884,7 @@ void InstructionCodeGeneratorX86_64::VisitTypeConversion(HTypeConversion* conver
           }
           break;
 
-        case Primitive::kPrimFloat: {
-          // Processing a Dex `float-to-int' instruction.
+        case DataType::Type::kFloat32: {
           XmmRegister input = in.AsFpuRegister<XmmRegister>();
           CpuRegister output = out.AsRegister<CpuRegister>();
           NearLabel done, nan;
@@ -2819,8 +2905,7 @@ void InstructionCodeGeneratorX86_64::VisitTypeConversion(HTypeConversion* conver
           break;
         }
 
-        case Primitive::kPrimDouble: {
-          // Processing a Dex `double-to-int' instruction.
+        case DataType::Type::kFloat64: {
           XmmRegister input = in.AsFpuRegister<XmmRegister>();
           CpuRegister output = out.AsRegister<CpuRegister>();
           NearLabel done, nan;
@@ -2847,22 +2932,20 @@ void InstructionCodeGeneratorX86_64::VisitTypeConversion(HTypeConversion* conver
       }
       break;
 
-    case Primitive::kPrimLong:
+    case DataType::Type::kInt64:
       switch (input_type) {
         DCHECK(out.IsRegister());
-        case Primitive::kPrimBoolean:
-          // Boolean input is a result of code transformations.
-        case Primitive::kPrimByte:
-        case Primitive::kPrimShort:
-        case Primitive::kPrimInt:
-        case Primitive::kPrimChar:
-          // Processing a Dex `int-to-long' instruction.
+        case DataType::Type::kBool:
+        case DataType::Type::kUint8:
+        case DataType::Type::kInt8:
+        case DataType::Type::kUint16:
+        case DataType::Type::kInt16:
+        case DataType::Type::kInt32:
           DCHECK(in.IsRegister());
           __ movsxd(out.AsRegister<CpuRegister>(), in.AsRegister<CpuRegister>());
           break;
 
-        case Primitive::kPrimFloat: {
-          // Processing a Dex `float-to-long' instruction.
+        case DataType::Type::kFloat32: {
           XmmRegister input = in.AsFpuRegister<XmmRegister>();
           CpuRegister output = out.AsRegister<CpuRegister>();
           NearLabel done, nan;
@@ -2883,8 +2966,7 @@ void InstructionCodeGeneratorX86_64::VisitTypeConversion(HTypeConversion* conver
           break;
         }
 
-        case Primitive::kPrimDouble: {
-          // Processing a Dex `double-to-long' instruction.
+        case DataType::Type::kFloat64: {
           XmmRegister input = in.AsFpuRegister<XmmRegister>();
           CpuRegister output = out.AsRegister<CpuRegister>();
           NearLabel done, nan;
@@ -2911,42 +2993,14 @@ void InstructionCodeGeneratorX86_64::VisitTypeConversion(HTypeConversion* conver
       }
       break;
 
-    case Primitive::kPrimChar:
+    case DataType::Type::kFloat32:
       switch (input_type) {
-        case Primitive::kPrimLong:
-          // Type conversion from long to char is a result of code transformations.
-        case Primitive::kPrimBoolean:
-          // Boolean input is a result of code transformations.
-        case Primitive::kPrimByte:
-        case Primitive::kPrimShort:
-        case Primitive::kPrimInt:
-          // Processing a Dex `int-to-char' instruction.
-          if (in.IsRegister()) {
-            __ movzxw(out.AsRegister<CpuRegister>(), in.AsRegister<CpuRegister>());
-          } else if (in.IsStackSlot() || in.IsDoubleStackSlot()) {
-            __ movzxw(out.AsRegister<CpuRegister>(),
-                      Address(CpuRegister(RSP), in.GetStackIndex()));
-          } else {
-            __ movl(out.AsRegister<CpuRegister>(),
-                    Immediate(static_cast<uint16_t>(Int64FromConstant(in.GetConstant()))));
-          }
-          break;
-
-        default:
-          LOG(FATAL) << "Unexpected type conversion from " << input_type
-                     << " to " << result_type;
-      }
-      break;
-
-    case Primitive::kPrimFloat:
-      switch (input_type) {
-        case Primitive::kPrimBoolean:
-          // Boolean input is a result of code transformations.
-        case Primitive::kPrimByte:
-        case Primitive::kPrimShort:
-        case Primitive::kPrimInt:
-        case Primitive::kPrimChar:
-          // Processing a Dex `int-to-float' instruction.
+        case DataType::Type::kBool:
+        case DataType::Type::kUint8:
+        case DataType::Type::kInt8:
+        case DataType::Type::kUint16:
+        case DataType::Type::kInt16:
+        case DataType::Type::kInt32:
           if (in.IsRegister()) {
             __ cvtsi2ss(out.AsFpuRegister<XmmRegister>(), in.AsRegister<CpuRegister>(), false);
           } else if (in.IsConstant()) {
@@ -2959,8 +3013,7 @@ void InstructionCodeGeneratorX86_64::VisitTypeConversion(HTypeConversion* conver
           }
           break;
 
-        case Primitive::kPrimLong:
-          // Processing a Dex `long-to-float' instruction.
+        case DataType::Type::kInt64:
           if (in.IsRegister()) {
             __ cvtsi2ss(out.AsFpuRegister<XmmRegister>(), in.AsRegister<CpuRegister>(), true);
           } else if (in.IsConstant()) {
@@ -2973,8 +3026,7 @@ void InstructionCodeGeneratorX86_64::VisitTypeConversion(HTypeConversion* conver
           }
           break;
 
-        case Primitive::kPrimDouble:
-          // Processing a Dex `double-to-float' instruction.
+        case DataType::Type::kFloat64:
           if (in.IsFpuRegister()) {
             __ cvtsd2ss(out.AsFpuRegister<XmmRegister>(), in.AsFpuRegister<XmmRegister>());
           } else if (in.IsConstant()) {
@@ -2990,18 +3042,17 @@ void InstructionCodeGeneratorX86_64::VisitTypeConversion(HTypeConversion* conver
         default:
           LOG(FATAL) << "Unexpected type conversion from " << input_type
                      << " to " << result_type;
-      };
+      }
       break;
 
-    case Primitive::kPrimDouble:
+    case DataType::Type::kFloat64:
       switch (input_type) {
-        case Primitive::kPrimBoolean:
-          // Boolean input is a result of code transformations.
-        case Primitive::kPrimByte:
-        case Primitive::kPrimShort:
-        case Primitive::kPrimInt:
-        case Primitive::kPrimChar:
-          // Processing a Dex `int-to-double' instruction.
+        case DataType::Type::kBool:
+        case DataType::Type::kUint8:
+        case DataType::Type::kInt8:
+        case DataType::Type::kUint16:
+        case DataType::Type::kInt16:
+        case DataType::Type::kInt32:
           if (in.IsRegister()) {
             __ cvtsi2sd(out.AsFpuRegister<XmmRegister>(), in.AsRegister<CpuRegister>(), false);
           } else if (in.IsConstant()) {
@@ -3014,8 +3065,7 @@ void InstructionCodeGeneratorX86_64::VisitTypeConversion(HTypeConversion* conver
           }
           break;
 
-        case Primitive::kPrimLong:
-          // Processing a Dex `long-to-double' instruction.
+        case DataType::Type::kInt64:
           if (in.IsRegister()) {
             __ cvtsi2sd(out.AsFpuRegister<XmmRegister>(), in.AsRegister<CpuRegister>(), true);
           } else if (in.IsConstant()) {
@@ -3028,8 +3078,7 @@ void InstructionCodeGeneratorX86_64::VisitTypeConversion(HTypeConversion* conver
           }
           break;
 
-        case Primitive::kPrimFloat:
-          // Processing a Dex `float-to-double' instruction.
+        case DataType::Type::kFloat32:
           if (in.IsFpuRegister()) {
             __ cvtss2sd(out.AsFpuRegister<XmmRegister>(), in.AsFpuRegister<XmmRegister>());
           } else if (in.IsConstant()) {
@@ -3045,7 +3094,7 @@ void InstructionCodeGeneratorX86_64::VisitTypeConversion(HTypeConversion* conver
         default:
           LOG(FATAL) << "Unexpected type conversion from " << input_type
                      << " to " << result_type;
-      };
+      }
       break;
 
     default:
@@ -3056,16 +3105,16 @@ void InstructionCodeGeneratorX86_64::VisitTypeConversion(HTypeConversion* conver
 
 void LocationsBuilderX86_64::VisitAdd(HAdd* add) {
   LocationSummary* locations =
-      new (GetGraph()->GetArena()) LocationSummary(add, LocationSummary::kNoCall);
+      new (GetGraph()->GetAllocator()) LocationSummary(add, LocationSummary::kNoCall);
   switch (add->GetResultType()) {
-    case Primitive::kPrimInt: {
+    case DataType::Type::kInt32: {
       locations->SetInAt(0, Location::RequiresRegister());
       locations->SetInAt(1, Location::RegisterOrConstant(add->InputAt(1)));
       locations->SetOut(Location::RequiresRegister(), Location::kNoOutputOverlap);
       break;
     }
 
-    case Primitive::kPrimLong: {
+    case DataType::Type::kInt64: {
       locations->SetInAt(0, Location::RequiresRegister());
       // We can use a leaq or addq if the constant can fit in an immediate.
       locations->SetInAt(1, Location::RegisterOrInt32Constant(add->InputAt(1)));
@@ -3073,8 +3122,8 @@ void LocationsBuilderX86_64::VisitAdd(HAdd* add) {
       break;
     }
 
-    case Primitive::kPrimDouble:
-    case Primitive::kPrimFloat: {
+    case DataType::Type::kFloat64:
+    case DataType::Type::kFloat32: {
       locations->SetInAt(0, Location::RequiresFpuRegister());
       locations->SetInAt(1, Location::Any());
       locations->SetOut(Location::SameAsFirstInput());
@@ -3093,7 +3142,7 @@ void InstructionCodeGeneratorX86_64::VisitAdd(HAdd* add) {
   Location out = locations->Out();
 
   switch (add->GetResultType()) {
-    case Primitive::kPrimInt: {
+    case DataType::Type::kInt32: {
       if (second.IsRegister()) {
         if (out.AsRegister<Register>() == first.AsRegister<Register>()) {
           __ addl(out.AsRegister<CpuRegister>(), second.AsRegister<CpuRegister>());
@@ -3118,7 +3167,7 @@ void InstructionCodeGeneratorX86_64::VisitAdd(HAdd* add) {
       break;
     }
 
-    case Primitive::kPrimLong: {
+    case DataType::Type::kInt64: {
       if (second.IsRegister()) {
         if (out.AsRegister<Register>() == first.AsRegister<Register>()) {
           __ addq(out.AsRegister<CpuRegister>(), second.AsRegister<CpuRegister>());
@@ -3143,7 +3192,7 @@ void InstructionCodeGeneratorX86_64::VisitAdd(HAdd* add) {
       break;
     }
 
-    case Primitive::kPrimFloat: {
+    case DataType::Type::kFloat32: {
       if (second.IsFpuRegister()) {
         __ addss(first.AsFpuRegister<XmmRegister>(), second.AsFpuRegister<XmmRegister>());
       } else if (second.IsConstant()) {
@@ -3158,7 +3207,7 @@ void InstructionCodeGeneratorX86_64::VisitAdd(HAdd* add) {
       break;
     }
 
-    case Primitive::kPrimDouble: {
+    case DataType::Type::kFloat64: {
       if (second.IsFpuRegister()) {
         __ addsd(first.AsFpuRegister<XmmRegister>(), second.AsFpuRegister<XmmRegister>());
       } else if (second.IsConstant()) {
@@ -3180,22 +3229,22 @@ void InstructionCodeGeneratorX86_64::VisitAdd(HAdd* add) {
 
 void LocationsBuilderX86_64::VisitSub(HSub* sub) {
   LocationSummary* locations =
-      new (GetGraph()->GetArena()) LocationSummary(sub, LocationSummary::kNoCall);
+      new (GetGraph()->GetAllocator()) LocationSummary(sub, LocationSummary::kNoCall);
   switch (sub->GetResultType()) {
-    case Primitive::kPrimInt: {
+    case DataType::Type::kInt32: {
       locations->SetInAt(0, Location::RequiresRegister());
       locations->SetInAt(1, Location::Any());
       locations->SetOut(Location::SameAsFirstInput());
       break;
     }
-    case Primitive::kPrimLong: {
+    case DataType::Type::kInt64: {
       locations->SetInAt(0, Location::RequiresRegister());
       locations->SetInAt(1, Location::RegisterOrInt32Constant(sub->InputAt(1)));
       locations->SetOut(Location::SameAsFirstInput());
       break;
     }
-    case Primitive::kPrimFloat:
-    case Primitive::kPrimDouble: {
+    case DataType::Type::kFloat32:
+    case DataType::Type::kFloat64: {
       locations->SetInAt(0, Location::RequiresFpuRegister());
       locations->SetInAt(1, Location::Any());
       locations->SetOut(Location::SameAsFirstInput());
@@ -3212,7 +3261,7 @@ void InstructionCodeGeneratorX86_64::VisitSub(HSub* sub) {
   Location second = locations->InAt(1);
   DCHECK(first.Equals(locations->Out()));
   switch (sub->GetResultType()) {
-    case Primitive::kPrimInt: {
+    case DataType::Type::kInt32: {
       if (second.IsRegister()) {
         __ subl(first.AsRegister<CpuRegister>(), second.AsRegister<CpuRegister>());
       } else if (second.IsConstant()) {
@@ -3223,7 +3272,7 @@ void InstructionCodeGeneratorX86_64::VisitSub(HSub* sub) {
       }
       break;
     }
-    case Primitive::kPrimLong: {
+    case DataType::Type::kInt64: {
       if (second.IsConstant()) {
         int64_t value = second.GetConstant()->AsLongConstant()->GetValue();
         DCHECK(IsInt<32>(value));
@@ -3234,7 +3283,7 @@ void InstructionCodeGeneratorX86_64::VisitSub(HSub* sub) {
       break;
     }
 
-    case Primitive::kPrimFloat: {
+    case DataType::Type::kFloat32: {
       if (second.IsFpuRegister()) {
         __ subss(first.AsFpuRegister<XmmRegister>(), second.AsFpuRegister<XmmRegister>());
       } else if (second.IsConstant()) {
@@ -3249,7 +3298,7 @@ void InstructionCodeGeneratorX86_64::VisitSub(HSub* sub) {
       break;
     }
 
-    case Primitive::kPrimDouble: {
+    case DataType::Type::kFloat64: {
       if (second.IsFpuRegister()) {
         __ subsd(first.AsFpuRegister<XmmRegister>(), second.AsFpuRegister<XmmRegister>());
       } else if (second.IsConstant()) {
@@ -3271,9 +3320,9 @@ void InstructionCodeGeneratorX86_64::VisitSub(HSub* sub) {
 
 void LocationsBuilderX86_64::VisitMul(HMul* mul) {
   LocationSummary* locations =
-      new (GetGraph()->GetArena()) LocationSummary(mul, LocationSummary::kNoCall);
+      new (GetGraph()->GetAllocator()) LocationSummary(mul, LocationSummary::kNoCall);
   switch (mul->GetResultType()) {
-    case Primitive::kPrimInt: {
+    case DataType::Type::kInt32: {
       locations->SetInAt(0, Location::RequiresRegister());
       locations->SetInAt(1, Location::Any());
       if (mul->InputAt(1)->IsIntConstant()) {
@@ -3284,7 +3333,7 @@ void LocationsBuilderX86_64::VisitMul(HMul* mul) {
       }
       break;
     }
-    case Primitive::kPrimLong: {
+    case DataType::Type::kInt64: {
       locations->SetInAt(0, Location::RequiresRegister());
       locations->SetInAt(1, Location::Any());
       if (mul->InputAt(1)->IsLongConstant() &&
@@ -3296,8 +3345,8 @@ void LocationsBuilderX86_64::VisitMul(HMul* mul) {
       }
       break;
     }
-    case Primitive::kPrimFloat:
-    case Primitive::kPrimDouble: {
+    case DataType::Type::kFloat32:
+    case DataType::Type::kFloat64: {
       locations->SetInAt(0, Location::RequiresFpuRegister());
       locations->SetInAt(1, Location::Any());
       locations->SetOut(Location::SameAsFirstInput());
@@ -3315,7 +3364,7 @@ void InstructionCodeGeneratorX86_64::VisitMul(HMul* mul) {
   Location second = locations->InAt(1);
   Location out = locations->Out();
   switch (mul->GetResultType()) {
-    case Primitive::kPrimInt:
+    case DataType::Type::kInt32:
       // The constant may have ended up in a register, so test explicitly to avoid
       // problems where the output may not be the same as the first operand.
       if (mul->InputAt(1)->IsIntConstant()) {
@@ -3331,7 +3380,7 @@ void InstructionCodeGeneratorX86_64::VisitMul(HMul* mul) {
                  Address(CpuRegister(RSP), second.GetStackIndex()));
       }
       break;
-    case Primitive::kPrimLong: {
+    case DataType::Type::kInt64: {
       // The constant may have ended up in a register, so test explicitly to avoid
       // problems where the output may not be the same as the first operand.
       if (mul->InputAt(1)->IsLongConstant()) {
@@ -3356,7 +3405,7 @@ void InstructionCodeGeneratorX86_64::VisitMul(HMul* mul) {
       break;
     }
 
-    case Primitive::kPrimFloat: {
+    case DataType::Type::kFloat32: {
       DCHECK(first.Equals(out));
       if (second.IsFpuRegister()) {
         __ mulss(first.AsFpuRegister<XmmRegister>(), second.AsFpuRegister<XmmRegister>());
@@ -3372,7 +3421,7 @@ void InstructionCodeGeneratorX86_64::VisitMul(HMul* mul) {
       break;
     }
 
-    case Primitive::kPrimDouble: {
+    case DataType::Type::kFloat64: {
       DCHECK(first.Equals(out));
       if (second.IsFpuRegister()) {
         __ mulsd(first.AsFpuRegister<XmmRegister>(), second.AsFpuRegister<XmmRegister>());
@@ -3416,9 +3465,9 @@ void InstructionCodeGeneratorX86_64::PushOntoFPStack(Location source, uint32_t t
 }
 
 void InstructionCodeGeneratorX86_64::GenerateRemFP(HRem *rem) {
-  Primitive::Type type = rem->GetResultType();
-  bool is_float = type == Primitive::kPrimFloat;
-  size_t elem_size = Primitive::ComponentSize(type);
+  DataType::Type type = rem->GetResultType();
+  bool is_float = type == DataType::Type::kFloat32;
+  size_t elem_size = DataType::Size(type);
   LocationSummary* locations = rem->GetLocations();
   Location first = locations->InAt(0);
   Location second = locations->InAt(1);
@@ -3482,7 +3531,7 @@ void InstructionCodeGeneratorX86_64::DivRemOneOrMinusOne(HBinaryOperation* instr
   DCHECK(imm == 1 || imm == -1);
 
   switch (instruction->GetResultType()) {
-    case Primitive::kPrimInt: {
+    case DataType::Type::kInt32: {
       if (instruction->IsRem()) {
         __ xorl(output_register, output_register);
       } else {
@@ -3494,7 +3543,7 @@ void InstructionCodeGeneratorX86_64::DivRemOneOrMinusOne(HBinaryOperation* instr
       break;
     }
 
-    case Primitive::kPrimLong: {
+    case DataType::Type::kInt64: {
       if (instruction->IsRem()) {
         __ xorl(output_register, output_register);
       } else {
@@ -3510,7 +3559,40 @@ void InstructionCodeGeneratorX86_64::DivRemOneOrMinusOne(HBinaryOperation* instr
       LOG(FATAL) << "Unexpected type for div by (-)1 " << instruction->GetResultType();
   }
 }
+void InstructionCodeGeneratorX86_64::RemByPowerOfTwo(HRem* instruction) {
+  LocationSummary* locations = instruction->GetLocations();
+  Location second = locations->InAt(1);
+  CpuRegister out = locations->Out().AsRegister<CpuRegister>();
+  CpuRegister numerator = locations->InAt(0).AsRegister<CpuRegister>();
+  int64_t imm = Int64FromConstant(second.GetConstant());
+  DCHECK(IsPowerOfTwo(AbsOrMin(imm)));
+  uint64_t abs_imm = AbsOrMin(imm);
+  CpuRegister tmp = locations->GetTemp(0).AsRegister<CpuRegister>();
+  if (instruction->GetResultType() == DataType::Type::kInt32) {
+    NearLabel done;
+    __ movl(out, numerator);
+    __ andl(out, Immediate(abs_imm-1));
+    __ j(Condition::kZero, &done);
+    __ leal(tmp, Address(out, static_cast<int32_t>(~(abs_imm-1))));
+    __ testl(numerator, numerator);
+    __ cmov(Condition::kLess, out, tmp, false);
+    __ Bind(&done);
 
+  } else {
+    DCHECK_EQ(instruction->GetResultType(), DataType::Type::kInt64);
+    codegen_->Load64BitValue(tmp, abs_imm - 1);
+    NearLabel done;
+
+    __ movq(out, numerator);
+    __ andq(out, tmp);
+    __ j(Condition::kZero, &done);
+    __ movq(tmp, numerator);
+    __ sarq(tmp, Immediate(63));
+    __ shlq(tmp, Immediate(WhichPowerOf2(abs_imm)));
+    __ orq(out, tmp);
+    __ Bind(&done);
+  }
+}
 void InstructionCodeGeneratorX86_64::DivByPowerOfTwo(HDiv* instruction) {
   LocationSummary* locations = instruction->GetLocations();
   Location second = locations->InAt(1);
@@ -3524,10 +3606,18 @@ void InstructionCodeGeneratorX86_64::DivByPowerOfTwo(HDiv* instruction) {
 
   CpuRegister tmp = locations->GetTemp(0).AsRegister<CpuRegister>();
 
-  if (instruction->GetResultType() == Primitive::kPrimInt) {
-    __ leal(tmp, Address(numerator, abs_imm - 1));
-    __ testl(numerator, numerator);
-    __ cmov(kGreaterEqual, tmp, numerator);
+  if (instruction->GetResultType() == DataType::Type::kInt32) {
+    // When denominator is equal to 2, we can add signed bit and numerator to tmp.
+    // Below we are using addl instruction instead of cmov which give us 1 cycle benefit.
+    if (abs_imm == 2) {
+      __ leal(tmp, Address(numerator, 0));
+      __ shrl(tmp, Immediate(31));
+      __ addl(tmp, numerator);
+    } else {
+      __ leal(tmp, Address(numerator, abs_imm - 1));
+      __ testl(numerator, numerator);
+      __ cmov(kGreaterEqual, tmp, numerator);
+    }
     int shift = CTZ(imm);
     __ sarl(tmp, Immediate(shift));
 
@@ -3537,13 +3627,18 @@ void InstructionCodeGeneratorX86_64::DivByPowerOfTwo(HDiv* instruction) {
 
     __ movl(output_register, tmp);
   } else {
-    DCHECK_EQ(instruction->GetResultType(), Primitive::kPrimLong);
+    DCHECK_EQ(instruction->GetResultType(), DataType::Type::kInt64);
     CpuRegister rdx = locations->GetTemp(0).AsRegister<CpuRegister>();
-
-    codegen_->Load64BitValue(rdx, abs_imm - 1);
-    __ addq(rdx, numerator);
-    __ testq(numerator, numerator);
-    __ cmov(kGreaterEqual, rdx, numerator);
+    if (abs_imm == 2) {
+      __ movq(rdx, numerator);
+      __ shrq(rdx, Immediate(63));
+      __ addq(rdx, numerator);
+    } else {
+      codegen_->Load64BitValue(rdx, abs_imm - 1);
+      __ addq(rdx, numerator);
+      __ testq(numerator, numerator);
+      __ cmov(kGreaterEqual, rdx, numerator);
+    }
     int shift = CTZ(imm);
     __ sarq(rdx, Immediate(shift));
 
@@ -3580,10 +3675,10 @@ void InstructionCodeGeneratorX86_64::GenerateDivRemWithAnyConstant(HBinaryOperat
   int shift;
 
   // TODO: can these branches be written as one?
-  if (instruction->GetResultType() == Primitive::kPrimInt) {
+  if (instruction->GetResultType() == DataType::Type::kInt32) {
     int imm = second.GetConstant()->AsIntConstant()->GetValue();
 
-    CalculateMagicAndShiftForDivRem(imm, false /* is_long */, &magic, &shift);
+    CalculateMagicAndShiftForDivRem(imm, false /* is_long= */, &magic, &shift);
 
     __ movl(numerator, eax);
 
@@ -3615,12 +3710,12 @@ void InstructionCodeGeneratorX86_64::GenerateDivRemWithAnyConstant(HBinaryOperat
   } else {
     int64_t imm = second.GetConstant()->AsLongConstant()->GetValue();
 
-    DCHECK_EQ(instruction->GetResultType(), Primitive::kPrimLong);
+    DCHECK_EQ(instruction->GetResultType(), DataType::Type::kInt64);
 
     CpuRegister rax = eax;
     CpuRegister rdx = edx;
 
-    CalculateMagicAndShiftForDivRem(imm, true /* is_long */, &magic, &shift);
+    CalculateMagicAndShiftForDivRem(imm, true /* is_long= */, &magic, &shift);
 
     // Save the numerator.
     __ movq(numerator, rax);
@@ -3668,8 +3763,8 @@ void InstructionCodeGeneratorX86_64::GenerateDivRemWithAnyConstant(HBinaryOperat
 
 void InstructionCodeGeneratorX86_64::GenerateDivRemIntegral(HBinaryOperation* instruction) {
   DCHECK(instruction->IsDiv() || instruction->IsRem());
-  Primitive::Type type = instruction->GetResultType();
-  DCHECK(type == Primitive::kPrimInt || type == Primitive::kPrimLong);
+  DataType::Type type = instruction->GetResultType();
+  DCHECK(type == DataType::Type::kInt32 || type == DataType::Type::kInt64);
 
   bool is_div = instruction->IsDiv();
   LocationSummary* locations = instruction->GetLocations();
@@ -3687,15 +3782,19 @@ void InstructionCodeGeneratorX86_64::GenerateDivRemIntegral(HBinaryOperation* in
       // Do not generate anything. DivZeroCheck would prevent any code to be executed.
     } else if (imm == 1 || imm == -1) {
       DivRemOneOrMinusOne(instruction);
-    } else if (instruction->IsDiv() && IsPowerOfTwo(AbsOrMin(imm))) {
-      DivByPowerOfTwo(instruction->AsDiv());
+    } else if (IsPowerOfTwo(AbsOrMin(imm))) {
+      if (is_div) {
+        DivByPowerOfTwo(instruction->AsDiv());
+      } else {
+        RemByPowerOfTwo(instruction->AsRem());
+      }
     } else {
       DCHECK(imm <= -2 || imm >= 2);
       GenerateDivRemWithAnyConstant(instruction);
     }
   } else {
     SlowPathCode* slow_path =
-        new (GetGraph()->GetArena()) DivRemMinusOneSlowPathX86_64(
+        new (codegen_->GetScopedAllocator()) DivRemMinusOneSlowPathX86_64(
             instruction, out.AsRegister(), type, is_div);
     codegen_->AddSlowPath(slow_path);
 
@@ -3703,7 +3802,7 @@ void InstructionCodeGeneratorX86_64::GenerateDivRemIntegral(HBinaryOperation* in
     // 0x80000000(00000000)/-1 triggers an arithmetic exception!
     // Dividing by -1 is actually negation and -0x800000000(00000000) = 0x80000000(00000000)
     // so it's safe to just use negl instead of more complex comparisons.
-    if (type == Primitive::kPrimInt) {
+    if (type == DataType::Type::kInt32) {
       __ cmpl(second_reg, Immediate(-1));
       __ j(kEqual, slow_path->GetEntryLabel());
       // edx:eax <- sign-extended of eax
@@ -3724,10 +3823,10 @@ void InstructionCodeGeneratorX86_64::GenerateDivRemIntegral(HBinaryOperation* in
 
 void LocationsBuilderX86_64::VisitDiv(HDiv* div) {
   LocationSummary* locations =
-      new (GetGraph()->GetArena()) LocationSummary(div, LocationSummary::kNoCall);
+      new (GetGraph()->GetAllocator()) LocationSummary(div, LocationSummary::kNoCall);
   switch (div->GetResultType()) {
-    case Primitive::kPrimInt:
-    case Primitive::kPrimLong: {
+    case DataType::Type::kInt32:
+    case DataType::Type::kInt64: {
       locations->SetInAt(0, Location::RegisterLocation(RAX));
       locations->SetInAt(1, Location::RegisterOrConstant(div->InputAt(1)));
       locations->SetOut(Location::SameAsFirstInput());
@@ -3742,8 +3841,8 @@ void LocationsBuilderX86_64::VisitDiv(HDiv* div) {
       break;
     }
 
-    case Primitive::kPrimFloat:
-    case Primitive::kPrimDouble: {
+    case DataType::Type::kFloat32:
+    case DataType::Type::kFloat64: {
       locations->SetInAt(0, Location::RequiresFpuRegister());
       locations->SetInAt(1, Location::Any());
       locations->SetOut(Location::SameAsFirstInput());
@@ -3761,15 +3860,15 @@ void InstructionCodeGeneratorX86_64::VisitDiv(HDiv* div) {
   Location second = locations->InAt(1);
   DCHECK(first.Equals(locations->Out()));
 
-  Primitive::Type type = div->GetResultType();
+  DataType::Type type = div->GetResultType();
   switch (type) {
-    case Primitive::kPrimInt:
-    case Primitive::kPrimLong: {
+    case DataType::Type::kInt32:
+    case DataType::Type::kInt64: {
       GenerateDivRemIntegral(div);
       break;
     }
 
-    case Primitive::kPrimFloat: {
+    case DataType::Type::kFloat32: {
       if (second.IsFpuRegister()) {
         __ divss(first.AsFpuRegister<XmmRegister>(), second.AsFpuRegister<XmmRegister>());
       } else if (second.IsConstant()) {
@@ -3784,7 +3883,7 @@ void InstructionCodeGeneratorX86_64::VisitDiv(HDiv* div) {
       break;
     }
 
-    case Primitive::kPrimDouble: {
+    case DataType::Type::kFloat64: {
       if (second.IsFpuRegister()) {
         __ divsd(first.AsFpuRegister<XmmRegister>(), second.AsFpuRegister<XmmRegister>());
       } else if (second.IsConstant()) {
@@ -3805,13 +3904,13 @@ void InstructionCodeGeneratorX86_64::VisitDiv(HDiv* div) {
 }
 
 void LocationsBuilderX86_64::VisitRem(HRem* rem) {
-  Primitive::Type type = rem->GetResultType();
+  DataType::Type type = rem->GetResultType();
   LocationSummary* locations =
-    new (GetGraph()->GetArena()) LocationSummary(rem, LocationSummary::kNoCall);
+    new (GetGraph()->GetAllocator()) LocationSummary(rem, LocationSummary::kNoCall);
 
   switch (type) {
-    case Primitive::kPrimInt:
-    case Primitive::kPrimLong: {
+    case DataType::Type::kInt32:
+    case DataType::Type::kInt64: {
       locations->SetInAt(0, Location::RegisterLocation(RAX));
       locations->SetInAt(1, Location::RegisterOrConstant(rem->InputAt(1)));
       // Intel uses rdx:rax as the dividend and puts the remainder in rdx
@@ -3825,8 +3924,8 @@ void LocationsBuilderX86_64::VisitRem(HRem* rem) {
       break;
     }
 
-    case Primitive::kPrimFloat:
-    case Primitive::kPrimDouble: {
+    case DataType::Type::kFloat32:
+    case DataType::Type::kFloat64: {
       locations->SetInAt(0, Location::Any());
       locations->SetInAt(1, Location::Any());
       locations->SetOut(Location::RequiresFpuRegister());
@@ -3840,20 +3939,255 @@ void LocationsBuilderX86_64::VisitRem(HRem* rem) {
 }
 
 void InstructionCodeGeneratorX86_64::VisitRem(HRem* rem) {
-  Primitive::Type type = rem->GetResultType();
+  DataType::Type type = rem->GetResultType();
   switch (type) {
-    case Primitive::kPrimInt:
-    case Primitive::kPrimLong: {
+    case DataType::Type::kInt32:
+    case DataType::Type::kInt64: {
       GenerateDivRemIntegral(rem);
       break;
     }
-    case Primitive::kPrimFloat:
-    case Primitive::kPrimDouble: {
+    case DataType::Type::kFloat32:
+    case DataType::Type::kFloat64: {
       GenerateRemFP(rem);
       break;
     }
     default:
       LOG(FATAL) << "Unexpected rem type " << rem->GetResultType();
+  }
+}
+
+static void CreateMinMaxLocations(ArenaAllocator* allocator, HBinaryOperation* minmax) {
+  LocationSummary* locations = new (allocator) LocationSummary(minmax);
+  switch (minmax->GetResultType()) {
+    case DataType::Type::kInt32:
+    case DataType::Type::kInt64:
+      locations->SetInAt(0, Location::RequiresRegister());
+      locations->SetInAt(1, Location::RequiresRegister());
+      locations->SetOut(Location::SameAsFirstInput());
+      break;
+    case DataType::Type::kFloat32:
+    case DataType::Type::kFloat64:
+      locations->SetInAt(0, Location::RequiresFpuRegister());
+      locations->SetInAt(1, Location::RequiresFpuRegister());
+      // The following is sub-optimal, but all we can do for now. It would be fine to also accept
+      // the second input to be the output (we can simply swap inputs).
+      locations->SetOut(Location::SameAsFirstInput());
+      break;
+    default:
+      LOG(FATAL) << "Unexpected type for HMinMax " << minmax->GetResultType();
+  }
+}
+
+void InstructionCodeGeneratorX86_64::GenerateMinMaxInt(LocationSummary* locations,
+                                                       bool is_min,
+                                                       DataType::Type type) {
+  Location op1_loc = locations->InAt(0);
+  Location op2_loc = locations->InAt(1);
+
+  // Shortcut for same input locations.
+  if (op1_loc.Equals(op2_loc)) {
+    // Can return immediately, as op1_loc == out_loc.
+    // Note: if we ever support separate registers, e.g., output into memory, we need to check for
+    //       a copy here.
+    DCHECK(locations->Out().Equals(op1_loc));
+    return;
+  }
+
+  CpuRegister out = locations->Out().AsRegister<CpuRegister>();
+  CpuRegister op2 = op2_loc.AsRegister<CpuRegister>();
+
+  //  (out := op1)
+  //  out <=? op2
+  //  if out is min jmp done
+  //  out := op2
+  // done:
+
+  if (type == DataType::Type::kInt64) {
+    __ cmpq(out, op2);
+    __ cmov(is_min ? Condition::kGreater : Condition::kLess, out, op2, /*is64bit*/ true);
+  } else {
+    DCHECK_EQ(type, DataType::Type::kInt32);
+    __ cmpl(out, op2);
+    __ cmov(is_min ? Condition::kGreater : Condition::kLess, out, op2, /*is64bit*/ false);
+  }
+}
+
+void InstructionCodeGeneratorX86_64::GenerateMinMaxFP(LocationSummary* locations,
+                                                      bool is_min,
+                                                      DataType::Type type) {
+  Location op1_loc = locations->InAt(0);
+  Location op2_loc = locations->InAt(1);
+  Location out_loc = locations->Out();
+  XmmRegister out = out_loc.AsFpuRegister<XmmRegister>();
+
+  // Shortcut for same input locations.
+  if (op1_loc.Equals(op2_loc)) {
+    DCHECK(out_loc.Equals(op1_loc));
+    return;
+  }
+
+  //  (out := op1)
+  //  out <=? op2
+  //  if Nan jmp Nan_label
+  //  if out is min jmp done
+  //  if op2 is min jmp op2_label
+  //  handle -0/+0
+  //  jmp done
+  // Nan_label:
+  //  out := NaN
+  // op2_label:
+  //  out := op2
+  // done:
+  //
+  // This removes one jmp, but needs to copy one input (op1) to out.
+  //
+  // TODO: This is straight from Quick. Make NaN an out-of-line slowpath?
+
+  XmmRegister op2 = op2_loc.AsFpuRegister<XmmRegister>();
+
+  NearLabel nan, done, op2_label;
+  if (type == DataType::Type::kFloat64) {
+    __ ucomisd(out, op2);
+  } else {
+    DCHECK_EQ(type, DataType::Type::kFloat32);
+    __ ucomiss(out, op2);
+  }
+
+  __ j(Condition::kParityEven, &nan);
+
+  __ j(is_min ? Condition::kAbove : Condition::kBelow, &op2_label);
+  __ j(is_min ? Condition::kBelow : Condition::kAbove, &done);
+
+  // Handle 0.0/-0.0.
+  if (is_min) {
+    if (type == DataType::Type::kFloat64) {
+      __ orpd(out, op2);
+    } else {
+      __ orps(out, op2);
+    }
+  } else {
+    if (type == DataType::Type::kFloat64) {
+      __ andpd(out, op2);
+    } else {
+      __ andps(out, op2);
+    }
+  }
+  __ jmp(&done);
+
+  // NaN handling.
+  __ Bind(&nan);
+  if (type == DataType::Type::kFloat64) {
+    __ movsd(out, codegen_->LiteralInt64Address(INT64_C(0x7FF8000000000000)));
+  } else {
+    __ movss(out, codegen_->LiteralInt32Address(INT32_C(0x7FC00000)));
+  }
+  __ jmp(&done);
+
+  // out := op2;
+  __ Bind(&op2_label);
+  if (type == DataType::Type::kFloat64) {
+    __ movsd(out, op2);
+  } else {
+    __ movss(out, op2);
+  }
+
+  // Done.
+  __ Bind(&done);
+}
+
+void InstructionCodeGeneratorX86_64::GenerateMinMax(HBinaryOperation* minmax, bool is_min) {
+  DataType::Type type = minmax->GetResultType();
+  switch (type) {
+    case DataType::Type::kInt32:
+    case DataType::Type::kInt64:
+      GenerateMinMaxInt(minmax->GetLocations(), is_min, type);
+      break;
+    case DataType::Type::kFloat32:
+    case DataType::Type::kFloat64:
+      GenerateMinMaxFP(minmax->GetLocations(), is_min, type);
+      break;
+    default:
+      LOG(FATAL) << "Unexpected type for HMinMax " << type;
+  }
+}
+
+void LocationsBuilderX86_64::VisitMin(HMin* min) {
+  CreateMinMaxLocations(GetGraph()->GetAllocator(), min);
+}
+
+void InstructionCodeGeneratorX86_64::VisitMin(HMin* min) {
+  GenerateMinMax(min, /*is_min*/ true);
+}
+
+void LocationsBuilderX86_64::VisitMax(HMax* max) {
+  CreateMinMaxLocations(GetGraph()->GetAllocator(), max);
+}
+
+void InstructionCodeGeneratorX86_64::VisitMax(HMax* max) {
+  GenerateMinMax(max, /*is_min*/ false);
+}
+
+void LocationsBuilderX86_64::VisitAbs(HAbs* abs) {
+  LocationSummary* locations = new (GetGraph()->GetAllocator()) LocationSummary(abs);
+  switch (abs->GetResultType()) {
+    case DataType::Type::kInt32:
+    case DataType::Type::kInt64:
+      locations->SetInAt(0, Location::RequiresRegister());
+      locations->SetOut(Location::SameAsFirstInput());
+      locations->AddTemp(Location::RequiresRegister());
+      break;
+    case DataType::Type::kFloat32:
+    case DataType::Type::kFloat64:
+      locations->SetInAt(0, Location::RequiresFpuRegister());
+      locations->SetOut(Location::SameAsFirstInput());
+      locations->AddTemp(Location::RequiresFpuRegister());
+      break;
+    default:
+      LOG(FATAL) << "Unexpected type for HAbs " << abs->GetResultType();
+  }
+}
+
+void InstructionCodeGeneratorX86_64::VisitAbs(HAbs* abs) {
+  LocationSummary* locations = abs->GetLocations();
+  switch (abs->GetResultType()) {
+    case DataType::Type::kInt32: {
+      CpuRegister out = locations->Out().AsRegister<CpuRegister>();
+      CpuRegister mask = locations->GetTemp(0).AsRegister<CpuRegister>();
+      // Create mask.
+      __ movl(mask, out);
+      __ sarl(mask, Immediate(31));
+      // Add mask.
+      __ addl(out, mask);
+      __ xorl(out, mask);
+      break;
+    }
+    case DataType::Type::kInt64: {
+      CpuRegister out = locations->Out().AsRegister<CpuRegister>();
+      CpuRegister mask = locations->GetTemp(0).AsRegister<CpuRegister>();
+      // Create mask.
+      __ movq(mask, out);
+      __ sarq(mask, Immediate(63));
+      // Add mask.
+      __ addq(out, mask);
+      __ xorq(out, mask);
+      break;
+    }
+    case DataType::Type::kFloat32: {
+      XmmRegister out = locations->Out().AsFpuRegister<XmmRegister>();
+      XmmRegister mask = locations->GetTemp(0).AsFpuRegister<XmmRegister>();
+      __ movss(mask, codegen_->LiteralInt32Address(INT32_C(0x7FFFFFFF)));
+      __ andps(out, mask);
+      break;
+    }
+    case DataType::Type::kFloat64: {
+      XmmRegister out = locations->Out().AsFpuRegister<XmmRegister>();
+      XmmRegister mask = locations->GetTemp(0).AsFpuRegister<XmmRegister>();
+      __ movsd(mask, codegen_->LiteralInt64Address(INT64_C(0x7FFFFFFFFFFFFFFF)));
+      __ andpd(out, mask);
+      break;
+    }
+    default:
+      LOG(FATAL) << "Unexpected type for HAbs " << abs->GetResultType();
   }
 }
 
@@ -3864,18 +4198,19 @@ void LocationsBuilderX86_64::VisitDivZeroCheck(HDivZeroCheck* instruction) {
 
 void InstructionCodeGeneratorX86_64::VisitDivZeroCheck(HDivZeroCheck* instruction) {
   SlowPathCode* slow_path =
-      new (GetGraph()->GetArena()) DivZeroCheckSlowPathX86_64(instruction);
+      new (codegen_->GetScopedAllocator()) DivZeroCheckSlowPathX86_64(instruction);
   codegen_->AddSlowPath(slow_path);
 
   LocationSummary* locations = instruction->GetLocations();
   Location value = locations->InAt(0);
 
   switch (instruction->GetType()) {
-    case Primitive::kPrimBoolean:
-    case Primitive::kPrimByte:
-    case Primitive::kPrimChar:
-    case Primitive::kPrimShort:
-    case Primitive::kPrimInt: {
+    case DataType::Type::kBool:
+    case DataType::Type::kUint8:
+    case DataType::Type::kInt8:
+    case DataType::Type::kUint16:
+    case DataType::Type::kInt16:
+    case DataType::Type::kInt32: {
       if (value.IsRegister()) {
         __ testl(value.AsRegister<CpuRegister>(), value.AsRegister<CpuRegister>());
         __ j(kEqual, slow_path->GetEntryLabel());
@@ -3890,7 +4225,7 @@ void InstructionCodeGeneratorX86_64::VisitDivZeroCheck(HDivZeroCheck* instructio
       }
       break;
     }
-    case Primitive::kPrimLong: {
+    case DataType::Type::kInt64: {
       if (value.IsRegister()) {
         __ testq(value.AsRegister<CpuRegister>(), value.AsRegister<CpuRegister>());
         __ j(kEqual, slow_path->GetEntryLabel());
@@ -3914,11 +4249,11 @@ void LocationsBuilderX86_64::HandleShift(HBinaryOperation* op) {
   DCHECK(op->IsShl() || op->IsShr() || op->IsUShr());
 
   LocationSummary* locations =
-      new (GetGraph()->GetArena()) LocationSummary(op, LocationSummary::kNoCall);
+      new (GetGraph()->GetAllocator()) LocationSummary(op, LocationSummary::kNoCall);
 
   switch (op->GetResultType()) {
-    case Primitive::kPrimInt:
-    case Primitive::kPrimLong: {
+    case DataType::Type::kInt32:
+    case DataType::Type::kInt64: {
       locations->SetInAt(0, Location::RequiresRegister());
       // The shift count needs to be in CL.
       locations->SetInAt(1, Location::ByteRegisterOrConstant(RCX, op->InputAt(1)));
@@ -3938,7 +4273,7 @@ void InstructionCodeGeneratorX86_64::HandleShift(HBinaryOperation* op) {
   Location second = locations->InAt(1);
 
   switch (op->GetResultType()) {
-    case Primitive::kPrimInt: {
+    case DataType::Type::kInt32: {
       if (second.IsRegister()) {
         CpuRegister second_reg = second.AsRegister<CpuRegister>();
         if (op->IsShl()) {
@@ -3960,7 +4295,7 @@ void InstructionCodeGeneratorX86_64::HandleShift(HBinaryOperation* op) {
       }
       break;
     }
-    case Primitive::kPrimLong: {
+    case DataType::Type::kInt64: {
       if (second.IsRegister()) {
         CpuRegister second_reg = second.AsRegister<CpuRegister>();
         if (op->IsShl()) {
@@ -3990,11 +4325,11 @@ void InstructionCodeGeneratorX86_64::HandleShift(HBinaryOperation* op) {
 
 void LocationsBuilderX86_64::VisitRor(HRor* ror) {
   LocationSummary* locations =
-      new (GetGraph()->GetArena()) LocationSummary(ror, LocationSummary::kNoCall);
+      new (GetGraph()->GetAllocator()) LocationSummary(ror, LocationSummary::kNoCall);
 
   switch (ror->GetResultType()) {
-    case Primitive::kPrimInt:
-    case Primitive::kPrimLong: {
+    case DataType::Type::kInt32:
+    case DataType::Type::kInt64: {
       locations->SetInAt(0, Location::RequiresRegister());
       // The shift count needs to be in CL (unless it is a constant).
       locations->SetInAt(1, Location::ByteRegisterOrConstant(RCX, ror->InputAt(1)));
@@ -4013,7 +4348,7 @@ void InstructionCodeGeneratorX86_64::VisitRor(HRor* ror) {
   Location second = locations->InAt(1);
 
   switch (ror->GetResultType()) {
-    case Primitive::kPrimInt:
+    case DataType::Type::kInt32:
       if (second.IsRegister()) {
         CpuRegister second_reg = second.AsRegister<CpuRegister>();
         __ rorl(first_reg, second_reg);
@@ -4022,7 +4357,7 @@ void InstructionCodeGeneratorX86_64::VisitRor(HRor* ror) {
         __ rorl(first_reg, imm);
       }
       break;
-    case Primitive::kPrimLong:
+    case DataType::Type::kInt64:
       if (second.IsRegister()) {
         CpuRegister second_reg = second.AsRegister<CpuRegister>();
         __ rorq(first_reg, second_reg);
@@ -4062,37 +4397,22 @@ void InstructionCodeGeneratorX86_64::VisitUShr(HUShr* ushr) {
 }
 
 void LocationsBuilderX86_64::VisitNewInstance(HNewInstance* instruction) {
-  LocationSummary* locations =
-      new (GetGraph()->GetArena()) LocationSummary(instruction, LocationSummary::kCallOnMainOnly);
+  LocationSummary* locations = new (GetGraph()->GetAllocator()) LocationSummary(
+      instruction, LocationSummary::kCallOnMainOnly);
   InvokeRuntimeCallingConvention calling_convention;
-  if (instruction->IsStringAlloc()) {
-    locations->AddTemp(Location::RegisterLocation(kMethodRegisterArgument));
-  } else {
-    locations->SetInAt(0, Location::RegisterLocation(calling_convention.GetRegisterAt(0)));
-  }
+  locations->SetInAt(0, Location::RegisterLocation(calling_convention.GetRegisterAt(0)));
   locations->SetOut(Location::RegisterLocation(RAX));
 }
 
 void InstructionCodeGeneratorX86_64::VisitNewInstance(HNewInstance* instruction) {
-  // Note: if heap poisoning is enabled, the entry point takes cares
-  // of poisoning the reference.
-  if (instruction->IsStringAlloc()) {
-    // String is allocated through StringFactory. Call NewEmptyString entry point.
-    CpuRegister temp = instruction->GetLocations()->GetTemp(0).AsRegister<CpuRegister>();
-    MemberOffset code_offset = ArtMethod::EntryPointFromQuickCompiledCodeOffset(kX86_64PointerSize);
-    __ gs()->movq(temp, Address::Absolute(QUICK_ENTRY_POINT(pNewEmptyString), /* no_rip */ true));
-    __ call(Address(temp, code_offset.SizeValue()));
-    codegen_->RecordPcInfo(instruction, instruction->GetDexPc());
-  } else {
-    codegen_->InvokeRuntime(instruction->GetEntrypoint(), instruction, instruction->GetDexPc());
-    CheckEntrypointTypes<kQuickAllocObjectWithChecks, void*, mirror::Class*>();
-    DCHECK(!codegen_->IsLeafMethod());
-  }
+  codegen_->InvokeRuntime(instruction->GetEntrypoint(), instruction, instruction->GetDexPc());
+  CheckEntrypointTypes<kQuickAllocObjectWithChecks, void*, mirror::Class*>();
+  DCHECK(!codegen_->IsLeafMethod());
 }
 
 void LocationsBuilderX86_64::VisitNewArray(HNewArray* instruction) {
-  LocationSummary* locations =
-      new (GetGraph()->GetArena()) LocationSummary(instruction, LocationSummary::kCallOnMainOnly);
+  LocationSummary* locations = new (GetGraph()->GetAllocator()) LocationSummary(
+      instruction, LocationSummary::kCallOnMainOnly);
   InvokeRuntimeCallingConvention calling_convention;
   locations->SetOut(Location::RegisterLocation(RAX));
   locations->SetInAt(0, Location::RegisterLocation(calling_convention.GetRegisterAt(0)));
@@ -4100,10 +4420,8 @@ void LocationsBuilderX86_64::VisitNewArray(HNewArray* instruction) {
 }
 
 void InstructionCodeGeneratorX86_64::VisitNewArray(HNewArray* instruction) {
-  // Note: if heap poisoning is enabled, the entry point takes cares
-  // of poisoning the reference.
-  QuickEntrypointEnum entrypoint =
-      CodeGenerator::GetArrayAllocationEntrypoint(instruction->GetLoadClass()->GetClass());
+  // Note: if heap poisoning is enabled, the entry point takes care of poisoning the reference.
+  QuickEntrypointEnum entrypoint = CodeGenerator::GetArrayAllocationEntrypoint(instruction);
   codegen_->InvokeRuntime(entrypoint, instruction, instruction->GetDexPc());
   CheckEntrypointTypes<kQuickAllocArrayResolved, void*, mirror::Class*, int32_t>();
   DCHECK(!codegen_->IsLeafMethod());
@@ -4111,7 +4429,7 @@ void InstructionCodeGeneratorX86_64::VisitNewArray(HNewArray* instruction) {
 
 void LocationsBuilderX86_64::VisitParameterValue(HParameterValue* instruction) {
   LocationSummary* locations =
-      new (GetGraph()->GetArena()) LocationSummary(instruction, LocationSummary::kNoCall);
+      new (GetGraph()->GetAllocator()) LocationSummary(instruction, LocationSummary::kNoCall);
   Location location = parameter_visitor_.GetNextLocation(instruction->GetType());
   if (location.IsStackSlot()) {
     location = Location::StackSlot(location.GetStackIndex() + codegen_->GetFrameSize());
@@ -4128,7 +4446,7 @@ void InstructionCodeGeneratorX86_64::VisitParameterValue(
 
 void LocationsBuilderX86_64::VisitCurrentMethod(HCurrentMethod* instruction) {
   LocationSummary* locations =
-      new (GetGraph()->GetArena()) LocationSummary(instruction, LocationSummary::kNoCall);
+      new (GetGraph()->GetAllocator()) LocationSummary(instruction, LocationSummary::kNoCall);
   locations->SetOut(Location::RegisterLocation(kMethodRegisterArgument));
 }
 
@@ -4139,7 +4457,7 @@ void InstructionCodeGeneratorX86_64::VisitCurrentMethod(
 
 void LocationsBuilderX86_64::VisitClassTableGet(HClassTableGet* instruction) {
   LocationSummary* locations =
-      new (GetGraph()->GetArena()) LocationSummary(instruction, LocationSummary::kNoCall);
+      new (GetGraph()->GetAllocator()) LocationSummary(instruction, LocationSummary::kNoCall);
   locations->SetInAt(0, Location::RequiresRegister());
   locations->SetOut(Location::RequiresRegister());
 }
@@ -4164,7 +4482,7 @@ void InstructionCodeGeneratorX86_64::VisitClassTableGet(HClassTableGet* instruct
 
 void LocationsBuilderX86_64::VisitNot(HNot* not_) {
   LocationSummary* locations =
-      new (GetGraph()->GetArena()) LocationSummary(not_, LocationSummary::kNoCall);
+      new (GetGraph()->GetAllocator()) LocationSummary(not_, LocationSummary::kNoCall);
   locations->SetInAt(0, Location::RequiresRegister());
   locations->SetOut(Location::SameAsFirstInput());
 }
@@ -4175,11 +4493,11 @@ void InstructionCodeGeneratorX86_64::VisitNot(HNot* not_) {
             locations->Out().AsRegister<CpuRegister>().AsRegister());
   Location out = locations->Out();
   switch (not_->GetResultType()) {
-    case Primitive::kPrimInt:
+    case DataType::Type::kInt32:
       __ notl(out.AsRegister<CpuRegister>());
       break;
 
-    case Primitive::kPrimLong:
+    case DataType::Type::kInt64:
       __ notq(out.AsRegister<CpuRegister>());
       break;
 
@@ -4190,7 +4508,7 @@ void InstructionCodeGeneratorX86_64::VisitNot(HNot* not_) {
 
 void LocationsBuilderX86_64::VisitBooleanNot(HBooleanNot* bool_not) {
   LocationSummary* locations =
-      new (GetGraph()->GetArena()) LocationSummary(bool_not, LocationSummary::kNoCall);
+      new (GetGraph()->GetAllocator()) LocationSummary(bool_not, LocationSummary::kNoCall);
   locations->SetInAt(0, Location::RequiresRegister());
   locations->SetOut(Location::SameAsFirstInput());
 }
@@ -4205,7 +4523,7 @@ void InstructionCodeGeneratorX86_64::VisitBooleanNot(HBooleanNot* bool_not) {
 
 void LocationsBuilderX86_64::VisitPhi(HPhi* instruction) {
   LocationSummary* locations =
-      new (GetGraph()->GetArena()) LocationSummary(instruction, LocationSummary::kNoCall);
+      new (GetGraph()->GetAllocator()) LocationSummary(instruction, LocationSummary::kNoCall);
   for (size_t i = 0, e = locations->GetInputCount(); i < e; ++i) {
     locations->SetInAt(i, Location::Any());
   }
@@ -4235,7 +4553,7 @@ void CodeGeneratorX86_64::GenerateMemoryBarrier(MemBarrierKind kind) {
     }
     case MemBarrierKind::kNTStoreStore:
       // Non-Temporal Store/Store needs an explicit fence.
-      MemoryFence(/* non-temporal */ true);
+      MemoryFence(/* non-temporal= */ true);
       break;
   }
 }
@@ -4244,17 +4562,17 @@ void LocationsBuilderX86_64::HandleFieldGet(HInstruction* instruction) {
   DCHECK(instruction->IsInstanceFieldGet() || instruction->IsStaticFieldGet());
 
   bool object_field_get_with_read_barrier =
-      kEmitCompilerReadBarrier && (instruction->GetType() == Primitive::kPrimNot);
+      kEmitCompilerReadBarrier && (instruction->GetType() == DataType::Type::kReference);
   LocationSummary* locations =
-      new (GetGraph()->GetArena()) LocationSummary(instruction,
-                                                   object_field_get_with_read_barrier ?
-                                                       LocationSummary::kCallOnSlowPath :
-                                                       LocationSummary::kNoCall);
+      new (GetGraph()->GetAllocator()) LocationSummary(instruction,
+                                                       object_field_get_with_read_barrier
+                                                           ? LocationSummary::kCallOnSlowPath
+                                                           : LocationSummary::kNoCall);
   if (object_field_get_with_read_barrier && kUseBakerReadBarrier) {
     locations->SetCustomSlowPathCallerSaves(RegisterSet::Empty());  // No caller-save registers.
   }
   locations->SetInAt(0, Location::RequiresRegister());
-  if (Primitive::IsFloatingPointType(instruction->GetType())) {
+  if (DataType::IsFloatingPointType(instruction->GetType())) {
     locations->SetOut(Location::RequiresFpuRegister());
   } else {
     // The output overlaps for an object field get when read barriers
@@ -4275,42 +4593,44 @@ void InstructionCodeGeneratorX86_64::HandleFieldGet(HInstruction* instruction,
   CpuRegister base = base_loc.AsRegister<CpuRegister>();
   Location out = locations->Out();
   bool is_volatile = field_info.IsVolatile();
-  Primitive::Type field_type = field_info.GetFieldType();
+  DCHECK_EQ(DataType::Size(field_info.GetFieldType()), DataType::Size(instruction->GetType()));
+  DataType::Type load_type = instruction->GetType();
   uint32_t offset = field_info.GetFieldOffset().Uint32Value();
 
-  switch (field_type) {
-    case Primitive::kPrimBoolean: {
+  switch (load_type) {
+    case DataType::Type::kBool:
+    case DataType::Type::kUint8: {
       __ movzxb(out.AsRegister<CpuRegister>(), Address(base, offset));
       break;
     }
 
-    case Primitive::kPrimByte: {
+    case DataType::Type::kInt8: {
       __ movsxb(out.AsRegister<CpuRegister>(), Address(base, offset));
       break;
     }
 
-    case Primitive::kPrimShort: {
-      __ movsxw(out.AsRegister<CpuRegister>(), Address(base, offset));
-      break;
-    }
-
-    case Primitive::kPrimChar: {
+    case DataType::Type::kUint16: {
       __ movzxw(out.AsRegister<CpuRegister>(), Address(base, offset));
       break;
     }
 
-    case Primitive::kPrimInt: {
+    case DataType::Type::kInt16: {
+      __ movsxw(out.AsRegister<CpuRegister>(), Address(base, offset));
+      break;
+    }
+
+    case DataType::Type::kInt32: {
       __ movl(out.AsRegister<CpuRegister>(), Address(base, offset));
       break;
     }
 
-    case Primitive::kPrimNot: {
+    case DataType::Type::kReference: {
       // /* HeapReference<Object> */ out = *(base + offset)
       if (kEmitCompilerReadBarrier && kUseBakerReadBarrier) {
         // Note that a potential implicit null check is handled in this
         // CodeGeneratorX86_64::GenerateFieldLoadWithBakerReadBarrier call.
         codegen_->GenerateFieldLoadWithBakerReadBarrier(
-            instruction, out, base, offset, /* needs_null_check */ true);
+            instruction, out, base, offset, /* needs_null_check= */ true);
         if (is_volatile) {
           codegen_->GenerateMemoryBarrier(MemBarrierKind::kLoadAny);
         }
@@ -4328,27 +4648,29 @@ void InstructionCodeGeneratorX86_64::HandleFieldGet(HInstruction* instruction,
       break;
     }
 
-    case Primitive::kPrimLong: {
+    case DataType::Type::kInt64: {
       __ movq(out.AsRegister<CpuRegister>(), Address(base, offset));
       break;
     }
 
-    case Primitive::kPrimFloat: {
+    case DataType::Type::kFloat32: {
       __ movss(out.AsFpuRegister<XmmRegister>(), Address(base, offset));
       break;
     }
 
-    case Primitive::kPrimDouble: {
+    case DataType::Type::kFloat64: {
       __ movsd(out.AsFpuRegister<XmmRegister>(), Address(base, offset));
       break;
     }
 
-    case Primitive::kPrimVoid:
-      LOG(FATAL) << "Unreachable type " << field_type;
+    case DataType::Type::kUint32:
+    case DataType::Type::kUint64:
+    case DataType::Type::kVoid:
+      LOG(FATAL) << "Unreachable type " << load_type;
       UNREACHABLE();
   }
 
-  if (field_type == Primitive::kPrimNot) {
+  if (load_type == DataType::Type::kReference) {
     // Potential implicit null checks, in the case of reference
     // fields, are handled in the previous switch statement.
   } else {
@@ -4356,7 +4678,7 @@ void InstructionCodeGeneratorX86_64::HandleFieldGet(HInstruction* instruction,
   }
 
   if (is_volatile) {
-    if (field_type == Primitive::kPrimNot) {
+    if (load_type == DataType::Type::kReference) {
       // Memory barriers, in the case of references, are also handled
       // in the previous switch statement.
     } else {
@@ -4370,14 +4692,14 @@ void LocationsBuilderX86_64::HandleFieldSet(HInstruction* instruction,
   DCHECK(instruction->IsInstanceFieldSet() || instruction->IsStaticFieldSet());
 
   LocationSummary* locations =
-      new (GetGraph()->GetArena()) LocationSummary(instruction, LocationSummary::kNoCall);
-  Primitive::Type field_type = field_info.GetFieldType();
+      new (GetGraph()->GetAllocator()) LocationSummary(instruction, LocationSummary::kNoCall);
+  DataType::Type field_type = field_info.GetFieldType();
   bool is_volatile = field_info.IsVolatile();
   bool needs_write_barrier =
       CodeGenerator::StoreNeedsWriteBarrier(field_type, instruction->InputAt(1));
 
   locations->SetInAt(0, Location::RequiresRegister());
-  if (Primitive::IsFloatingPointType(instruction->InputAt(1)->GetType())) {
+  if (DataType::IsFloatingPointType(instruction->InputAt(1)->GetType())) {
     if (is_volatile) {
       // In order to satisfy the semantics of volatile, this must be a single instruction store.
       locations->SetInAt(1, Location::FpuRegisterOrInt32Constant(instruction->InputAt(1)));
@@ -4396,7 +4718,7 @@ void LocationsBuilderX86_64::HandleFieldSet(HInstruction* instruction,
     // Temporary registers for the write barrier.
     locations->AddTemp(Location::RequiresRegister());  // Possibly used for reference poisoning too.
     locations->AddTemp(Location::RequiresRegister());
-  } else if (kPoisonHeapReferences && field_type == Primitive::kPrimNot) {
+  } else if (kPoisonHeapReferences && field_type == DataType::Type::kReference) {
     // Temporary register for the reference poisoning.
     locations->AddTemp(Location::RequiresRegister());
   }
@@ -4411,7 +4733,7 @@ void InstructionCodeGeneratorX86_64::HandleFieldSet(HInstruction* instruction,
   CpuRegister base = locations->InAt(0).AsRegister<CpuRegister>();
   Location value = locations->InAt(1);
   bool is_volatile = field_info.IsVolatile();
-  Primitive::Type field_type = field_info.GetFieldType();
+  DataType::Type field_type = field_info.GetFieldType();
   uint32_t offset = field_info.GetFieldOffset().Uint32Value();
 
   if (is_volatile) {
@@ -4421,39 +4743,40 @@ void InstructionCodeGeneratorX86_64::HandleFieldSet(HInstruction* instruction,
   bool maybe_record_implicit_null_check_done = false;
 
   switch (field_type) {
-    case Primitive::kPrimBoolean:
-    case Primitive::kPrimByte: {
+    case DataType::Type::kBool:
+    case DataType::Type::kUint8:
+    case DataType::Type::kInt8: {
       if (value.IsConstant()) {
-        int8_t v = CodeGenerator::GetInt32ValueOf(value.GetConstant());
-        __ movb(Address(base, offset), Immediate(v));
+        __ movb(Address(base, offset),
+                Immediate(CodeGenerator::GetInt8ValueOf(value.GetConstant())));
       } else {
         __ movb(Address(base, offset), value.AsRegister<CpuRegister>());
       }
       break;
     }
 
-    case Primitive::kPrimShort:
-    case Primitive::kPrimChar: {
+    case DataType::Type::kUint16:
+    case DataType::Type::kInt16: {
       if (value.IsConstant()) {
-        int16_t v = CodeGenerator::GetInt32ValueOf(value.GetConstant());
-        __ movw(Address(base, offset), Immediate(v));
+        __ movw(Address(base, offset),
+                Immediate(CodeGenerator::GetInt16ValueOf(value.GetConstant())));
       } else {
         __ movw(Address(base, offset), value.AsRegister<CpuRegister>());
       }
       break;
     }
 
-    case Primitive::kPrimInt:
-    case Primitive::kPrimNot: {
+    case DataType::Type::kInt32:
+    case DataType::Type::kReference: {
       if (value.IsConstant()) {
         int32_t v = CodeGenerator::GetInt32ValueOf(value.GetConstant());
-        // `field_type == Primitive::kPrimNot` implies `v == 0`.
-        DCHECK((field_type != Primitive::kPrimNot) || (v == 0));
+        // `field_type == DataType::Type::kReference` implies `v == 0`.
+        DCHECK((field_type != DataType::Type::kReference) || (v == 0));
         // Note: if heap poisoning is enabled, no need to poison
         // (negate) `v` if it is a reference, as it would be null.
         __ movl(Address(base, offset), Immediate(v));
       } else {
-        if (kPoisonHeapReferences && field_type == Primitive::kPrimNot) {
+        if (kPoisonHeapReferences && field_type == DataType::Type::kReference) {
           CpuRegister temp = locations->GetTemp(0).AsRegister<CpuRegister>();
           __ movl(temp, value.AsRegister<CpuRegister>());
           __ PoisonHeapReference(temp);
@@ -4465,7 +4788,7 @@ void InstructionCodeGeneratorX86_64::HandleFieldSet(HInstruction* instruction,
       break;
     }
 
-    case Primitive::kPrimLong: {
+    case DataType::Type::kInt64: {
       if (value.IsConstant()) {
         int64_t v = value.GetConstant()->AsLongConstant()->GetValue();
         codegen_->MoveInt64ToAddress(Address(base, offset),
@@ -4479,7 +4802,7 @@ void InstructionCodeGeneratorX86_64::HandleFieldSet(HInstruction* instruction,
       break;
     }
 
-    case Primitive::kPrimFloat: {
+    case DataType::Type::kFloat32: {
       if (value.IsConstant()) {
         int32_t v =
             bit_cast<int32_t, float>(value.GetConstant()->AsFloatConstant()->GetValue());
@@ -4490,7 +4813,7 @@ void InstructionCodeGeneratorX86_64::HandleFieldSet(HInstruction* instruction,
       break;
     }
 
-    case Primitive::kPrimDouble: {
+    case DataType::Type::kFloat64: {
       if (value.IsConstant()) {
         int64_t v =
             bit_cast<int64_t, double>(value.GetConstant()->AsDoubleConstant()->GetValue());
@@ -4505,7 +4828,9 @@ void InstructionCodeGeneratorX86_64::HandleFieldSet(HInstruction* instruction,
       break;
     }
 
-    case Primitive::kPrimVoid:
+    case DataType::Type::kUint32:
+    case DataType::Type::kUint64:
+    case DataType::Type::kVoid:
       LOG(FATAL) << "Unreachable type " << field_type;
       UNREACHABLE();
   }
@@ -4645,7 +4970,7 @@ void CodeGeneratorX86_64::GenerateImplicitNullCheck(HNullCheck* instruction) {
 }
 
 void CodeGeneratorX86_64::GenerateExplicitNullCheck(HNullCheck* instruction) {
-  SlowPathCode* slow_path = new (GetGraph()->GetArena()) NullCheckSlowPathX86_64(instruction);
+  SlowPathCode* slow_path = new (GetScopedAllocator()) NullCheckSlowPathX86_64(instruction);
   AddSlowPath(slow_path);
 
   LocationSummary* locations = instruction->GetLocations();
@@ -4670,18 +4995,18 @@ void InstructionCodeGeneratorX86_64::VisitNullCheck(HNullCheck* instruction) {
 
 void LocationsBuilderX86_64::VisitArrayGet(HArrayGet* instruction) {
   bool object_array_get_with_read_barrier =
-      kEmitCompilerReadBarrier && (instruction->GetType() == Primitive::kPrimNot);
+      kEmitCompilerReadBarrier && (instruction->GetType() == DataType::Type::kReference);
   LocationSummary* locations =
-      new (GetGraph()->GetArena()) LocationSummary(instruction,
-                                                   object_array_get_with_read_barrier ?
-                                                       LocationSummary::kCallOnSlowPath :
-                                                       LocationSummary::kNoCall);
+      new (GetGraph()->GetAllocator()) LocationSummary(instruction,
+                                                       object_array_get_with_read_barrier
+                                                           ? LocationSummary::kCallOnSlowPath
+                                                           : LocationSummary::kNoCall);
   if (object_array_get_with_read_barrier && kUseBakerReadBarrier) {
     locations->SetCustomSlowPathCallerSaves(RegisterSet::Empty());  // No caller-save registers.
   }
   locations->SetInAt(0, Location::RequiresRegister());
   locations->SetInAt(1, Location::RegisterOrConstant(instruction->InputAt(1)));
-  if (Primitive::IsFloatingPointType(instruction->GetType())) {
+  if (DataType::IsFloatingPointType(instruction->GetType())) {
     locations->SetOut(Location::RequiresFpuRegister(), Location::kNoOutputOverlap);
   } else {
     // The output overlaps for an object array get when read barriers
@@ -4701,27 +5026,22 @@ void InstructionCodeGeneratorX86_64::VisitArrayGet(HArrayGet* instruction) {
   Location out_loc = locations->Out();
   uint32_t data_offset = CodeGenerator::GetArrayDataOffset(instruction);
 
-  Primitive::Type type = instruction->GetType();
+  DataType::Type type = instruction->GetType();
   switch (type) {
-    case Primitive::kPrimBoolean: {
+    case DataType::Type::kBool:
+    case DataType::Type::kUint8: {
       CpuRegister out = out_loc.AsRegister<CpuRegister>();
       __ movzxb(out, CodeGeneratorX86_64::ArrayAddress(obj, index, TIMES_1, data_offset));
       break;
     }
 
-    case Primitive::kPrimByte: {
+    case DataType::Type::kInt8: {
       CpuRegister out = out_loc.AsRegister<CpuRegister>();
       __ movsxb(out, CodeGeneratorX86_64::ArrayAddress(obj, index, TIMES_1, data_offset));
       break;
     }
 
-    case Primitive::kPrimShort: {
-      CpuRegister out = out_loc.AsRegister<CpuRegister>();
-      __ movsxw(out, CodeGeneratorX86_64::ArrayAddress(obj, index, TIMES_2, data_offset));
-      break;
-    }
-
-    case Primitive::kPrimChar: {
+    case DataType::Type::kUint16: {
       CpuRegister out = out_loc.AsRegister<CpuRegister>();
       if (mirror::kUseStringCompression && instruction->IsStringCharAt()) {
         // Branch cases into compressed and uncompressed for each index's type.
@@ -4743,13 +5063,19 @@ void InstructionCodeGeneratorX86_64::VisitArrayGet(HArrayGet* instruction) {
       break;
     }
 
-    case Primitive::kPrimInt: {
+    case DataType::Type::kInt16: {
+      CpuRegister out = out_loc.AsRegister<CpuRegister>();
+      __ movsxw(out, CodeGeneratorX86_64::ArrayAddress(obj, index, TIMES_2, data_offset));
+      break;
+    }
+
+    case DataType::Type::kInt32: {
       CpuRegister out = out_loc.AsRegister<CpuRegister>();
       __ movl(out, CodeGeneratorX86_64::ArrayAddress(obj, index, TIMES_4, data_offset));
       break;
     }
 
-    case Primitive::kPrimNot: {
+    case DataType::Type::kReference: {
       static_assert(
           sizeof(mirror::HeapReference<mirror::Object>) == sizeof(int32_t),
           "art::mirror::HeapReference<art::mirror::Object> and int32_t have different sizes.");
@@ -4759,7 +5085,7 @@ void InstructionCodeGeneratorX86_64::VisitArrayGet(HArrayGet* instruction) {
         // Note that a potential implicit null check is handled in this
         // CodeGeneratorX86_64::GenerateArrayLoadWithBakerReadBarrier call.
         codegen_->GenerateArrayLoadWithBakerReadBarrier(
-            instruction, out_loc, obj, data_offset, index, /* needs_null_check */ true);
+            instruction, out_loc, obj, data_offset, index, /* needs_null_check= */ true);
       } else {
         CpuRegister out = out_loc.AsRegister<CpuRegister>();
         __ movl(out, CodeGeneratorX86_64::ArrayAddress(obj, index, TIMES_4, data_offset));
@@ -4779,30 +5105,32 @@ void InstructionCodeGeneratorX86_64::VisitArrayGet(HArrayGet* instruction) {
       break;
     }
 
-    case Primitive::kPrimLong: {
+    case DataType::Type::kInt64: {
       CpuRegister out = out_loc.AsRegister<CpuRegister>();
       __ movq(out, CodeGeneratorX86_64::ArrayAddress(obj, index, TIMES_8, data_offset));
       break;
     }
 
-    case Primitive::kPrimFloat: {
+    case DataType::Type::kFloat32: {
       XmmRegister out = out_loc.AsFpuRegister<XmmRegister>();
       __ movss(out, CodeGeneratorX86_64::ArrayAddress(obj, index, TIMES_4, data_offset));
       break;
     }
 
-    case Primitive::kPrimDouble: {
+    case DataType::Type::kFloat64: {
       XmmRegister out = out_loc.AsFpuRegister<XmmRegister>();
       __ movsd(out, CodeGeneratorX86_64::ArrayAddress(obj, index, TIMES_8, data_offset));
       break;
     }
 
-    case Primitive::kPrimVoid:
+    case DataType::Type::kUint32:
+    case DataType::Type::kUint64:
+    case DataType::Type::kVoid:
       LOG(FATAL) << "Unreachable type " << type;
       UNREACHABLE();
   }
 
-  if (type == Primitive::kPrimNot) {
+  if (type == DataType::Type::kReference) {
     // Potential implicit null checks, in the case of reference
     // arrays, are handled in the previous switch statement.
   } else {
@@ -4811,13 +5139,13 @@ void InstructionCodeGeneratorX86_64::VisitArrayGet(HArrayGet* instruction) {
 }
 
 void LocationsBuilderX86_64::VisitArraySet(HArraySet* instruction) {
-  Primitive::Type value_type = instruction->GetComponentType();
+  DataType::Type value_type = instruction->GetComponentType();
 
   bool needs_write_barrier =
       CodeGenerator::StoreNeedsWriteBarrier(value_type, instruction->GetValue());
   bool may_need_runtime_call_for_type_check = instruction->NeedsTypeCheck();
 
-  LocationSummary* locations = new (GetGraph()->GetArena()) LocationSummary(
+  LocationSummary* locations = new (GetGraph()->GetAllocator()) LocationSummary(
       instruction,
       may_need_runtime_call_for_type_check ?
           LocationSummary::kCallOnSlowPath :
@@ -4825,7 +5153,7 @@ void LocationsBuilderX86_64::VisitArraySet(HArraySet* instruction) {
 
   locations->SetInAt(0, Location::RequiresRegister());
   locations->SetInAt(1, Location::RegisterOrConstant(instruction->InputAt(1)));
-  if (Primitive::IsFloatingPointType(value_type)) {
+  if (DataType::IsFloatingPointType(value_type)) {
     locations->SetInAt(2, Location::FpuRegisterOrConstant(instruction->InputAt(2)));
   } else {
     locations->SetInAt(2, Location::RegisterOrConstant(instruction->InputAt(2)));
@@ -4844,7 +5172,7 @@ void InstructionCodeGeneratorX86_64::VisitArraySet(HArraySet* instruction) {
   CpuRegister array = array_loc.AsRegister<CpuRegister>();
   Location index = locations->InAt(1);
   Location value = locations->InAt(2);
-  Primitive::Type value_type = instruction->GetComponentType();
+  DataType::Type value_type = instruction->GetComponentType();
   bool may_need_runtime_call_for_type_check = instruction->NeedsTypeCheck();
   bool needs_write_barrier =
       CodeGenerator::StoreNeedsWriteBarrier(value_type, instruction->GetValue());
@@ -4853,34 +5181,35 @@ void InstructionCodeGeneratorX86_64::VisitArraySet(HArraySet* instruction) {
   uint32_t component_offset = mirror::Class::ComponentTypeOffset().Int32Value();
 
   switch (value_type) {
-    case Primitive::kPrimBoolean:
-    case Primitive::kPrimByte: {
+    case DataType::Type::kBool:
+    case DataType::Type::kUint8:
+    case DataType::Type::kInt8: {
       uint32_t offset = mirror::Array::DataOffset(sizeof(uint8_t)).Uint32Value();
       Address address = CodeGeneratorX86_64::ArrayAddress(array, index, TIMES_1, offset);
       if (value.IsRegister()) {
         __ movb(address, value.AsRegister<CpuRegister>());
       } else {
-        __ movb(address, Immediate(value.GetConstant()->AsIntConstant()->GetValue()));
+        __ movb(address, Immediate(CodeGenerator::GetInt8ValueOf(value.GetConstant())));
       }
       codegen_->MaybeRecordImplicitNullCheck(instruction);
       break;
     }
 
-    case Primitive::kPrimShort:
-    case Primitive::kPrimChar: {
+    case DataType::Type::kUint16:
+    case DataType::Type::kInt16: {
       uint32_t offset = mirror::Array::DataOffset(sizeof(uint16_t)).Uint32Value();
       Address address = CodeGeneratorX86_64::ArrayAddress(array, index, TIMES_2, offset);
       if (value.IsRegister()) {
         __ movw(address, value.AsRegister<CpuRegister>());
       } else {
         DCHECK(value.IsConstant()) << value;
-        __ movw(address, Immediate(value.GetConstant()->AsIntConstant()->GetValue()));
+        __ movw(address, Immediate(CodeGenerator::GetInt16ValueOf(value.GetConstant())));
       }
       codegen_->MaybeRecordImplicitNullCheck(instruction);
       break;
     }
 
-    case Primitive::kPrimNot: {
+    case DataType::Type::kReference: {
       uint32_t offset = mirror::Array::DataOffset(sizeof(int32_t)).Uint32Value();
       Address address = CodeGeneratorX86_64::ArrayAddress(array, index, TIMES_4, offset);
 
@@ -4905,7 +5234,7 @@ void InstructionCodeGeneratorX86_64::VisitArraySet(HArraySet* instruction) {
       Location temp_loc = locations->GetTemp(0);
       CpuRegister temp = temp_loc.AsRegister<CpuRegister>();
       if (may_need_runtime_call_for_type_check) {
-        slow_path = new (GetGraph()->GetArena()) ArraySetSlowPathX86_64(instruction);
+        slow_path = new (codegen_->GetScopedAllocator()) ArraySetSlowPathX86_64(instruction);
         codegen_->AddSlowPath(slow_path);
         if (instruction->GetValueCanBeNull()) {
           __ testl(register_value, register_value);
@@ -4976,7 +5305,7 @@ void InstructionCodeGeneratorX86_64::VisitArraySet(HArraySet* instruction) {
       break;
     }
 
-    case Primitive::kPrimInt: {
+    case DataType::Type::kInt32: {
       uint32_t offset = mirror::Array::DataOffset(sizeof(int32_t)).Uint32Value();
       Address address = CodeGeneratorX86_64::ArrayAddress(array, index, TIMES_4, offset);
       if (value.IsRegister()) {
@@ -4990,7 +5319,7 @@ void InstructionCodeGeneratorX86_64::VisitArraySet(HArraySet* instruction) {
       break;
     }
 
-    case Primitive::kPrimLong: {
+    case DataType::Type::kInt64: {
       uint32_t offset = mirror::Array::DataOffset(sizeof(int64_t)).Uint32Value();
       Address address = CodeGeneratorX86_64::ArrayAddress(array, index, TIMES_8, offset);
       if (value.IsRegister()) {
@@ -5005,7 +5334,7 @@ void InstructionCodeGeneratorX86_64::VisitArraySet(HArraySet* instruction) {
       break;
     }
 
-    case Primitive::kPrimFloat: {
+    case DataType::Type::kFloat32: {
       uint32_t offset = mirror::Array::DataOffset(sizeof(float)).Uint32Value();
       Address address = CodeGeneratorX86_64::ArrayAddress(array, index, TIMES_4, offset);
       if (value.IsFpuRegister()) {
@@ -5019,7 +5348,7 @@ void InstructionCodeGeneratorX86_64::VisitArraySet(HArraySet* instruction) {
       break;
     }
 
-    case Primitive::kPrimDouble: {
+    case DataType::Type::kFloat64: {
       uint32_t offset = mirror::Array::DataOffset(sizeof(double)).Uint32Value();
       Address address = CodeGeneratorX86_64::ArrayAddress(array, index, TIMES_8, offset);
       if (value.IsFpuRegister()) {
@@ -5035,7 +5364,9 @@ void InstructionCodeGeneratorX86_64::VisitArraySet(HArraySet* instruction) {
       break;
     }
 
-    case Primitive::kPrimVoid:
+    case DataType::Type::kUint32:
+    case DataType::Type::kUint64:
+    case DataType::Type::kVoid:
       LOG(FATAL) << "Unreachable type " << instruction->GetType();
       UNREACHABLE();
   }
@@ -5043,7 +5374,7 @@ void InstructionCodeGeneratorX86_64::VisitArraySet(HArraySet* instruction) {
 
 void LocationsBuilderX86_64::VisitArrayLength(HArrayLength* instruction) {
   LocationSummary* locations =
-      new (GetGraph()->GetArena()) LocationSummary(instruction, LocationSummary::kNoCall);
+      new (GetGraph()->GetAllocator()) LocationSummary(instruction, LocationSummary::kNoCall);
   locations->SetInAt(0, Location::RequiresRegister());
   if (!instruction->IsEmittedAtUseSite()) {
     locations->SetOut(Location::RequiresRegister(), Location::kNoOutputOverlap);
@@ -5084,7 +5415,8 @@ void InstructionCodeGeneratorX86_64::VisitBoundsCheck(HBoundsCheck* instruction)
   LocationSummary* locations = instruction->GetLocations();
   Location index_loc = locations->InAt(0);
   Location length_loc = locations->InAt(1);
-  SlowPathCode* slow_path = new (GetGraph()->GetArena()) BoundsCheckSlowPathX86_64(instruction);
+  SlowPathCode* slow_path =
+      new (codegen_->GetScopedAllocator()) BoundsCheckSlowPathX86_64(instruction);
 
   if (length_loc.IsConstant()) {
     int32_t length = CodeGenerator::GetInt32ValueOf(length_loc.GetConstant());
@@ -5151,10 +5483,26 @@ void CodeGeneratorX86_64::MarkGCCard(CpuRegister temp,
     __ testl(value, value);
     __ j(kEqual, &is_null);
   }
+  // Load the address of the card table into `card`.
   __ gs()->movq(card, Address::Absolute(Thread::CardTableOffset<kX86_64PointerSize>().Int32Value(),
-                                        /* no_rip */ true));
+                                        /* no_rip= */ true));
+  // Calculate the offset (in the card table) of the card corresponding to
+  // `object`.
   __ movq(temp, object);
   __ shrq(temp, Immediate(gc::accounting::CardTable::kCardShift));
+  // Write the `art::gc::accounting::CardTable::kCardDirty` value into the
+  // `object`'s card.
+  //
+  // Register `card` contains the address of the card table. Note that the card
+  // table's base is biased during its creation so that it always starts at an
+  // address whose least-significant byte is equal to `kCardDirty` (see
+  // art::gc::accounting::CardTable::Create). Therefore the MOVB instruction
+  // below writes the `kCardDirty` (byte) value into the `object`'s card
+  // (located at `card + object >> kCardShift`).
+  //
+  // This dual use of the value in register `card` (1. to calculate the location
+  // of the card to mark; and 2. to load the `kCardDirty` value) saves a load
+  // (no need to explicitly load `kCardDirty` as an immediate value).
   __ movb(Address(temp, card, TIMES_1, 0), card);
   if (value_can_be_null) {
     __ Bind(&is_null);
@@ -5166,12 +5514,19 @@ void LocationsBuilderX86_64::VisitParallelMove(HParallelMove* instruction ATTRIB
 }
 
 void InstructionCodeGeneratorX86_64::VisitParallelMove(HParallelMove* instruction) {
+  if (instruction->GetNext()->IsSuspendCheck() &&
+      instruction->GetBlock()->GetLoopInformation() != nullptr) {
+    HSuspendCheck* suspend_check = instruction->GetNext()->AsSuspendCheck();
+    // The back edge will generate the suspend check.
+    codegen_->ClearSpillSlotsFromLoopPhisInStackMap(suspend_check, instruction);
+  }
+
   codegen_->GetMoveResolver()->EmitNativeCode(instruction);
 }
 
 void LocationsBuilderX86_64::VisitSuspendCheck(HSuspendCheck* instruction) {
-  LocationSummary* locations =
-      new (GetGraph()->GetArena()) LocationSummary(instruction, LocationSummary::kCallOnSlowPath);
+  LocationSummary* locations = new (GetGraph()->GetAllocator()) LocationSummary(
+      instruction, LocationSummary::kCallOnSlowPath);
   // In suspend check slow path, usually there are no caller-save registers at all.
   // If SIMD instructions are present, however, we force spilling all live SIMD
   // registers in full width (since the runtime only saves/restores lower part).
@@ -5198,19 +5553,19 @@ void InstructionCodeGeneratorX86_64::GenerateSuspendCheck(HSuspendCheck* instruc
   SuspendCheckSlowPathX86_64* slow_path =
       down_cast<SuspendCheckSlowPathX86_64*>(instruction->GetSlowPath());
   if (slow_path == nullptr) {
-    slow_path = new (GetGraph()->GetArena()) SuspendCheckSlowPathX86_64(instruction, successor);
+    slow_path =
+        new (codegen_->GetScopedAllocator()) SuspendCheckSlowPathX86_64(instruction, successor);
     instruction->SetSlowPath(slow_path);
     codegen_->AddSlowPath(slow_path);
     if (successor != nullptr) {
       DCHECK(successor->IsLoopHeader());
-      codegen_->ClearSpillSlotsFromLoopPhisInStackMap(instruction);
     }
   } else {
     DCHECK_EQ(slow_path->GetSuccessor(), successor);
   }
 
   __ gs()->cmpw(Address::Absolute(Thread::ThreadFlagsOffset<kX86_64PointerSize>().Int32Value(),
-                                  /* no_rip */ true),
+                                  /* no_rip= */ true),
                 Immediate(0));
   if (successor == nullptr) {
     __ j(kNotEqual, slow_path->GetEntryLabel());
@@ -5266,9 +5621,17 @@ void ParallelMoveResolverX86_64::EmitMove(size_t index) {
       __ movq(Address(CpuRegister(RSP), destination.GetStackIndex()), CpuRegister(TMP));
     }
   } else if (source.IsSIMDStackSlot()) {
-    DCHECK(destination.IsFpuRegister());
-    __ movups(destination.AsFpuRegister<XmmRegister>(),
-              Address(CpuRegister(RSP), source.GetStackIndex()));
+    if (destination.IsFpuRegister()) {
+      __ movups(destination.AsFpuRegister<XmmRegister>(),
+                Address(CpuRegister(RSP), source.GetStackIndex()));
+    } else {
+      DCHECK(destination.IsSIMDStackSlot());
+      size_t high = kX86_64WordSize;
+      __ movq(CpuRegister(TMP), Address(CpuRegister(RSP), source.GetStackIndex()));
+      __ movq(Address(CpuRegister(RSP), destination.GetStackIndex()), CpuRegister(TMP));
+      __ movq(CpuRegister(TMP), Address(CpuRegister(RSP), source.GetStackIndex() + high));
+      __ movq(Address(CpuRegister(RSP), destination.GetStackIndex() + high), CpuRegister(TMP));
+    }
   } else if (source.IsConstant()) {
     HConstant* constant = source.GetConstant();
     if (constant->IsIntConstant() || constant->IsNullConstant()) {
@@ -5336,19 +5699,6 @@ void ParallelMoveResolverX86_64::Exchange32(CpuRegister reg, int mem) {
   __ movl(reg, CpuRegister(TMP));
 }
 
-void ParallelMoveResolverX86_64::Exchange32(int mem1, int mem2) {
-  ScratchRegisterScope ensure_scratch(
-      this, TMP, RAX, codegen_->GetNumberOfCoreRegisters());
-
-  int stack_offset = ensure_scratch.IsSpilled() ? kX86_64WordSize : 0;
-  __ movl(CpuRegister(TMP), Address(CpuRegister(RSP), mem1 + stack_offset));
-  __ movl(CpuRegister(ensure_scratch.GetRegister()),
-          Address(CpuRegister(RSP), mem2 + stack_offset));
-  __ movl(Address(CpuRegister(RSP), mem2 + stack_offset), CpuRegister(TMP));
-  __ movl(Address(CpuRegister(RSP), mem1 + stack_offset),
-          CpuRegister(ensure_scratch.GetRegister()));
-}
-
 void ParallelMoveResolverX86_64::Exchange64(CpuRegister reg1, CpuRegister reg2) {
   __ movq(CpuRegister(TMP), reg1);
   __ movq(reg1, reg2);
@@ -5359,19 +5709,6 @@ void ParallelMoveResolverX86_64::Exchange64(CpuRegister reg, int mem) {
   __ movq(CpuRegister(TMP), Address(CpuRegister(RSP), mem));
   __ movq(Address(CpuRegister(RSP), mem), reg);
   __ movq(reg, CpuRegister(TMP));
-}
-
-void ParallelMoveResolverX86_64::Exchange64(int mem1, int mem2) {
-  ScratchRegisterScope ensure_scratch(
-      this, TMP, RAX, codegen_->GetNumberOfCoreRegisters());
-
-  int stack_offset = ensure_scratch.IsSpilled() ? kX86_64WordSize : 0;
-  __ movq(CpuRegister(TMP), Address(CpuRegister(RSP), mem1 + stack_offset));
-  __ movq(CpuRegister(ensure_scratch.GetRegister()),
-          Address(CpuRegister(RSP), mem2 + stack_offset));
-  __ movq(Address(CpuRegister(RSP), mem2 + stack_offset), CpuRegister(TMP));
-  __ movq(Address(CpuRegister(RSP), mem1 + stack_offset),
-          CpuRegister(ensure_scratch.GetRegister()));
 }
 
 void ParallelMoveResolverX86_64::Exchange32(XmmRegister reg, int mem) {
@@ -5386,6 +5723,48 @@ void ParallelMoveResolverX86_64::Exchange64(XmmRegister reg, int mem) {
   __ movd(reg, CpuRegister(TMP));
 }
 
+void ParallelMoveResolverX86_64::Exchange128(XmmRegister reg, int mem) {
+  size_t extra_slot = 2 * kX86_64WordSize;
+  __ subq(CpuRegister(RSP), Immediate(extra_slot));
+  __ movups(Address(CpuRegister(RSP), 0), XmmRegister(reg));
+  ExchangeMemory64(0, mem + extra_slot, 2);
+  __ movups(XmmRegister(reg), Address(CpuRegister(RSP), 0));
+  __ addq(CpuRegister(RSP), Immediate(extra_slot));
+}
+
+void ParallelMoveResolverX86_64::ExchangeMemory32(int mem1, int mem2) {
+  ScratchRegisterScope ensure_scratch(
+      this, TMP, RAX, codegen_->GetNumberOfCoreRegisters());
+
+  int stack_offset = ensure_scratch.IsSpilled() ? kX86_64WordSize : 0;
+  __ movl(CpuRegister(TMP), Address(CpuRegister(RSP), mem1 + stack_offset));
+  __ movl(CpuRegister(ensure_scratch.GetRegister()),
+          Address(CpuRegister(RSP), mem2 + stack_offset));
+  __ movl(Address(CpuRegister(RSP), mem2 + stack_offset), CpuRegister(TMP));
+  __ movl(Address(CpuRegister(RSP), mem1 + stack_offset),
+          CpuRegister(ensure_scratch.GetRegister()));
+}
+
+void ParallelMoveResolverX86_64::ExchangeMemory64(int mem1, int mem2, int num_of_qwords) {
+  ScratchRegisterScope ensure_scratch(
+      this, TMP, RAX, codegen_->GetNumberOfCoreRegisters());
+
+  int stack_offset = ensure_scratch.IsSpilled() ? kX86_64WordSize : 0;
+
+  // Now that temp registers are available (possibly spilled), exchange blocks of memory.
+  for (int i = 0; i < num_of_qwords; i++) {
+    __ movq(CpuRegister(TMP),
+            Address(CpuRegister(RSP), mem1 + stack_offset));
+    __ movq(CpuRegister(ensure_scratch.GetRegister()),
+            Address(CpuRegister(RSP), mem2 + stack_offset));
+    __ movq(Address(CpuRegister(RSP), mem2 + stack_offset),
+            CpuRegister(TMP));
+    __ movq(Address(CpuRegister(RSP), mem1 + stack_offset),
+            CpuRegister(ensure_scratch.GetRegister()));
+    stack_offset += kX86_64WordSize;
+  }
+}
+
 void ParallelMoveResolverX86_64::EmitSwap(size_t index) {
   MoveOperands* move = moves_[index];
   Location source = move->GetSource();
@@ -5398,13 +5777,13 @@ void ParallelMoveResolverX86_64::EmitSwap(size_t index) {
   } else if (source.IsStackSlot() && destination.IsRegister()) {
     Exchange32(destination.AsRegister<CpuRegister>(), source.GetStackIndex());
   } else if (source.IsStackSlot() && destination.IsStackSlot()) {
-    Exchange32(destination.GetStackIndex(), source.GetStackIndex());
+    ExchangeMemory32(destination.GetStackIndex(), source.GetStackIndex());
   } else if (source.IsRegister() && destination.IsDoubleStackSlot()) {
     Exchange64(source.AsRegister<CpuRegister>(), destination.GetStackIndex());
   } else if (source.IsDoubleStackSlot() && destination.IsRegister()) {
     Exchange64(destination.AsRegister<CpuRegister>(), source.GetStackIndex());
   } else if (source.IsDoubleStackSlot() && destination.IsDoubleStackSlot()) {
-    Exchange64(destination.GetStackIndex(), source.GetStackIndex());
+    ExchangeMemory64(destination.GetStackIndex(), source.GetStackIndex(), 1);
   } else if (source.IsFpuRegister() && destination.IsFpuRegister()) {
     __ movd(CpuRegister(TMP), source.AsFpuRegister<XmmRegister>());
     __ movaps(source.AsFpuRegister<XmmRegister>(), destination.AsFpuRegister<XmmRegister>());
@@ -5417,6 +5796,12 @@ void ParallelMoveResolverX86_64::EmitSwap(size_t index) {
     Exchange64(source.AsFpuRegister<XmmRegister>(), destination.GetStackIndex());
   } else if (source.IsDoubleStackSlot() && destination.IsFpuRegister()) {
     Exchange64(destination.AsFpuRegister<XmmRegister>(), source.GetStackIndex());
+  } else if (source.IsSIMDStackSlot() && destination.IsSIMDStackSlot()) {
+    ExchangeMemory64(destination.GetStackIndex(), source.GetStackIndex(), 2);
+  } else if (source.IsFpuRegister() && destination.IsSIMDStackSlot()) {
+    Exchange128(source.AsFpuRegister<XmmRegister>(), destination.GetStackIndex());
+  } else if (destination.IsFpuRegister() && source.IsSIMDStackSlot()) {
+    Exchange128(destination.AsFpuRegister<XmmRegister>(), source.GetStackIndex());
   } else {
     LOG(FATAL) << "Unimplemented swap between " << source << " and " << destination;
   }
@@ -5434,11 +5819,36 @@ void ParallelMoveResolverX86_64::RestoreScratch(int reg) {
 
 void InstructionCodeGeneratorX86_64::GenerateClassInitializationCheck(
     SlowPathCode* slow_path, CpuRegister class_reg) {
-  __ cmpl(Address(class_reg,  mirror::Class::StatusOffset().Int32Value()),
-          Immediate(mirror::Class::kStatusInitialized));
-  __ j(kLess, slow_path->GetEntryLabel());
+  constexpr size_t status_lsb_position = SubtypeCheckBits::BitStructSizeOf();
+  const size_t status_byte_offset =
+      mirror::Class::StatusOffset().SizeValue() + (status_lsb_position / kBitsPerByte);
+  constexpr uint32_t shifted_initialized_value =
+      enum_cast<uint32_t>(ClassStatus::kInitialized) << (status_lsb_position % kBitsPerByte);
+
+  __ cmpb(Address(class_reg,  status_byte_offset), Immediate(shifted_initialized_value));
+  __ j(kBelow, slow_path->GetEntryLabel());
   __ Bind(slow_path->GetExitLabel());
   // No need for memory fence, thanks to the x86-64 memory model.
+}
+
+void InstructionCodeGeneratorX86_64::GenerateBitstringTypeCheckCompare(HTypeCheckInstruction* check,
+                                                                       CpuRegister temp) {
+  uint32_t path_to_root = check->GetBitstringPathToRoot();
+  uint32_t mask = check->GetBitstringMask();
+  DCHECK(IsPowerOfTwo(mask + 1));
+  size_t mask_bits = WhichPowerOf2(mask + 1);
+
+  if (mask_bits == 16u) {
+    // Compare the bitstring in memory.
+    __ cmpw(Address(temp, mirror::Class::StatusOffset()), Immediate(path_to_root));
+  } else {
+    // /* uint32_t */ temp = temp->status_
+    __ movl(temp, Address(temp, mirror::Class::StatusOffset()));
+    // Compare the bitstring bits using SUB.
+    __ subl(temp, Immediate(path_to_root));
+    // Shift out bits that do not contribute to the comparison.
+    __ shll(temp, Immediate(32u - mask_bits));
+  }
 }
 
 HLoadClass::LoadKind CodeGeneratorX86_64::GetSupportedLoadClassKind(
@@ -5449,22 +5859,16 @@ HLoadClass::LoadKind CodeGeneratorX86_64::GetSupportedLoadClassKind(
       UNREACHABLE();
     case HLoadClass::LoadKind::kReferrersClass:
       break;
-    case HLoadClass::LoadKind::kBootImageLinkTimeAddress:
-      DCHECK(!GetCompilerOptions().GetCompilePic());
-      // We prefer the always-available RIP-relative address for the x86-64 boot image.
-      return HLoadClass::LoadKind::kBootImageLinkTimePcRelative;
     case HLoadClass::LoadKind::kBootImageLinkTimePcRelative:
-      DCHECK(GetCompilerOptions().GetCompilePic());
-      break;
-    case HLoadClass::LoadKind::kBootImageAddress:
-      break;
+    case HLoadClass::LoadKind::kBootImageRelRo:
     case HLoadClass::LoadKind::kBssEntry:
       DCHECK(!Runtime::Current()->UseJitCompilation());
       break;
+    case HLoadClass::LoadKind::kJitBootImageAddress:
     case HLoadClass::LoadKind::kJitTableAddress:
       DCHECK(Runtime::Current()->UseJitCompilation());
       break;
-    case HLoadClass::LoadKind::kDexCacheViaMethod:
+    case HLoadClass::LoadKind::kRuntimeCall:
       break;
   }
   return desired_class_load_kind;
@@ -5472,7 +5876,7 @@ HLoadClass::LoadKind CodeGeneratorX86_64::GetSupportedLoadClassKind(
 
 void LocationsBuilderX86_64::VisitLoadClass(HLoadClass* cls) {
   HLoadClass::LoadKind load_kind = cls->GetLoadKind();
-  if (load_kind == HLoadClass::LoadKind::kDexCacheViaMethod) {
+  if (load_kind == HLoadClass::LoadKind::kRuntimeCall) {
     // Custom calling convention: RAX serves as both input and output.
     CodeGenerator::CreateLoadClassRuntimeCallLocationSummary(
         cls,
@@ -5486,7 +5890,7 @@ void LocationsBuilderX86_64::VisitLoadClass(HLoadClass* cls) {
   LocationSummary::CallKind call_kind = (cls->NeedsEnvironment() || requires_read_barrier)
       ? LocationSummary::kCallOnSlowPath
       : LocationSummary::kNoCall;
-  LocationSummary* locations = new (GetGraph()->GetArena()) LocationSummary(cls, call_kind);
+  LocationSummary* locations = new (GetGraph()->GetAllocator()) LocationSummary(cls, call_kind);
   if (kUseBakerReadBarrier && requires_read_barrier && !cls->NeedsEnvironment()) {
     locations->SetCustomSlowPathCallerSaves(RegisterSet::Empty());  // No caller-save registers.
   }
@@ -5498,10 +5902,7 @@ void LocationsBuilderX86_64::VisitLoadClass(HLoadClass* cls) {
   if (load_kind == HLoadClass::LoadKind::kBssEntry) {
     if (!kUseReadBarrier || kUseBakerReadBarrier) {
       // Rely on the type resolution and/or initialization to save everything.
-      // Custom calling convention: RAX serves as both input and output.
-      RegisterSet caller_saves = RegisterSet::Empty();
-      caller_saves.Add(Location::RegisterLocation(RAX));
-      locations->SetCustomSlowPathCallerSaves(caller_saves);
+      locations->SetCustomSlowPathCallerSaves(OneRegInReferenceOutSaveEverythingCallerSaves());
     } else {
       // For non-Baker read barrier we have a temp-clobbering call.
     }
@@ -5509,12 +5910,11 @@ void LocationsBuilderX86_64::VisitLoadClass(HLoadClass* cls) {
 }
 
 Label* CodeGeneratorX86_64::NewJitRootClassPatch(const DexFile& dex_file,
-                                                 dex::TypeIndex dex_index,
+                                                 dex::TypeIndex type_index,
                                                  Handle<mirror::Class> handle) {
-  jit_class_roots_.Overwrite(
-      TypeReference(&dex_file, dex_index), reinterpret_cast64<uint64_t>(handle.GetReference()));
+  ReserveJitClassRoot(TypeReference(&dex_file, type_index), handle);
   // Add a patch entry and return the label.
-  jit_class_patches_.emplace_back(dex_file, dex_index.index_);
+  jit_class_patches_.emplace_back(&dex_file, type_index.index_);
   PatchInfo<Label>* info = &jit_class_patches_.back();
   return &info->label;
 }
@@ -5523,7 +5923,7 @@ Label* CodeGeneratorX86_64::NewJitRootClassPatch(const DexFile& dex_file,
 // move.
 void InstructionCodeGeneratorX86_64::VisitLoadClass(HLoadClass* cls) NO_THREAD_SAFETY_ANALYSIS {
   HLoadClass::LoadKind load_kind = cls->GetLoadKind();
-  if (load_kind == HLoadClass::LoadKind::kDexCacheViaMethod) {
+  if (load_kind == HLoadClass::LoadKind::kRuntimeCall) {
     codegen_->GenerateLoadClassRuntimeCall(cls);
     return;
   }
@@ -5547,36 +5947,41 @@ void InstructionCodeGeneratorX86_64::VisitLoadClass(HLoadClass* cls) NO_THREAD_S
           cls,
           out_loc,
           Address(current_method, ArtMethod::DeclaringClassOffset().Int32Value()),
-          /* fixup_label */ nullptr,
+          /* fixup_label= */ nullptr,
           read_barrier_option);
       break;
     }
     case HLoadClass::LoadKind::kBootImageLinkTimePcRelative:
       DCHECK(codegen_->GetCompilerOptions().IsBootImage());
       DCHECK_EQ(read_barrier_option, kWithoutReadBarrier);
-      __ leal(out, Address::Absolute(CodeGeneratorX86_64::kDummy32BitOffset, /* no_rip */ false));
-      codegen_->RecordBootTypePatch(cls);
+      __ leal(out, Address::Absolute(CodeGeneratorX86_64::kDummy32BitOffset, /* no_rip= */ false));
+      codegen_->RecordBootImageTypePatch(cls);
       break;
-    case HLoadClass::LoadKind::kBootImageAddress: {
-      DCHECK_EQ(read_barrier_option, kWithoutReadBarrier);
-      uint32_t address = dchecked_integral_cast<uint32_t>(
-          reinterpret_cast<uintptr_t>(cls->GetClass().Get()));
-      DCHECK_NE(address, 0u);
-      __ movl(out, Immediate(static_cast<int32_t>(address)));  // Zero-extended.
+    case HLoadClass::LoadKind::kBootImageRelRo: {
+      DCHECK(!codegen_->GetCompilerOptions().IsBootImage());
+      __ movl(out, Address::Absolute(CodeGeneratorX86_64::kDummy32BitOffset, /* no_rip= */ false));
+      codegen_->RecordBootImageRelRoPatch(codegen_->GetBootImageOffset(cls));
       break;
     }
     case HLoadClass::LoadKind::kBssEntry: {
       Address address = Address::Absolute(CodeGeneratorX86_64::kDummy32BitOffset,
-                                          /* no_rip */ false);
+                                          /* no_rip= */ false);
       Label* fixup_label = codegen_->NewTypeBssEntryPatch(cls);
       // /* GcRoot<mirror::Class> */ out = *address  /* PC-relative */
       GenerateGcRootFieldLoad(cls, out_loc, address, fixup_label, read_barrier_option);
       generate_null_check = true;
       break;
     }
+    case HLoadClass::LoadKind::kJitBootImageAddress: {
+      DCHECK_EQ(read_barrier_option, kWithoutReadBarrier);
+      uint32_t address = reinterpret_cast32<uint32_t>(cls->GetClass().Get());
+      DCHECK_NE(address, 0u);
+      __ movl(out, Immediate(static_cast<int32_t>(address)));  // Zero-extended.
+      break;
+    }
     case HLoadClass::LoadKind::kJitTableAddress: {
       Address address = Address::Absolute(CodeGeneratorX86_64::kDummy32BitOffset,
-                                          /* no_rip */ true);
+                                          /* no_rip= */ true);
       Label* fixup_label =
           codegen_->NewJitRootClassPatch(cls->GetDexFile(), cls->GetTypeIndex(), cls->GetClass());
       // /* GcRoot<mirror::Class> */ out = *address
@@ -5590,8 +5995,8 @@ void InstructionCodeGeneratorX86_64::VisitLoadClass(HLoadClass* cls) NO_THREAD_S
 
   if (generate_null_check || cls->MustGenerateClinitCheck()) {
     DCHECK(cls->CanCallRuntime());
-    SlowPathCode* slow_path = new (GetGraph()->GetArena()) LoadClassSlowPathX86_64(
-        cls, cls, cls->GetDexPc(), cls->MustGenerateClinitCheck());
+    SlowPathCode* slow_path =
+        new (codegen_->GetScopedAllocator()) LoadClassSlowPathX86_64(cls, cls);
     codegen_->AddSlowPath(slow_path);
     if (generate_null_check) {
       __ testl(out, out);
@@ -5607,17 +6012,39 @@ void InstructionCodeGeneratorX86_64::VisitLoadClass(HLoadClass* cls) NO_THREAD_S
 
 void LocationsBuilderX86_64::VisitClinitCheck(HClinitCheck* check) {
   LocationSummary* locations =
-      new (GetGraph()->GetArena()) LocationSummary(check, LocationSummary::kCallOnSlowPath);
+      new (GetGraph()->GetAllocator()) LocationSummary(check, LocationSummary::kCallOnSlowPath);
   locations->SetInAt(0, Location::RequiresRegister());
   if (check->HasUses()) {
     locations->SetOut(Location::SameAsFirstInput());
   }
+  // Rely on the type initialization to save everything we need.
+  locations->SetCustomSlowPathCallerSaves(OneRegInReferenceOutSaveEverythingCallerSaves());
+}
+
+void LocationsBuilderX86_64::VisitLoadMethodHandle(HLoadMethodHandle* load) {
+  // Custom calling convention: RAX serves as both input and output.
+  Location location = Location::RegisterLocation(RAX);
+  CodeGenerator::CreateLoadMethodHandleRuntimeCallLocationSummary(load, location, location);
+}
+
+void InstructionCodeGeneratorX86_64::VisitLoadMethodHandle(HLoadMethodHandle* load) {
+  codegen_->GenerateLoadMethodHandleRuntimeCall(load);
+}
+
+void LocationsBuilderX86_64::VisitLoadMethodType(HLoadMethodType* load) {
+  // Custom calling convention: RAX serves as both input and output.
+  Location location = Location::RegisterLocation(RAX);
+  CodeGenerator::CreateLoadMethodTypeRuntimeCallLocationSummary(load, location, location);
+}
+
+void InstructionCodeGeneratorX86_64::VisitLoadMethodType(HLoadMethodType* load) {
+  codegen_->GenerateLoadMethodTypeRuntimeCall(load);
 }
 
 void InstructionCodeGeneratorX86_64::VisitClinitCheck(HClinitCheck* check) {
   // We assume the class to not be null.
-  SlowPathCode* slow_path = new (GetGraph()->GetArena()) LoadClassSlowPathX86_64(
-      check->GetLoadClass(), check, check->GetDexPc(), true);
+  SlowPathCode* slow_path =
+      new (codegen_->GetScopedAllocator()) LoadClassSlowPathX86_64(check->GetLoadClass(), check);
   codegen_->AddSlowPath(slow_path);
   GenerateClassInitializationCheck(slow_path,
                                    check->GetLocations()->InAt(0).AsRegister<CpuRegister>());
@@ -5626,22 +6053,16 @@ void InstructionCodeGeneratorX86_64::VisitClinitCheck(HClinitCheck* check) {
 HLoadString::LoadKind CodeGeneratorX86_64::GetSupportedLoadStringKind(
     HLoadString::LoadKind desired_string_load_kind) {
   switch (desired_string_load_kind) {
-    case HLoadString::LoadKind::kBootImageLinkTimeAddress:
-      DCHECK(!GetCompilerOptions().GetCompilePic());
-      // We prefer the always-available RIP-relative address for the x86-64 boot image.
-      return HLoadString::LoadKind::kBootImageLinkTimePcRelative;
     case HLoadString::LoadKind::kBootImageLinkTimePcRelative:
-      DCHECK(GetCompilerOptions().GetCompilePic());
-      break;
-    case HLoadString::LoadKind::kBootImageAddress:
-      break;
+    case HLoadString::LoadKind::kBootImageRelRo:
     case HLoadString::LoadKind::kBssEntry:
       DCHECK(!Runtime::Current()->UseJitCompilation());
       break;
+    case HLoadString::LoadKind::kJitBootImageAddress:
     case HLoadString::LoadKind::kJitTableAddress:
       DCHECK(Runtime::Current()->UseJitCompilation());
       break;
-    case HLoadString::LoadKind::kDexCacheViaMethod:
+    case HLoadString::LoadKind::kRuntimeCall:
       break;
   }
   return desired_string_load_kind;
@@ -5649,18 +6070,15 @@ HLoadString::LoadKind CodeGeneratorX86_64::GetSupportedLoadStringKind(
 
 void LocationsBuilderX86_64::VisitLoadString(HLoadString* load) {
   LocationSummary::CallKind call_kind = CodeGenerator::GetLoadStringCallKind(load);
-  LocationSummary* locations = new (GetGraph()->GetArena()) LocationSummary(load, call_kind);
-  if (load->GetLoadKind() == HLoadString::LoadKind::kDexCacheViaMethod) {
+  LocationSummary* locations = new (GetGraph()->GetAllocator()) LocationSummary(load, call_kind);
+  if (load->GetLoadKind() == HLoadString::LoadKind::kRuntimeCall) {
     locations->SetOut(Location::RegisterLocation(RAX));
   } else {
     locations->SetOut(Location::RequiresRegister());
     if (load->GetLoadKind() == HLoadString::LoadKind::kBssEntry) {
       if (!kUseReadBarrier || kUseBakerReadBarrier) {
         // Rely on the pResolveString to save everything.
-        // Custom calling convention: RAX serves as both input and output.
-        RegisterSet caller_saves = RegisterSet::Empty();
-        caller_saves.Add(Location::RegisterLocation(RAX));
-        locations->SetCustomSlowPathCallerSaves(caller_saves);
+        locations->SetCustomSlowPathCallerSaves(OneRegInReferenceOutSaveEverythingCallerSaves());
       } else {
         // For non-Baker read barrier we have a temp-clobbering call.
       }
@@ -5669,12 +6087,11 @@ void LocationsBuilderX86_64::VisitLoadString(HLoadString* load) {
 }
 
 Label* CodeGeneratorX86_64::NewJitRootStringPatch(const DexFile& dex_file,
-                                                  dex::StringIndex dex_index,
+                                                  dex::StringIndex string_index,
                                                   Handle<mirror::String> handle) {
-  jit_string_roots_.Overwrite(
-      StringReference(&dex_file, dex_index), reinterpret_cast64<uint64_t>(handle.GetReference()));
+  ReserveJitStringRoot(StringReference(&dex_file, string_index), handle);
   // Add a patch entry and return the label.
-  jit_string_patches_.emplace_back(dex_file, dex_index.index_);
+  jit_string_patches_.emplace_back(&dex_file, string_index.index_);
   PatchInfo<Label>* info = &jit_string_patches_.back();
   return &info->label;
 }
@@ -5689,33 +6106,38 @@ void InstructionCodeGeneratorX86_64::VisitLoadString(HLoadString* load) NO_THREA
   switch (load->GetLoadKind()) {
     case HLoadString::LoadKind::kBootImageLinkTimePcRelative: {
       DCHECK(codegen_->GetCompilerOptions().IsBootImage());
-      __ leal(out, Address::Absolute(CodeGeneratorX86_64::kDummy32BitOffset, /* no_rip */ false));
-      codegen_->RecordBootStringPatch(load);
-      return;  // No dex cache slow path.
+      __ leal(out, Address::Absolute(CodeGeneratorX86_64::kDummy32BitOffset, /* no_rip= */ false));
+      codegen_->RecordBootImageStringPatch(load);
+      return;
     }
-    case HLoadString::LoadKind::kBootImageAddress: {
-      uint32_t address = dchecked_integral_cast<uint32_t>(
-          reinterpret_cast<uintptr_t>(load->GetString().Get()));
-      DCHECK_NE(address, 0u);
-      __ movl(out, Immediate(static_cast<int32_t>(address)));  // Zero-extended.
-      return;  // No dex cache slow path.
+    case HLoadString::LoadKind::kBootImageRelRo: {
+      DCHECK(!codegen_->GetCompilerOptions().IsBootImage());
+      __ movl(out, Address::Absolute(CodeGeneratorX86_64::kDummy32BitOffset, /* no_rip= */ false));
+      codegen_->RecordBootImageRelRoPatch(codegen_->GetBootImageOffset(load));
+      return;
     }
     case HLoadString::LoadKind::kBssEntry: {
       Address address = Address::Absolute(CodeGeneratorX86_64::kDummy32BitOffset,
-                                          /* no_rip */ false);
+                                          /* no_rip= */ false);
       Label* fixup_label = codegen_->NewStringBssEntryPatch(load);
       // /* GcRoot<mirror::Class> */ out = *address  /* PC-relative */
       GenerateGcRootFieldLoad(load, out_loc, address, fixup_label, kCompilerReadBarrierOption);
-      SlowPathCode* slow_path = new (GetGraph()->GetArena()) LoadStringSlowPathX86_64(load);
+      SlowPathCode* slow_path = new (codegen_->GetScopedAllocator()) LoadStringSlowPathX86_64(load);
       codegen_->AddSlowPath(slow_path);
       __ testl(out, out);
       __ j(kEqual, slow_path->GetEntryLabel());
       __ Bind(slow_path->GetExitLabel());
       return;
     }
+    case HLoadString::LoadKind::kJitBootImageAddress: {
+      uint32_t address = reinterpret_cast32<uint32_t>(load->GetString().Get());
+      DCHECK_NE(address, 0u);
+      __ movl(out, Immediate(static_cast<int32_t>(address)));  // Zero-extended.
+      return;
+    }
     case HLoadString::LoadKind::kJitTableAddress: {
       Address address = Address::Absolute(CodeGeneratorX86_64::kDummy32BitOffset,
-                                          /* no_rip */ true);
+                                          /* no_rip= */ true);
       Label* fixup_label = codegen_->NewJitRootStringPatch(
           load->GetDexFile(), load->GetStringIndex(), load->GetString());
       // /* GcRoot<mirror::String> */ out = *address
@@ -5737,12 +6159,12 @@ void InstructionCodeGeneratorX86_64::VisitLoadString(HLoadString* load) NO_THREA
 
 static Address GetExceptionTlsAddress() {
   return Address::Absolute(Thread::ExceptionOffset<kX86_64PointerSize>().Int32Value(),
-                           /* no_rip */ true);
+                           /* no_rip= */ true);
 }
 
 void LocationsBuilderX86_64::VisitLoadException(HLoadException* load) {
   LocationSummary* locations =
-      new (GetGraph()->GetArena()) LocationSummary(load, LocationSummary::kNoCall);
+      new (GetGraph()->GetAllocator()) LocationSummary(load, LocationSummary::kNoCall);
   locations->SetOut(Location::RequiresRegister());
 }
 
@@ -5751,7 +6173,7 @@ void InstructionCodeGeneratorX86_64::VisitLoadException(HLoadException* load) {
 }
 
 void LocationsBuilderX86_64::VisitClearException(HClearException* clear) {
-  new (GetGraph()->GetArena()) LocationSummary(clear, LocationSummary::kNoCall);
+  new (GetGraph()->GetAllocator()) LocationSummary(clear, LocationSummary::kNoCall);
 }
 
 void InstructionCodeGeneratorX86_64::VisitClearException(HClearException* clear ATTRIBUTE_UNUSED) {
@@ -5759,8 +6181,8 @@ void InstructionCodeGeneratorX86_64::VisitClearException(HClearException* clear 
 }
 
 void LocationsBuilderX86_64::VisitThrow(HThrow* instruction) {
-  LocationSummary* locations =
-      new (GetGraph()->GetArena()) LocationSummary(instruction, LocationSummary::kCallOnMainOnly);
+  LocationSummary* locations = new (GetGraph()->GetAllocator()) LocationSummary(
+      instruction, LocationSummary::kCallOnMainOnly);
   InvokeRuntimeCallingConvention calling_convention;
   locations->SetInAt(0, Location::RegisterLocation(calling_convention.GetRegisterAt(0)));
 }
@@ -5770,24 +6192,26 @@ void InstructionCodeGeneratorX86_64::VisitThrow(HThrow* instruction) {
   CheckEntrypointTypes<kQuickDeliverException, void, mirror::Object*>();
 }
 
-static bool CheckCastTypeCheckNeedsATemporary(TypeCheckKind type_check_kind) {
-  if (type_check_kind == TypeCheckKind::kInterfaceCheck && !kPoisonHeapReferences) {
-    // We need a temporary for holding the iftable length.
-    return true;
-  }
-  return kEmitCompilerReadBarrier &&
+// Temp is used for read barrier.
+static size_t NumberOfInstanceOfTemps(TypeCheckKind type_check_kind) {
+  if (kEmitCompilerReadBarrier &&
       !kUseBakerReadBarrier &&
       (type_check_kind == TypeCheckKind::kAbstractClassCheck ||
        type_check_kind == TypeCheckKind::kClassHierarchyCheck ||
-       type_check_kind == TypeCheckKind::kArrayObjectCheck);
+       type_check_kind == TypeCheckKind::kArrayObjectCheck)) {
+    return 1;
+  }
+  return 0;
 }
 
-static bool InstanceOfTypeCheckNeedsATemporary(TypeCheckKind type_check_kind) {
-  return kEmitCompilerReadBarrier &&
-      !kUseBakerReadBarrier &&
-      (type_check_kind == TypeCheckKind::kAbstractClassCheck ||
-       type_check_kind == TypeCheckKind::kClassHierarchyCheck ||
-       type_check_kind == TypeCheckKind::kArrayObjectCheck);
+// Interface case has 2 temps, one for holding the number of interfaces, one for the current
+// interface pointer, the current interface is compared in memory.
+// The other checks have one temp for loading the object's class.
+static size_t NumberOfCheckCastTemps(TypeCheckKind type_check_kind) {
+  if (type_check_kind == TypeCheckKind::kInterfaceCheck) {
+    return 2;
+  }
+  return 1 + NumberOfInstanceOfTemps(type_check_kind);
 }
 
 void LocationsBuilderX86_64::VisitInstanceOf(HInstanceOf* instruction) {
@@ -5798,31 +6222,37 @@ void LocationsBuilderX86_64::VisitInstanceOf(HInstanceOf* instruction) {
     case TypeCheckKind::kExactCheck:
     case TypeCheckKind::kAbstractClassCheck:
     case TypeCheckKind::kClassHierarchyCheck:
-    case TypeCheckKind::kArrayObjectCheck:
-      call_kind =
-          kEmitCompilerReadBarrier ? LocationSummary::kCallOnSlowPath : LocationSummary::kNoCall;
-      baker_read_barrier_slow_path = kUseBakerReadBarrier;
+    case TypeCheckKind::kArrayObjectCheck: {
+      bool needs_read_barrier = CodeGenerator::InstanceOfNeedsReadBarrier(instruction);
+      call_kind = needs_read_barrier ? LocationSummary::kCallOnSlowPath : LocationSummary::kNoCall;
+      baker_read_barrier_slow_path = kUseBakerReadBarrier && needs_read_barrier;
       break;
+    }
     case TypeCheckKind::kArrayCheck:
     case TypeCheckKind::kUnresolvedCheck:
     case TypeCheckKind::kInterfaceCheck:
       call_kind = LocationSummary::kCallOnSlowPath;
       break;
+    case TypeCheckKind::kBitstringCheck:
+      break;
   }
 
-  LocationSummary* locations = new (GetGraph()->GetArena()) LocationSummary(instruction, call_kind);
+  LocationSummary* locations =
+      new (GetGraph()->GetAllocator()) LocationSummary(instruction, call_kind);
   if (baker_read_barrier_slow_path) {
     locations->SetCustomSlowPathCallerSaves(RegisterSet::Empty());  // No caller-save registers.
   }
   locations->SetInAt(0, Location::RequiresRegister());
-  locations->SetInAt(1, Location::Any());
+  if (type_check_kind == TypeCheckKind::kBitstringCheck) {
+    locations->SetInAt(1, Location::ConstantLocation(instruction->InputAt(1)->AsConstant()));
+    locations->SetInAt(2, Location::ConstantLocation(instruction->InputAt(2)->AsConstant()));
+    locations->SetInAt(3, Location::ConstantLocation(instruction->InputAt(3)->AsConstant()));
+  } else {
+    locations->SetInAt(1, Location::Any());
+  }
   // Note that TypeCheckSlowPathX86_64 uses this "out" register too.
   locations->SetOut(Location::RequiresRegister());
-  // When read barriers are enabled, we need a temporary register for
-  // some cases.
-  if (InstanceOfTypeCheckNeedsATemporary(type_check_kind)) {
-    locations->AddTemp(Location::RequiresRegister());
-  }
+  locations->AddRegisterTemps(NumberOfInstanceOfTemps(type_check_kind));
 }
 
 void InstructionCodeGeneratorX86_64::VisitInstanceOf(HInstanceOf* instruction) {
@@ -5833,9 +6263,9 @@ void InstructionCodeGeneratorX86_64::VisitInstanceOf(HInstanceOf* instruction) {
   Location cls = locations->InAt(1);
   Location out_loc =  locations->Out();
   CpuRegister out = out_loc.AsRegister<CpuRegister>();
-  Location maybe_temp_loc = InstanceOfTypeCheckNeedsATemporary(type_check_kind) ?
-      locations->GetTemp(0) :
-      Location::NoLocation();
+  const size_t num_temps = NumberOfInstanceOfTemps(type_check_kind);
+  DCHECK_LE(num_temps, 1u);
+  Location maybe_temp_loc = (num_temps >= 1u) ? locations->GetTemp(0) : Location::NoLocation();
   uint32_t class_offset = mirror::Object::ClassOffset().Int32Value();
   uint32_t super_offset = mirror::Class::SuperClassOffset().Int32Value();
   uint32_t component_offset = mirror::Class::ComponentTypeOffset().Int32Value();
@@ -5852,12 +6282,14 @@ void InstructionCodeGeneratorX86_64::VisitInstanceOf(HInstanceOf* instruction) {
 
   switch (type_check_kind) {
     case TypeCheckKind::kExactCheck: {
+      ReadBarrierOption read_barrier_option =
+          CodeGenerator::ReadBarrierOptionForInstanceOf(instruction);
       // /* HeapReference<Class> */ out = obj->klass_
       GenerateReferenceLoadTwoRegisters(instruction,
                                         out_loc,
                                         obj_loc,
                                         class_offset,
-                                        kCompilerReadBarrierOption);
+                                        read_barrier_option);
       if (cls.IsRegister()) {
         __ cmpl(out, cls.AsRegister<CpuRegister>());
       } else {
@@ -5878,12 +6310,14 @@ void InstructionCodeGeneratorX86_64::VisitInstanceOf(HInstanceOf* instruction) {
     }
 
     case TypeCheckKind::kAbstractClassCheck: {
+      ReadBarrierOption read_barrier_option =
+          CodeGenerator::ReadBarrierOptionForInstanceOf(instruction);
       // /* HeapReference<Class> */ out = obj->klass_
       GenerateReferenceLoadTwoRegisters(instruction,
                                         out_loc,
                                         obj_loc,
                                         class_offset,
-                                        kCompilerReadBarrierOption);
+                                        read_barrier_option);
       // If the class is abstract, we eagerly fetch the super class of the
       // object to avoid doing a comparison we know will fail.
       NearLabel loop, success;
@@ -5893,7 +6327,7 @@ void InstructionCodeGeneratorX86_64::VisitInstanceOf(HInstanceOf* instruction) {
                                        out_loc,
                                        super_offset,
                                        maybe_temp_loc,
-                                       kCompilerReadBarrierOption);
+                                       read_barrier_option);
       __ testl(out, out);
       // If `out` is null, we use it for the result, and jump to `done`.
       __ j(kEqual, &done);
@@ -5912,12 +6346,14 @@ void InstructionCodeGeneratorX86_64::VisitInstanceOf(HInstanceOf* instruction) {
     }
 
     case TypeCheckKind::kClassHierarchyCheck: {
+      ReadBarrierOption read_barrier_option =
+          CodeGenerator::ReadBarrierOptionForInstanceOf(instruction);
       // /* HeapReference<Class> */ out = obj->klass_
       GenerateReferenceLoadTwoRegisters(instruction,
                                         out_loc,
                                         obj_loc,
                                         class_offset,
-                                        kCompilerReadBarrierOption);
+                                        read_barrier_option);
       // Walk over the class hierarchy to find a match.
       NearLabel loop, success;
       __ Bind(&loop);
@@ -5933,7 +6369,7 @@ void InstructionCodeGeneratorX86_64::VisitInstanceOf(HInstanceOf* instruction) {
                                        out_loc,
                                        super_offset,
                                        maybe_temp_loc,
-                                       kCompilerReadBarrierOption);
+                                       read_barrier_option);
       __ testl(out, out);
       __ j(kNotEqual, &loop);
       // If `out` is null, we use it for the result, and jump to `done`.
@@ -5947,12 +6383,14 @@ void InstructionCodeGeneratorX86_64::VisitInstanceOf(HInstanceOf* instruction) {
     }
 
     case TypeCheckKind::kArrayObjectCheck: {
+      ReadBarrierOption read_barrier_option =
+          CodeGenerator::ReadBarrierOptionForInstanceOf(instruction);
       // /* HeapReference<Class> */ out = obj->klass_
       GenerateReferenceLoadTwoRegisters(instruction,
                                         out_loc,
                                         obj_loc,
                                         class_offset,
-                                        kCompilerReadBarrierOption);
+                                        read_barrier_option);
       // Do an exact check.
       NearLabel exact_check;
       if (cls.IsRegister()) {
@@ -5968,7 +6406,7 @@ void InstructionCodeGeneratorX86_64::VisitInstanceOf(HInstanceOf* instruction) {
                                        out_loc,
                                        component_offset,
                                        maybe_temp_loc,
-                                       kCompilerReadBarrierOption);
+                                       read_barrier_option);
       __ testl(out, out);
       // If `out` is null, we use it for the result, and jump to `done`.
       __ j(kEqual, &done);
@@ -5995,8 +6433,8 @@ void InstructionCodeGeneratorX86_64::VisitInstanceOf(HInstanceOf* instruction) {
         __ cmpl(out, Address(CpuRegister(RSP), cls.GetStackIndex()));
       }
       DCHECK(locations->OnlyCallsOnSlowPath());
-      slow_path = new (GetGraph()->GetArena()) TypeCheckSlowPathX86_64(instruction,
-                                                                       /* is_fatal */ false);
+      slow_path = new (codegen_->GetScopedAllocator()) TypeCheckSlowPathX86_64(
+          instruction, /* is_fatal= */ false);
       codegen_->AddSlowPath(slow_path);
       __ j(kNotEqual, slow_path->GetEntryLabel());
       __ movl(out, Immediate(1));
@@ -6027,12 +6465,33 @@ void InstructionCodeGeneratorX86_64::VisitInstanceOf(HInstanceOf* instruction) {
       // call to the runtime not using a type checking slow path).
       // This should also be beneficial for the other cases above.
       DCHECK(locations->OnlyCallsOnSlowPath());
-      slow_path = new (GetGraph()->GetArena()) TypeCheckSlowPathX86_64(instruction,
-                                                                       /* is_fatal */ false);
+      slow_path = new (codegen_->GetScopedAllocator()) TypeCheckSlowPathX86_64(
+          instruction, /* is_fatal= */ false);
       codegen_->AddSlowPath(slow_path);
       __ jmp(slow_path->GetEntryLabel());
       if (zero.IsLinked()) {
         __ jmp(&done);
+      }
+      break;
+    }
+
+    case TypeCheckKind::kBitstringCheck: {
+      // /* HeapReference<Class> */ temp = obj->klass_
+      GenerateReferenceLoadTwoRegisters(instruction,
+                                        out_loc,
+                                        obj_loc,
+                                        class_offset,
+                                        kWithoutReadBarrier);
+
+      GenerateBitstringTypeCheckCompare(instruction, out);
+      if (zero.IsLinked()) {
+        __ j(kNotEqual, &zero);
+        __ movl(out, Immediate(1));
+        __ jmp(&done);
+      } else {
+        __ setcc(kEqual, out);
+        // setcc only sets the low byte.
+        __ andl(out, Immediate(1));
       }
       break;
     }
@@ -6052,47 +6511,25 @@ void InstructionCodeGeneratorX86_64::VisitInstanceOf(HInstanceOf* instruction) {
   }
 }
 
-static bool IsTypeCheckSlowPathFatal(TypeCheckKind type_check_kind, bool throws_into_catch) {
-  switch (type_check_kind) {
-    case TypeCheckKind::kExactCheck:
-    case TypeCheckKind::kAbstractClassCheck:
-    case TypeCheckKind::kClassHierarchyCheck:
-    case TypeCheckKind::kArrayObjectCheck:
-      return !throws_into_catch && !kEmitCompilerReadBarrier;
-    case TypeCheckKind::kInterfaceCheck:
-      return !throws_into_catch && !kEmitCompilerReadBarrier && !kPoisonHeapReferences;
-    case TypeCheckKind::kArrayCheck:
-    case TypeCheckKind::kUnresolvedCheck:
-      return false;
-  }
-  LOG(FATAL) << "Unreachable";
-  UNREACHABLE();
-}
-
 void LocationsBuilderX86_64::VisitCheckCast(HCheckCast* instruction) {
-  bool throws_into_catch = instruction->CanThrowIntoCatchBlock();
   TypeCheckKind type_check_kind = instruction->GetTypeCheckKind();
-  bool is_fatal_slow_path = IsTypeCheckSlowPathFatal(type_check_kind, throws_into_catch);
-  LocationSummary::CallKind call_kind = is_fatal_slow_path
-                                            ? LocationSummary::kNoCall
-                                            : LocationSummary::kCallOnSlowPath;
-  LocationSummary* locations = new (GetGraph()->GetArena()) LocationSummary(instruction, call_kind);
+  LocationSummary::CallKind call_kind = CodeGenerator::GetCheckCastCallKind(instruction);
+  LocationSummary* locations =
+      new (GetGraph()->GetAllocator()) LocationSummary(instruction, call_kind);
   locations->SetInAt(0, Location::RequiresRegister());
   if (type_check_kind == TypeCheckKind::kInterfaceCheck) {
     // Require a register for the interface check since there is a loop that compares the class to
     // a memory address.
     locations->SetInAt(1, Location::RequiresRegister());
+  } else if (type_check_kind == TypeCheckKind::kBitstringCheck) {
+    locations->SetInAt(1, Location::ConstantLocation(instruction->InputAt(1)->AsConstant()));
+    locations->SetInAt(2, Location::ConstantLocation(instruction->InputAt(2)->AsConstant()));
+    locations->SetInAt(3, Location::ConstantLocation(instruction->InputAt(3)->AsConstant()));
   } else {
     locations->SetInAt(1, Location::Any());
   }
-
-  // Note that TypeCheckSlowPathX86_64 uses this "temp" register too.
-  locations->AddTemp(Location::RequiresRegister());
-  // When read barriers are enabled, we need an additional temporary
-  // register for some cases.
-  if (CheckCastTypeCheckNeedsATemporary(type_check_kind)) {
-    locations->AddTemp(Location::RequiresRegister());
-  }
+  // Add temps for read barriers and other uses. One is used by TypeCheckSlowPathX86.
+  locations->AddRegisterTemps(NumberOfCheckCastTemps(type_check_kind));
 }
 
 void InstructionCodeGeneratorX86_64::VisitCheckCast(HCheckCast* instruction) {
@@ -6103,9 +6540,10 @@ void InstructionCodeGeneratorX86_64::VisitCheckCast(HCheckCast* instruction) {
   Location cls = locations->InAt(1);
   Location temp_loc = locations->GetTemp(0);
   CpuRegister temp = temp_loc.AsRegister<CpuRegister>();
-  Location maybe_temp2_loc = CheckCastTypeCheckNeedsATemporary(type_check_kind) ?
-      locations->GetTemp(1) :
-      Location::NoLocation();
+  const size_t num_temps = NumberOfCheckCastTemps(type_check_kind);
+  DCHECK_GE(num_temps, 1u);
+  DCHECK_LE(num_temps, 2u);
+  Location maybe_temp2_loc = (num_temps >= 2u) ? locations->GetTemp(1) : Location::NoLocation();
   const uint32_t class_offset = mirror::Object::ClassOffset().Int32Value();
   const uint32_t super_offset = mirror::Class::SuperClassOffset().Int32Value();
   const uint32_t component_offset = mirror::Class::ComponentTypeOffset().Int32Value();
@@ -6115,14 +6553,10 @@ void InstructionCodeGeneratorX86_64::VisitCheckCast(HCheckCast* instruction) {
   const uint32_t object_array_data_offset =
       mirror::Array::DataOffset(kHeapReferenceSize).Uint32Value();
 
-  // Always false for read barriers since we may need to go to the entrypoint for non-fatal cases
-  // from false negatives. The false negatives may come from avoiding read barriers below. Avoiding
-  // read barriers is done for performance and code size reasons.
-  bool is_type_check_slow_path_fatal =
-      IsTypeCheckSlowPathFatal(type_check_kind, instruction->CanThrowIntoCatchBlock());
+  bool is_type_check_slow_path_fatal = CodeGenerator::IsTypeCheckSlowPathFatal(instruction);
   SlowPathCode* type_check_slow_path =
-      new (GetGraph()->GetArena()) TypeCheckSlowPathX86_64(instruction,
-                                                           is_type_check_slow_path_fatal);
+      new (codegen_->GetScopedAllocator()) TypeCheckSlowPathX86_64(
+          instruction, is_type_check_slow_path_fatal);
   codegen_->AddSlowPath(type_check_slow_path);
 
 
@@ -6272,44 +6706,56 @@ void InstructionCodeGeneratorX86_64::VisitCheckCast(HCheckCast* instruction) {
       break;
     }
 
-    case TypeCheckKind::kInterfaceCheck:
-      // Fast path for the interface check. We always go slow path for heap poisoning since
-      // unpoisoning cls would require an extra temp.
-      if (!kPoisonHeapReferences) {
-        // Try to avoid read barriers to improve the fast path. We can not get false positives by
-        // doing this.
-        // /* HeapReference<Class> */ temp = obj->klass_
-        GenerateReferenceLoadTwoRegisters(instruction,
-                                          temp_loc,
-                                          obj_loc,
-                                          class_offset,
-                                          kWithoutReadBarrier);
+    case TypeCheckKind::kInterfaceCheck: {
+      // Fast path for the interface check. Try to avoid read barriers to improve the fast path.
+      // We can not get false positives by doing this.
+      // /* HeapReference<Class> */ temp = obj->klass_
+      GenerateReferenceLoadTwoRegisters(instruction,
+                                        temp_loc,
+                                        obj_loc,
+                                        class_offset,
+                                        kWithoutReadBarrier);
 
-        // /* HeapReference<Class> */ temp = temp->iftable_
-        GenerateReferenceLoadTwoRegisters(instruction,
-                                          temp_loc,
-                                          temp_loc,
-                                          iftable_offset,
-                                          kWithoutReadBarrier);
-        // Iftable is never null.
-        __ movl(maybe_temp2_loc.AsRegister<CpuRegister>(), Address(temp, array_length_offset));
-        // Loop through the iftable and check if any class matches.
-        NearLabel start_loop;
-        __ Bind(&start_loop);
-        // Need to subtract first to handle the empty array case.
-        __ subl(maybe_temp2_loc.AsRegister<CpuRegister>(), Immediate(2));
-        __ j(kNegative, type_check_slow_path->GetEntryLabel());
-        // Go to next interface if the classes do not match.
-        __ cmpl(cls.AsRegister<CpuRegister>(),
-                CodeGeneratorX86_64::ArrayAddress(temp,
-                                                  maybe_temp2_loc,
-                                                  TIMES_4,
-                                                  object_array_data_offset));
-        __ j(kNotEqual, &start_loop);  // Return if same class.
-      } else {
-        __ jmp(type_check_slow_path->GetEntryLabel());
-      }
+      // /* HeapReference<Class> */ temp = temp->iftable_
+      GenerateReferenceLoadTwoRegisters(instruction,
+                                        temp_loc,
+                                        temp_loc,
+                                        iftable_offset,
+                                        kWithoutReadBarrier);
+      // Iftable is never null.
+      __ movl(maybe_temp2_loc.AsRegister<CpuRegister>(), Address(temp, array_length_offset));
+      // Maybe poison the `cls` for direct comparison with memory.
+      __ MaybePoisonHeapReference(cls.AsRegister<CpuRegister>());
+      // Loop through the iftable and check if any class matches.
+      NearLabel start_loop;
+      __ Bind(&start_loop);
+      // Need to subtract first to handle the empty array case.
+      __ subl(maybe_temp2_loc.AsRegister<CpuRegister>(), Immediate(2));
+      __ j(kNegative, type_check_slow_path->GetEntryLabel());
+      // Go to next interface if the classes do not match.
+      __ cmpl(cls.AsRegister<CpuRegister>(),
+              CodeGeneratorX86_64::ArrayAddress(temp,
+                                                maybe_temp2_loc,
+                                                TIMES_4,
+                                                object_array_data_offset));
+      __ j(kNotEqual, &start_loop);  // Return if same class.
+      // If `cls` was poisoned above, unpoison it.
+      __ MaybeUnpoisonHeapReference(cls.AsRegister<CpuRegister>());
       break;
+    }
+
+    case TypeCheckKind::kBitstringCheck: {
+      // /* HeapReference<Class> */ temp = obj->klass_
+      GenerateReferenceLoadTwoRegisters(instruction,
+                                        temp_loc,
+                                        obj_loc,
+                                        class_offset,
+                                        kWithoutReadBarrier);
+
+      GenerateBitstringTypeCheckCompare(instruction, temp);
+      __ j(kNotEqual, type_check_slow_path->GetEntryLabel());
+      break;
+    }
   }
 
   if (done.IsLinked()) {
@@ -6320,8 +6766,8 @@ void InstructionCodeGeneratorX86_64::VisitCheckCast(HCheckCast* instruction) {
 }
 
 void LocationsBuilderX86_64::VisitMonitorOperation(HMonitorOperation* instruction) {
-  LocationSummary* locations =
-      new (GetGraph()->GetArena()) LocationSummary(instruction, LocationSummary::kCallOnMainOnly);
+  LocationSummary* locations = new (GetGraph()->GetAllocator()) LocationSummary(
+      instruction, LocationSummary::kCallOnMainOnly);
   InvokeRuntimeCallingConvention calling_convention;
   locations->SetInAt(0, Location::RegisterLocation(calling_convention.GetRegisterAt(0)));
 }
@@ -6337,15 +6783,57 @@ void InstructionCodeGeneratorX86_64::VisitMonitorOperation(HMonitorOperation* in
   }
 }
 
+void LocationsBuilderX86_64::VisitX86AndNot(HX86AndNot* instruction) {
+  DCHECK(codegen_->GetInstructionSetFeatures().HasAVX2());
+  DCHECK(DataType::IsIntOrLongType(instruction->GetType())) << instruction->GetType();
+  LocationSummary* locations = new (GetGraph()->GetAllocator()) LocationSummary(instruction);
+  locations->SetInAt(0, Location::RequiresRegister());
+  // There is no immediate variant of negated bitwise and in X86.
+  locations->SetInAt(1, Location::RequiresRegister());
+  locations->SetOut(Location::RequiresRegister(), Location::kNoOutputOverlap);
+}
+
+void LocationsBuilderX86_64::VisitX86MaskOrResetLeastSetBit(HX86MaskOrResetLeastSetBit* instruction) {
+  DCHECK(codegen_->GetInstructionSetFeatures().HasAVX2());
+  DCHECK(DataType::IsIntOrLongType(instruction->GetType())) << instruction->GetType();
+  LocationSummary* locations = new (GetGraph()->GetAllocator()) LocationSummary(instruction);
+  locations->SetInAt(0, Location::RequiresRegister());
+  locations->SetOut(Location::RequiresRegister(), Location::kNoOutputOverlap);
+}
+
+void InstructionCodeGeneratorX86_64::VisitX86AndNot(HX86AndNot* instruction) {
+  LocationSummary* locations = instruction->GetLocations();
+  Location first = locations->InAt(0);
+  Location second = locations->InAt(1);
+  Location dest = locations->Out();
+  __ andn(dest.AsRegister<CpuRegister>(), first.AsRegister<CpuRegister>(), second.AsRegister<CpuRegister>());
+}
+
+void InstructionCodeGeneratorX86_64::VisitX86MaskOrResetLeastSetBit(HX86MaskOrResetLeastSetBit* instruction) {
+  LocationSummary* locations = instruction->GetLocations();
+  Location src = locations->InAt(0);
+  Location dest = locations->Out();
+  switch (instruction->GetOpKind()) {
+    case HInstruction::kAnd:
+      __ blsr(dest.AsRegister<CpuRegister>(), src.AsRegister<CpuRegister>());
+      break;
+    case HInstruction::kXor:
+      __ blsmsk(dest.AsRegister<CpuRegister>(), src.AsRegister<CpuRegister>());
+      break;
+    default:
+      LOG(FATAL) << "Unreachable";
+  }
+}
+
 void LocationsBuilderX86_64::VisitAnd(HAnd* instruction) { HandleBitwiseOperation(instruction); }
 void LocationsBuilderX86_64::VisitOr(HOr* instruction) { HandleBitwiseOperation(instruction); }
 void LocationsBuilderX86_64::VisitXor(HXor* instruction) { HandleBitwiseOperation(instruction); }
 
 void LocationsBuilderX86_64::HandleBitwiseOperation(HBinaryOperation* instruction) {
   LocationSummary* locations =
-      new (GetGraph()->GetArena()) LocationSummary(instruction, LocationSummary::kNoCall);
-  DCHECK(instruction->GetResultType() == Primitive::kPrimInt
-         || instruction->GetResultType() == Primitive::kPrimLong);
+      new (GetGraph()->GetAllocator()) LocationSummary(instruction, LocationSummary::kNoCall);
+  DCHECK(instruction->GetResultType() == DataType::Type::kInt32
+         || instruction->GetResultType() == DataType::Type::kInt64);
   locations->SetInAt(0, Location::RequiresRegister());
   locations->SetInAt(1, Location::Any());
   locations->SetOut(Location::SameAsFirstInput());
@@ -6369,7 +6857,7 @@ void InstructionCodeGeneratorX86_64::HandleBitwiseOperation(HBinaryOperation* in
   Location second = locations->InAt(1);
   DCHECK(first.Equals(locations->Out()));
 
-  if (instruction->GetResultType() == Primitive::kPrimInt) {
+  if (instruction->GetResultType() == DataType::Type::kInt32) {
     if (second.IsRegister()) {
       if (instruction->IsAnd()) {
         __ andl(first.AsRegister<CpuRegister>(), second.AsRegister<CpuRegister>());
@@ -6401,7 +6889,7 @@ void InstructionCodeGeneratorX86_64::HandleBitwiseOperation(HBinaryOperation* in
       }
     }
   } else {
-    DCHECK_EQ(instruction->GetResultType(), Primitive::kPrimLong);
+    DCHECK_EQ(instruction->GetResultType(), DataType::Type::kInt64);
     CpuRegister first_reg = first.AsRegister<CpuRegister>();
     bool second_is_constant = false;
     int64_t value = 0;
@@ -6465,7 +6953,7 @@ void InstructionCodeGeneratorX86_64::GenerateReferenceLoadOneRegister(
       // Load with fast path based Baker's read barrier.
       // /* HeapReference<Object> */ out = *(out + offset)
       codegen_->GenerateFieldLoadWithBakerReadBarrier(
-          instruction, out, out_reg, offset, /* needs_null_check */ false);
+          instruction, out, out_reg, offset, /* needs_null_check= */ false);
     } else {
       // Load with slow path based read barrier.
       // Save the value of `out` into `maybe_temp` before overwriting it
@@ -6499,7 +6987,7 @@ void InstructionCodeGeneratorX86_64::GenerateReferenceLoadTwoRegisters(
       // Load with fast path based Baker's read barrier.
       // /* HeapReference<Object> */ out = *(obj + offset)
       codegen_->GenerateFieldLoadWithBakerReadBarrier(
-          instruction, out, obj_reg, offset, /* needs_null_check */ false);
+          instruction, out, obj_reg, offset, /* needs_null_check= */ false);
     } else {
       // Load with slow path based read barrier.
       // /* HeapReference<Object> */ out = *(obj + offset)
@@ -6547,14 +7035,14 @@ void InstructionCodeGeneratorX86_64::GenerateGcRootFieldLoad(
                     "have different sizes.");
 
       // Slow path marking the GC root `root`.
-      SlowPathCode* slow_path = new (GetGraph()->GetArena()) ReadBarrierMarkSlowPathX86_64(
-          instruction, root, /* unpoison_ref_before_marking */ false);
+      SlowPathCode* slow_path = new (codegen_->GetScopedAllocator()) ReadBarrierMarkSlowPathX86_64(
+          instruction, root, /* unpoison_ref_before_marking= */ false);
       codegen_->AddSlowPath(slow_path);
 
       // Test the `Thread::Current()->pReadBarrierMarkReg ## root.reg()` entrypoint.
       const int32_t entry_point_offset =
-          CodeGenerator::GetReadBarrierMarkEntryPointsOffset<kX86_64PointerSize>(root.reg());
-      __ gs()->cmpl(Address::Absolute(entry_point_offset, /* no_rip */ true), Immediate(0));
+          Thread::ReadBarrierMarkEntryPointsOffset<kX86_64PointerSize>(root.reg());
+      __ gs()->cmpl(Address::Absolute(entry_point_offset, /* no_rip= */ true), Immediate(0));
       // The entrypoint is null when the GC is not marking.
       __ j(kNotEqual, slow_path->GetEntryLabel());
       __ Bind(slow_path->GetExitLabel());
@@ -6651,7 +7139,7 @@ void CodeGeneratorX86_64::GenerateReferenceLoadWithBakerReadBarrier(HInstruction
   uint32_t monitor_offset = mirror::Object::MonitorOffset().Int32Value();
 
   // Given the numeric representation, it's enough to check the low bit of the rb_state.
-  static_assert(ReadBarrier::WhiteState() == 0, "Expecting white to have value 0");
+  static_assert(ReadBarrier::NonGrayState() == 0, "Expecting non-gray to have value 0");
   static_assert(ReadBarrier::GrayState() == 1, "Expecting gray to have value 1");
   constexpr uint32_t gray_byte_position = LockWord::kReadBarrierStateShift / kBitsPerByte;
   constexpr uint32_t gray_bit_position = LockWord::kReadBarrierStateShift % kBitsPerByte;
@@ -6679,11 +7167,11 @@ void CodeGeneratorX86_64::GenerateReferenceLoadWithBakerReadBarrier(HInstruction
   if (always_update_field) {
     DCHECK(temp1 != nullptr);
     DCHECK(temp2 != nullptr);
-    slow_path = new (GetGraph()->GetArena()) ReadBarrierMarkAndUpdateFieldSlowPathX86_64(
-        instruction, ref, obj, src, /* unpoison_ref_before_marking */ true, *temp1, *temp2);
+    slow_path = new (GetScopedAllocator()) ReadBarrierMarkAndUpdateFieldSlowPathX86_64(
+        instruction, ref, obj, src, /* unpoison_ref_before_marking= */ true, *temp1, *temp2);
   } else {
-    slow_path = new (GetGraph()->GetArena()) ReadBarrierMarkSlowPathX86_64(
-        instruction, ref, /* unpoison_ref_before_marking */ true);
+    slow_path = new (GetScopedAllocator()) ReadBarrierMarkSlowPathX86_64(
+        instruction, ref, /* unpoison_ref_before_marking= */ true);
   }
   AddSlowPath(slow_path);
 
@@ -6715,7 +7203,7 @@ void CodeGeneratorX86_64::GenerateReadBarrierSlow(HInstruction* instruction,
   // not used by the artReadBarrierSlow entry point.
   //
   // TODO: Unpoison `ref` when it is used by artReadBarrierSlow.
-  SlowPathCode* slow_path = new (GetGraph()->GetArena())
+  SlowPathCode* slow_path = new (GetScopedAllocator())
       ReadBarrierForHeapReferenceSlowPathX86_64(instruction, out, ref, obj, offset, index);
   AddSlowPath(slow_path);
 
@@ -6751,7 +7239,7 @@ void CodeGeneratorX86_64::GenerateReadBarrierForRootSlow(HInstruction* instructi
   // Note that GC roots are not affected by heap poisoning, so we do
   // not need to do anything special for this here.
   SlowPathCode* slow_path =
-      new (GetGraph()->GetArena()) ReadBarrierForRootSlowPathX86_64(instruction, out, root);
+      new (GetScopedAllocator()) ReadBarrierForRootSlowPathX86_64(instruction, out, root);
   AddSlowPath(slow_path);
 
   __ jmp(slow_path->GetEntryLabel());
@@ -6771,7 +7259,7 @@ void InstructionCodeGeneratorX86_64::VisitBoundType(HBoundType* instruction ATTR
 // Simple implementation of packed switch - generate cascaded compare/jumps.
 void LocationsBuilderX86_64::VisitPackedSwitch(HPackedSwitch* switch_instr) {
   LocationSummary* locations =
-      new (GetGraph()->GetArena()) LocationSummary(switch_instr, LocationSummary::kNoCall);
+      new (GetGraph()->GetAllocator()) LocationSummary(switch_instr, LocationSummary::kNoCall);
   locations->SetInAt(0, Location::RequiresRegister());
   locations->AddTemp(Location::RequiresRegister());
   locations->AddTemp(Location::RequiresRegister());
@@ -6856,6 +7344,16 @@ void InstructionCodeGeneratorX86_64::VisitPackedSwitch(HPackedSwitch* switch_ins
 
   // And jump.
   __ jmp(temp_reg);
+}
+
+void LocationsBuilderX86_64::VisitIntermediateAddress(HIntermediateAddress* instruction
+                                                      ATTRIBUTE_UNUSED) {
+  LOG(FATAL) << "Unreachable";
+}
+
+void InstructionCodeGeneratorX86_64::VisitIntermediateAddress(HIntermediateAddress* instruction
+                                                              ATTRIBUTE_UNUSED) {
+  LOG(FATAL) << "Unreachable";
 }
 
 void CodeGeneratorX86_64::Load32BitValue(CpuRegister dest, int32_t value) {
@@ -6986,7 +7484,7 @@ class RIPFixup : public AssemblerFixup, public ArenaObject<kArenaAllocCodeGenera
   CodeGeneratorX86_64* codegen_;
 
  private:
-  void Process(const MemoryRegion& region, int pos) OVERRIDE {
+  void Process(const MemoryRegion& region, int pos) override {
     // Patch the correct offset for the instruction.  We use the address of the
     // 'next' instruction, which is 'pos' (patch the 4 bytes before).
     int32_t constant_offset = codegen_->ConstantAreaStart() + offset_into_constant_area_;
@@ -7046,7 +7544,7 @@ void CodeGeneratorX86_64::Finalize(CodeAllocator* allocator) {
     constant_area_start_ = assembler->CodeSize();
 
     // Populate any jump tables.
-    for (auto jump_table : fixups_to_jump_tables_) {
+    for (JumpTableRIPFixup* jump_table : fixups_to_jump_tables_) {
       jump_table->CreateJumpTable();
     }
 
@@ -7059,33 +7557,33 @@ void CodeGeneratorX86_64::Finalize(CodeAllocator* allocator) {
 }
 
 Address CodeGeneratorX86_64::LiteralDoubleAddress(double v) {
-  AssemblerFixup* fixup = new (GetGraph()->GetArena()) RIPFixup(*this, __ AddDouble(v));
+  AssemblerFixup* fixup = new (GetGraph()->GetAllocator()) RIPFixup(*this, __ AddDouble(v));
   return Address::RIP(fixup);
 }
 
 Address CodeGeneratorX86_64::LiteralFloatAddress(float v) {
-  AssemblerFixup* fixup = new (GetGraph()->GetArena()) RIPFixup(*this, __ AddFloat(v));
+  AssemblerFixup* fixup = new (GetGraph()->GetAllocator()) RIPFixup(*this, __ AddFloat(v));
   return Address::RIP(fixup);
 }
 
 Address CodeGeneratorX86_64::LiteralInt32Address(int32_t v) {
-  AssemblerFixup* fixup = new (GetGraph()->GetArena()) RIPFixup(*this, __ AddInt32(v));
+  AssemblerFixup* fixup = new (GetGraph()->GetAllocator()) RIPFixup(*this, __ AddInt32(v));
   return Address::RIP(fixup);
 }
 
 Address CodeGeneratorX86_64::LiteralInt64Address(int64_t v) {
-  AssemblerFixup* fixup = new (GetGraph()->GetArena()) RIPFixup(*this, __ AddInt64(v));
+  AssemblerFixup* fixup = new (GetGraph()->GetAllocator()) RIPFixup(*this, __ AddInt64(v));
   return Address::RIP(fixup);
 }
 
 // TODO: trg as memory.
-void CodeGeneratorX86_64::MoveFromReturnRegister(Location trg, Primitive::Type type) {
+void CodeGeneratorX86_64::MoveFromReturnRegister(Location trg, DataType::Type type) {
   if (!trg.IsValid()) {
-    DCHECK_EQ(type, Primitive::kPrimVoid);
+    DCHECK_EQ(type, DataType::Type::kVoid);
     return;
   }
 
-  DCHECK_NE(type, Primitive::kPrimVoid);
+  DCHECK_NE(type, DataType::Type::kVoid);
 
   Location return_loc = InvokeDexCallingConventionVisitorX86_64().GetReturnLocation(type);
   if (trg.Equals(return_loc)) {
@@ -7093,7 +7591,7 @@ void CodeGeneratorX86_64::MoveFromReturnRegister(Location trg, Primitive::Type t
   }
 
   // Let the parallel move resolver take care of all of this.
-  HParallelMove parallel_move(GetGraph()->GetArena());
+  HParallelMove parallel_move(GetGraph()->GetAllocator());
   parallel_move.AddMove(return_loc, trg, type, nullptr);
   GetMoveResolver()->EmitNativeCode(&parallel_move);
 }
@@ -7101,7 +7599,7 @@ void CodeGeneratorX86_64::MoveFromReturnRegister(Location trg, Primitive::Type t
 Address CodeGeneratorX86_64::LiteralCaseTable(HPackedSwitch* switch_instr) {
   // Create a fixup to be used to create and address the jump table.
   JumpTableRIPFixup* table_fixup =
-      new (GetGraph()->GetArena()) JumpTableRIPFixup(*this, switch_instr);
+      new (GetGraph()->GetAllocator()) JumpTableRIPFixup(*this, switch_instr);
 
   // We have to populate the jump tables.
   fixups_to_jump_tables_.push_back(table_fixup);
@@ -7133,24 +7631,22 @@ void CodeGeneratorX86_64::PatchJitRootUse(uint8_t* code,
   uint32_t code_offset = info.label.Position() - kLabelPositionToLiteralOffsetAdjustment;
   uintptr_t address =
       reinterpret_cast<uintptr_t>(roots_data) + index_in_table * sizeof(GcRoot<mirror::Object>);
-  typedef __attribute__((__aligned__(1))) uint32_t unaligned_uint32_t;
+  using unaligned_uint32_t __attribute__((__aligned__(1))) = uint32_t;
   reinterpret_cast<unaligned_uint32_t*>(code + code_offset)[0] =
      dchecked_integral_cast<uint32_t>(address);
 }
 
 void CodeGeneratorX86_64::EmitJitRootPatches(uint8_t* code, const uint8_t* roots_data) {
   for (const PatchInfo<Label>& info : jit_string_patches_) {
-    const auto& it = jit_string_roots_.find(
-        StringReference(&info.dex_file, dex::StringIndex(info.index)));
-    DCHECK(it != jit_string_roots_.end());
-    PatchJitRootUse(code, roots_data, info, it->second);
+    StringReference string_reference(info.target_dex_file, dex::StringIndex(info.offset_or_index));
+    uint64_t index_in_table = GetJitStringRootIndex(string_reference);
+    PatchJitRootUse(code, roots_data, info, index_in_table);
   }
 
   for (const PatchInfo<Label>& info : jit_class_patches_) {
-    const auto& it = jit_class_roots_.find(
-        TypeReference(&info.dex_file, dex::TypeIndex(info.index)));
-    DCHECK(it != jit_class_roots_.end());
-    PatchJitRootUse(code, roots_data, info, it->second);
+    TypeReference type_reference(info.target_dex_file, dex::TypeIndex(info.offset_or_index));
+    uint64_t index_in_table = GetJitClassRootIndex(type_reference);
+    PatchJitRootUse(code, roots_data, info, index_in_table);
   }
 }
 

@@ -17,8 +17,9 @@
 #ifndef ART_RUNTIME_ARCH_MIPS_INSTRUCTION_SET_FEATURES_MIPS_H_
 #define ART_RUNTIME_ARCH_MIPS_INSTRUCTION_SET_FEATURES_MIPS_H_
 
+#include <android-base/logging.h>
+
 #include "arch/instruction_set_features.h"
-#include "base/logging.h"
 #include "base/macros.h"
 
 namespace art {
@@ -27,7 +28,7 @@ class MipsInstructionSetFeatures;
 using MipsFeaturesUniquePtr = std::unique_ptr<const MipsInstructionSetFeatures>;
 
 // Instruction set features relevant to the MIPS architecture.
-class MipsInstructionSetFeatures FINAL : public InstructionSetFeatures {
+class MipsInstructionSetFeatures final : public InstructionSetFeatures {
  public:
   // Process a CPU variant string like "r4000" and create InstructionSetFeatures.
   static MipsFeaturesUniquePtr FromVariant(const std::string& variant, std::string* error_msg);
@@ -49,15 +50,15 @@ class MipsInstructionSetFeatures FINAL : public InstructionSetFeatures {
   // InstructionSetFeatures. This works around kernel bugs in AT_HWCAP and /proc/cpuinfo.
   static MipsFeaturesUniquePtr FromAssembly();
 
-  bool Equals(const InstructionSetFeatures* other) const OVERRIDE;
+  bool Equals(const InstructionSetFeatures* other) const override;
 
-  InstructionSet GetInstructionSet() const OVERRIDE {
-    return kMips;
+  InstructionSet GetInstructionSet() const override {
+    return InstructionSet::kMips;
   }
 
-  uint32_t AsBitmap() const OVERRIDE;
+  uint32_t AsBitmap() const override;
 
-  std::string GetFeatureString() const OVERRIDE;
+  std::string GetFeatureString() const override;
 
   // Is this an ISA revision greater than 2 opening up new opcodes.
   bool IsMipsIsaRevGreaterThanEqual2() const {
@@ -75,20 +76,26 @@ class MipsInstructionSetFeatures FINAL : public InstructionSetFeatures {
     return r6_;
   }
 
+  // Does it have MSA (MIPS SIMD Architecture) support.
+  bool HasMsa() const {
+    return msa_;
+  }
+
   virtual ~MipsInstructionSetFeatures() {}
 
  protected:
   // Parse a vector of the form "fpu32", "mips2" adding these to a new MipsInstructionSetFeatures.
   std::unique_ptr<const InstructionSetFeatures>
       AddFeaturesFromSplitString(const std::vector<std::string>& features,
-                                 std::string* error_msg) const OVERRIDE;
+                                 std::string* error_msg) const override;
 
  private:
-  MipsInstructionSetFeatures(bool fpu_32bit, bool mips_isa_gte2, bool r6)
+  MipsInstructionSetFeatures(bool fpu_32bit, bool mips_isa_gte2, bool r6, bool msa)
       : InstructionSetFeatures(),
         fpu_32bit_(fpu_32bit),
         mips_isa_gte2_(mips_isa_gte2),
-        r6_(r6) {
+        r6_(r6),
+        msa_(msa) {
     // Sanity checks.
     if (r6) {
       CHECK(mips_isa_gte2);
@@ -104,11 +111,13 @@ class MipsInstructionSetFeatures FINAL : public InstructionSetFeatures {
     kFpu32Bitfield = 1 << 0,
     kIsaRevGte2Bitfield = 1 << 1,
     kR6 = 1 << 2,
+    kMsaBitfield = 1 << 3,
   };
 
   const bool fpu_32bit_;
   const bool mips_isa_gte2_;
   const bool r6_;
+  const bool msa_;
 
   DISALLOW_COPY_AND_ASSIGN(MipsInstructionSetFeatures);
 };

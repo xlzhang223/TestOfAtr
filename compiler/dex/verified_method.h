@@ -20,9 +20,9 @@
 #include <vector>
 
 #include "base/mutex.h"
-#include "dex_file.h"
-#include "method_reference.h"
-#include "safe_map.h"
+#include "base/safe_map.h"
+#include "dex/dex_file.h"
+#include "dex/method_reference.h"
 
 namespace art {
 
@@ -43,8 +43,8 @@ class VerifiedMethod {
       REQUIRES_SHARED(Locks::mutator_lock_);
   ~VerifiedMethod() = default;
 
-  const SafeCastSet& GetSafeCastSet() const {
-    return safe_cast_set_;
+  const SafeCastSet* GetSafeCastSet() const {
+    return safe_cast_set_.get();
   }
 
   // Returns true if the cast can statically be verified to be redundant
@@ -69,7 +69,7 @@ class VerifiedMethod {
   void GenerateSafeCastSet(verifier::MethodVerifier* method_verifier)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  SafeCastSet safe_cast_set_;
+  std::unique_ptr<SafeCastSet> safe_cast_set_;
 
   const uint32_t encountered_error_types_;
   const bool has_runtime_throw_;

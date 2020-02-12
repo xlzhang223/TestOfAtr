@@ -17,16 +17,19 @@
 #ifndef ART_RUNTIME_CHA_H_
 #define ART_RUNTIME_CHA_H_
 
-#include "art_method.h"
-#include "base/enums.h"
-#include "base/mutex.h"
-#include "handle.h"
-#include "mirror/class.h"
-#include "oat_quick_method_header.h"
 #include <unordered_map>
 #include <unordered_set>
 
+#include "base/enums.h"
+#include "base/locks.h"
+#include "handle.h"
+#include "mirror/class.h"
+#include "oat_quick_method_header.h"
+
 namespace art {
+
+class ArtMethod;
+class LinearAlloc;
 
 /**
  * Class Hierarchy Analysis (CHA) tries to devirtualize virtual calls into
@@ -94,12 +97,11 @@ class ClassHierarchyAnalysis {
                      OatQuickMethodHeader* dependent_header) REQUIRES(Locks::cha_lock_);
 
   // Return compiled code that assumes that `method` has single-implementation.
-  std::vector<MethodAndMethodHeaderPair>* GetDependents(ArtMethod* method)
-      REQUIRES(Locks::cha_lock_);
+  const ListOfDependentPairs& GetDependents(ArtMethod* method) REQUIRES(Locks::cha_lock_);
 
   // Remove dependency tracking for compiled code that assumes that
   // `method` has single-implementation.
-  void RemoveDependencyFor(ArtMethod* method) REQUIRES(Locks::cha_lock_);
+  void RemoveAllDependenciesFor(ArtMethod* method) REQUIRES(Locks::cha_lock_);
 
   // Remove from cha_dependency_map_ all entries that contain OatQuickMethodHeader from
   // the given `method_headers` set.
@@ -108,8 +110,24 @@ class ClassHierarchyAnalysis {
       const std::unordered_set<OatQuickMethodHeader*>& method_headers)
       REQUIRES(Locks::cha_lock_);
 
+  // If a given class belongs to a linear allocation that is about to be deleted, in all its
+  // superclasses and superinterfaces reset SingleImplementation fields of their methods
+  // that might be affected by the deletion.
+  // The method is intended to be called during GC before ReclaimPhase, since it gets info from
+  // Java objects that are going to be collected.
+  // For the same reason it's important to access objects without read barrier to not revive them.
+  void ResetSingleImplementationInHierarchy(ObjPtr<mirror::Class> klass,
+                                            const LinearAlloc* alloc,
+                                            PointerSize pointer_size)
+      const REQUIRES_SHARED(Locks::mutator_lock_);
+
   // Update CHA info for methods that `klass` overrides, after loading `klass`.
   void UpdateAfterLoadingOf(Handle<mirror::Class> klass) REQUIRES_SHARED(Locks::mutator_lock_);
+
+  // Remove all of the dependencies for a linear allocator. This is called when dex cache unloading
+  // occurs.
+  void RemoveDependenciesForLinearAlloc(const LinearAlloc* linear_alloc)
+      REQUIRES(!Locks::cha_lock_);
 
  private:
   void InitSingleImplementationFlag(Handle<mirror::Class> klass,
@@ -148,17 +166,9 @@ class ClassHierarchyAnalysis {
       std::unordered_set<ArtMethod*>& invalidated_single_impl_methods)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // For all methods in vtable slot at `verify_index` of `verify_class` and its
-  // superclasses, single-implementation status should be false, except if the
-  // method is `excluded_method`.
-  void VerifyNonSingleImplementation(mirror::Class* verify_class,
-                                     uint16_t verify_index,
-                                     ArtMethod* excluded_method)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
   // A map that maps a method to a set of compiled code that assumes that method has a
   // single implementation, which is used to do CHA-based devirtualization.
-  std::unordered_map<ArtMethod*, ListOfDependentPairs*> cha_dependency_map_
+  std::unordered_map<ArtMethod*, ListOfDependentPairs> cha_dependency_map_
     GUARDED_BY(Locks::cha_lock_);
 
   DISALLOW_COPY_AND_ASSIGN(ClassHierarchyAnalysis);

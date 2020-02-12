@@ -16,15 +16,15 @@
 
 #include "monitor_pool.h"
 
-#include "base/logging.h"
+#include "base/logging.h"  // For VLOG.
 #include "base/mutex-inl.h"
-#include "thread-inl.h"
 #include "monitor.h"
+#include "thread-current-inl.h"
 
 namespace art {
 
 namespace mirror {
-  class Object;
+class Object;
 }  // namespace mirror
 
 MonitorPool::MonitorPool()
@@ -105,7 +105,9 @@ void MonitorPool::FreeInternal() {
   }
 }
 
-Monitor* MonitorPool::CreateMonitorInPool(Thread* self, Thread* owner, mirror::Object* obj,
+Monitor* MonitorPool::CreateMonitorInPool(Thread* self,
+                                          Thread* owner,
+                                          ObjPtr<mirror::Object> obj,
                                           int32_t hash_code)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   // We are gonna allocate, so acquire the writer lock.

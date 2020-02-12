@@ -37,16 +37,16 @@ class CodeGenerator;
  */
 class InstructionSimplifier : public HOptimization {
  public:
-  explicit InstructionSimplifier(HGraph* graph,
-                                 CodeGenerator* codegen,
-                                 OptimizingCompilerStats* stats = nullptr,
-                                 const char* name = kInstructionSimplifierPassName)
+  InstructionSimplifier(HGraph* graph,
+                        CodeGenerator* codegen,
+                        OptimizingCompilerStats* stats = nullptr,
+                        const char* name = kInstructionSimplifierPassName)
       : HOptimization(graph, name, stats),
         codegen_(codegen) {}
 
   static constexpr const char* kInstructionSimplifierPassName = "instruction_simplifier";
 
-  void Run() OVERRIDE;
+  bool Run() override;
 
  private:
   CodeGenerator* codegen_;

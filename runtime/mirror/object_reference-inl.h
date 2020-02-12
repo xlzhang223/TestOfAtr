@@ -25,22 +25,28 @@ namespace art {
 namespace mirror {
 
 template<bool kPoisonReferences, class MirrorType>
+inline uint32_t PtrCompression<kPoisonReferences, MirrorType>::Compress(ObjPtr<MirrorType> ptr) {
+  return Compress(ptr.Ptr());
+}
+
+template <bool kPoisonReferences, class MirrorType>
+ALWAYS_INLINE
 void ObjectReference<kPoisonReferences, MirrorType>::Assign(ObjPtr<MirrorType> ptr) {
   Assign(ptr.Ptr());
 }
 
-template<class MirrorType>
-HeapReference<MirrorType> HeapReference<MirrorType>::FromObjPtr(ObjPtr<MirrorType> ptr) {
-  return HeapReference<MirrorType>(ptr.Ptr());
+template <class MirrorType>
+ALWAYS_INLINE
+bool HeapReference<MirrorType>::CasWeakRelaxed(MirrorType* expected_ptr, MirrorType* new_ptr) {
+  return reference_.CompareAndSetWeakRelaxed(Compression::Compress(expected_ptr),
+                                             Compression::Compress(new_ptr));
 }
 
-template<class MirrorType>
-bool HeapReference<MirrorType>::CasWeakRelaxed(MirrorType* expected_ptr, MirrorType* new_ptr) {
-  HeapReference<Object> expected_ref(HeapReference<Object>::FromMirrorPtr(expected_ptr));
-  HeapReference<Object> new_ref(HeapReference<Object>::FromMirrorPtr(new_ptr));
-  Atomic<uint32_t>* atomic_reference = reinterpret_cast<Atomic<uint32_t>*>(&this->reference_);
-  return atomic_reference->CompareExchangeWeakRelaxed(expected_ref.reference_,
-                                                      new_ref.reference_);
+template <typename MirrorType>
+template <bool kIsVolatile>
+ALWAYS_INLINE
+void HeapReference<MirrorType>::Assign(ObjPtr<MirrorType> ptr) {
+  Assign<kIsVolatile>(ptr.Ptr());
 }
 
 }  // namespace mirror

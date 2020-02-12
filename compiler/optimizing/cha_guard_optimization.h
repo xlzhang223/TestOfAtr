@@ -26,10 +26,11 @@ namespace art {
  */
 class CHAGuardOptimization : public HOptimization {
  public:
-  explicit CHAGuardOptimization(HGraph* graph)
-      : HOptimization(graph, kCHAGuardOptimizationPassName) {}
+  explicit CHAGuardOptimization(HGraph* graph,
+                                const char* name = kCHAGuardOptimizationPassName)
+      : HOptimization(graph, name) {}
 
-  void Run() OVERRIDE;
+  bool Run() override;
 
   static constexpr const char* kCHAGuardOptimizationPassName = "cha_guard_optimization";
 

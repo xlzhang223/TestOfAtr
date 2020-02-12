@@ -24,14 +24,4 @@ if [[ "${flags}" == *--prebuild* || "${flags}" != *--no-prebuild* ]] ; then
   exit 1
 fi
 
-# Make sure we can run without an oat file.
-echo "Run -Xnodex2oat"
-${RUN} ${flags} --runtime-option -Xnodex2oat
-
-# Make sure we can run with the oat file.
-echo "Run -Xdex2oat"
-${RUN} ${flags} --runtime-option -Xdex2oat
-
-# Make sure we can run with the default settings.
-echo "Run default"
 ${RUN} ${flags}

@@ -19,11 +19,11 @@
 #include <fstream>
 #include <sstream>
 
-#include "android-base/stringprintf.h"
-#include "android-base/strings.h"
+#include <android-base/logging.h>
+#include <android-base/stringprintf.h>
+#include <android-base/strings.h>
 
 #include "arch/x86_64/instruction_set_features_x86_64.h"
-#include "base/logging.h"
 
 namespace art {
 
@@ -33,24 +33,41 @@ using android::base::StringPrintf;
 
 static constexpr const char* x86_known_variants[] = {
     "atom",
+    "sandybridge",
     "silvermont",
+    "kabylake",
 };
 
 static constexpr const char* x86_variants_with_ssse3[] = {
     "atom",
+    "sandybridge",
     "silvermont",
+    "kabylake",
 };
 
 static constexpr const char* x86_variants_with_sse4_1[] = {
+    "sandybridge",
     "silvermont",
+    "kabylake",
 };
 
 static constexpr const char* x86_variants_with_sse4_2[] = {
+    "sandybridge",
     "silvermont",
+    "kabylake",
 };
 
 static constexpr const char* x86_variants_with_popcnt[] = {
+    "sandybridge",
     "silvermont",
+    "kabylake",
+};
+static constexpr const char* x86_variants_with_avx[] = {
+    "kabylake",
+};
+
+static constexpr const char* x86_variants_with_avx2[] = {
+    "kabylake",
 };
 
 X86FeaturesUniquePtr X86InstructionSetFeatures::Create(bool x86_64,
@@ -88,9 +105,12 @@ X86FeaturesUniquePtr X86InstructionSetFeatures::FromVariant(
   bool has_SSE4_2 = FindVariantInArray(x86_variants_with_sse4_2,
                                        arraysize(x86_variants_with_sse4_2),
                                        variant);
-  bool has_AVX = false;
-  bool has_AVX2 = false;
-
+  bool has_AVX = FindVariantInArray(x86_variants_with_avx,
+                                    arraysize(x86_variants_with_avx),
+                                    variant);
+  bool has_AVX2 = FindVariantInArray(x86_variants_with_avx2,
+                                    arraysize(x86_variants_with_avx2),
+                                    variant);
   bool has_POPCNT = FindVariantInArray(x86_variants_with_popcnt,
                                        arraysize(x86_variants_with_popcnt),
                                        variant);
@@ -225,6 +245,19 @@ bool X86InstructionSetFeatures::Equals(const InstructionSetFeatures* other) cons
       (has_POPCNT_ == other_as_x86->has_POPCNT_);
 }
 
+bool X86InstructionSetFeatures::HasAtLeast(const InstructionSetFeatures* other) const {
+  if (GetInstructionSet() != other->GetInstructionSet()) {
+    return false;
+  }
+  const X86InstructionSetFeatures* other_as_x86 = other->AsX86InstructionSetFeatures();
+  return (has_SSSE3_ || !other_as_x86->has_SSSE3_) &&
+      (has_SSE4_1_ || !other_as_x86->has_SSE4_1_) &&
+      (has_SSE4_2_ || !other_as_x86->has_SSE4_2_) &&
+      (has_AVX_ || !other_as_x86->has_AVX_) &&
+      (has_AVX2_ || !other_as_x86->has_AVX2_) &&
+      (has_POPCNT_ || !other_as_x86->has_POPCNT_);
+}
+
 uint32_t X86InstructionSetFeatures::AsBitmap() const {
   return (has_SSSE3_ ? kSsse3Bitfield : 0) |
       (has_SSE4_1_ ? kSse4_1Bitfield : 0) |
@@ -278,8 +311,9 @@ std::unique_ptr<const InstructionSetFeatures> X86InstructionSetFeatures::AddFeat
   bool has_AVX = has_AVX_;
   bool has_AVX2 = has_AVX2_;
   bool has_POPCNT = has_POPCNT_;
-  for (auto i = features.begin(); i != features.end(); i++) {
-    std::string feature = android::base::Trim(*i);
+  for (const std::string& feature : features) {
+    DCHECK_EQ(android::base::Trim(feature), feature)
+        << "Feature name is not trimmed: '" << feature << "'";
     if (feature == "ssse3") {
       has_SSSE3 = true;
     } else if (feature == "-ssse3") {

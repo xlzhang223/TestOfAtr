@@ -195,13 +195,33 @@ public class Test913 {
     System.out.println(getTag(FloatObject.class));
     setTag(FloatObject.class, 0);
 
+    boolean correctHeapValue = false;
     setTag(Inf1.class, 10000);
-    System.out.println(followReferencesPrimitiveFields(Inf1.class));
+    String heapTrace = followReferencesPrimitiveFields(Inf1.class);
+
+    if (!checkInitialized(Inf1.class)) {
+      correctHeapValue = heapTrace.equals("10000@0 (static, int, index=0) 0000000000000000");
+    } else {
+      correctHeapValue = heapTrace.equals("10000@0 (static, int, index=0) 0000000000000001");
+    }
+
+    if (!correctHeapValue)
+      System.out.println("Heap Trace for Inf1 is not as expected:\n" + heapTrace);
+
     System.out.println(getTag(Inf1.class));
     setTag(Inf1.class, 0);
 
     setTag(Inf2.class, 10000);
-    System.out.println(followReferencesPrimitiveFields(Inf2.class));
+    heapTrace = followReferencesPrimitiveFields(Inf2.class);
+
+    if (!checkInitialized(Inf2.class)) {
+      correctHeapValue = heapTrace.equals("10000@0 (static, int, index=1) 0000000000000000");
+    } else {
+      correctHeapValue = heapTrace.equals("10000@0 (static, int, index=1) 0000000000000001");
+    }
+
+    if (!correctHeapValue)
+      System.out.println("Heap Trace for Inf2 is not as expected:\n" + heapTrace);
     System.out.println(getTag(Inf2.class));
     setTag(Inf2.class, 0);
   }
@@ -384,17 +404,22 @@ public class Test913 {
 
     private static void tagClasses(Verifier v) {
       setTag(A.class, 1000);
+      registerClass(1000, A.class);
 
       setTag(B.class, 1001);
+      registerClass(1001, B.class);
       v.add("1001@0", "1000@0");  // B.class --(superclass)--> A.class.
 
       setTag(C.class, 1002);
+      registerClass(1002, C.class);
       v.add("1002@0", "1001@0");  // C.class --(superclass)--> B.class.
       v.add("1002@0", "2001@0");  // C.class --(interface)--> I2.class.
 
       setTag(I1.class, 2000);
+      registerClass(2000, I1.class);
 
       setTag(I2.class, 2001);
+      registerClass(2001, I2.class);
       v.add("2001@0", "2000@0");  // I2.class --(interface)--> I1.class.
     }
 
@@ -712,6 +737,7 @@ public class Test913 {
     return Main.getTag(o);
   }
 
+  private static native boolean checkInitialized(Class<?> klass);
   private static native void setupGcCallback();
   private static native void enableGcTracking(boolean enable);
   private static native int getGcStarts();
@@ -730,4 +756,6 @@ public class Test913 {
   public static native String followReferencesPrimitiveFields(Object initialObject);
 
   private static native void iterateThroughHeapExt();
+
+  private static native void registerClass(long tag, Object obj);
 }

@@ -18,22 +18,25 @@
 #include <errno.h>
 #include <signal.h>
 #include <string.h>
-#include <unistd.h>
 #include <sys/ptrace.h>
 #include <sys/wait.h>
+#include <unistd.h>
 #endif
 
 #include "jni.h"
 
-#include "android-base/stringprintf.h"
+#include <android-base/logging.h>
+#include <android-base/stringprintf.h>
 #include <backtrace/Backtrace.h>
 
+#include "base/file_utils.h"
 #include "base/logging.h"
 #include "base/macros.h"
+#include "base/utils.h"
 #include "gc/heap.h"
 #include "gc/space/image_space.h"
 #include "oat_file.h"
-#include "utils.h"
+#include "runtime.h"
 
 namespace art {
 
@@ -52,12 +55,38 @@ static void CauseSegfault() {
 #endif
 }
 
-extern "C" JNIEXPORT jboolean JNICALL Java_Main_sleep(JNIEnv*, jobject, jint, jboolean, jdouble) {
-  // Keep pausing.
-  printf("Going to sleep\n");
-  for (;;) {
-    sleep(1);
+extern "C" JNIEXPORT jint JNICALL Java_Main_startSecondaryProcess(JNIEnv*, jclass) {
+#if __linux__
+  // Get our command line so that we can use it to start identical process.
+  std::string cmdline;  // null-separated and null-terminated arguments.
+  ReadFileToString("/proc/self/cmdline", &cmdline);
+  cmdline = cmdline + "--secondary" + '\0';  // Let the child know it is a helper.
+
+  // Split the string into individual arguments suitable for execv.
+  std::vector<char*> argv;
+  for (size_t i = 0; i < cmdline.size(); i += strlen(&cmdline[i]) + 1) {
+    argv.push_back(&cmdline[i]);
   }
+  argv.push_back(nullptr);  // Terminate the list.
+
+  pid_t pid = fork();
+  if (pid < 0) {
+    LOG(FATAL) << "Fork failed";
+  } else if (pid == 0) {
+    execv(argv[0], argv.data());
+    exit(1);
+  }
+  return pid;
+#else
+  return 0;
+#endif
+}
+
+extern "C" JNIEXPORT jboolean JNICALL Java_Main_sigstop(JNIEnv*, jclass) {
+#if __linux__
+  raise(SIGSTOP);
+#endif
+  return true;  // Prevent the compiler from tail-call optimizing this method away.
 }
 
 // Helper to look for a sequence in the stack trace.
@@ -69,7 +98,7 @@ static bool CheckStack(Backtrace* bt, const std::vector<std::string>& seq) {
   for (Backtrace::const_iterator it = bt->begin(); it != bt->end(); ++it) {
     if (BacktraceMap::IsValid(it->map)) {
       LOG(INFO) << "Got " << it->func_name << ", looking for " << seq[cur_search_index];
-      if (it->func_name == seq[cur_search_index]) {
+      if (it->func_name.find(seq[cur_search_index]) != std::string::npos) {
         cur_search_index++;
         if (cur_search_index == seq.size()) {
           return true;
@@ -81,7 +110,7 @@ static bool CheckStack(Backtrace* bt, const std::vector<std::string>& seq) {
   printf("Cannot find %s in backtrace:\n", seq[cur_search_index].c_str());
   for (Backtrace::const_iterator it = bt->begin(); it != bt->end(); ++it) {
     if (BacktraceMap::IsValid(it->map)) {
-      printf("  %s\n", it->func_name.c_str());
+      printf("  %s\n", Backtrace::FormatFrameData(&*it).c_str());
     }
   }
 
@@ -102,34 +131,8 @@ static void MoreErrorInfo(pid_t pid, bool sig_quit_on_fail) {
 }
 #endif
 
-// Currently we have to fall back to our own loader for the boot image when it's compiled PIC
-// because its base is zero. Thus in-process unwinding through it won't work. This is a helper
-// detecting this.
+extern "C" JNIEXPORT jboolean JNICALL Java_Main_unwindInProcess(JNIEnv*, jclass) {
 #if __linux__
-static bool IsPicImage() {
-  std::vector<gc::space::ImageSpace*> image_spaces =
-      Runtime::Current()->GetHeap()->GetBootImageSpaces();
-  CHECK(!image_spaces.empty());  // We should be running with an image.
-  const OatFile* oat_file = image_spaces[0]->GetOatFile();
-  CHECK(oat_file != nullptr);     // We should have an oat file to go with the image.
-  return oat_file->IsPic();
-}
-#endif
-
-extern "C" JNIEXPORT jboolean JNICALL Java_Main_unwindInProcess(
-    JNIEnv*,
-    jobject,
-    jboolean full_signatrues,
-    jint,
-    jboolean) {
-#if __linux__
-  if (IsPicImage()) {
-    LOG(INFO) << "Image is pic, in-process unwinding check bypassed.";
-    return JNI_TRUE;
-  }
-
-  // TODO: What to do on Valgrind?
-
   std::unique_ptr<Backtrace> bt(Backtrace::Create(BACKTRACE_CURRENT_PROCESS, GetTid()));
   if (!bt->Unwind(0, nullptr)) {
     printf("Cannot unwind in process.\n");
@@ -144,19 +147,13 @@ extern "C" JNIEXPORT jboolean JNICALL Java_Main_unwindInProcess(
   // only unique functions are being expected.
   // "mini-debug-info" does not include parameters to save space.
   std::vector<std::string> seq = {
-      "Java_Main_unwindInProcess",                   // This function.
-      "Main.unwindInProcess",                        // The corresponding Java native method frame.
-      "int java.util.Arrays.binarySearch(java.lang.Object[], int, int, java.lang.Object, java.util.Comparator)",  // Framework method.
-      "Main.main"                                    // The Java entry method.
-  };
-  std::vector<std::string> full_seq = {
-      "Java_Main_unwindInProcess",                   // This function.
-      "boolean Main.unwindInProcess(boolean, int, boolean)",  // The corresponding Java native method frame.
-      "int java.util.Arrays.binarySearch(java.lang.Object[], int, int, java.lang.Object, java.util.Comparator)",  // Framework method.
-      "void Main.main(java.lang.String[])"           // The Java entry method.
+      "Java_Main_unwindInProcess",       // This function.
+      "java.util.Arrays.binarySearch0",  // Framework method.
+      "Base.$noinline$runTest",          // Method in other dex file.
+      "Main.main"                        // The Java entry method.
   };
 
-  bool result = CheckStack(bt.get(), full_signatrues ? full_seq : seq);
+  bool result = CheckStack(bt.get(), seq);
   if (!kCauseSegfault) {
     return result ? JNI_TRUE : JNI_FALSE;
   } else {
@@ -172,8 +169,8 @@ extern "C" JNIEXPORT jboolean JNICALL Java_Main_unwindInProcess(
 }
 
 #if __linux__
-static constexpr int kSleepTimeMicroseconds = 50000;            // 0.05 seconds
-static constexpr int kMaxTotalSleepTimeMicroseconds = 1000000;  // 1 second
+static constexpr int kSleepTimeMicroseconds = 50000;             // 0.05 seconds
+static constexpr int kMaxTotalSleepTimeMicroseconds = 10000000;  // 10 seconds
 
 // Wait for a sigstop. This code is copied from libbacktrace.
 int wait_for_sigstop(pid_t tid, int* total_sleep_time_usec, bool* detach_failed ATTRIBUTE_UNUSED) {
@@ -205,18 +202,12 @@ int wait_for_sigstop(pid_t tid, int* total_sleep_time_usec, bool* detach_failed 
 }
 #endif
 
-extern "C" JNIEXPORT jboolean JNICALL Java_Main_unwindOtherProcess(
-    JNIEnv*,
-    jobject,
-    jboolean full_signatrues,
-    jint pid_int) {
+extern "C" JNIEXPORT jboolean JNICALL Java_Main_unwindOtherProcess(JNIEnv*, jclass, jint pid_int) {
 #if __linux__
-  // TODO: What to do on Valgrind?
   pid_t pid = static_cast<pid_t>(pid_int);
 
-  // OK, this is painful. debuggerd uses ptrace to unwind other processes.
-
-  if (ptrace(PTRACE_ATTACH, pid, 0, 0)) {
+  // SEIZE is like ATTACH, but it does not stop the process (we let it stop itself).
+  if (ptrace(PTRACE_SEIZE, pid, 0, 0)) {
     // Were not able to attach, bad.
     printf("Failed to attach to other process.\n");
     PLOG(ERROR) << "Failed to attach.";
@@ -224,13 +215,12 @@ extern "C" JNIEXPORT jboolean JNICALL Java_Main_unwindOtherProcess(
     return JNI_FALSE;
   }
 
-  kill(pid, SIGSTOP);
-
   bool detach_failed = false;
   int total_sleep_time_usec = 0;
   int signal = wait_for_sigstop(pid, &total_sleep_time_usec, &detach_failed);
-  if (signal == -1) {
+  if (signal != SIGSTOP) {
     LOG(WARNING) << "wait_for_sigstop failed.";
+    return JNI_FALSE;
   }
 
   std::unique_ptr<Backtrace> bt(Backtrace::Create(pid, BACKTRACE_CURRENT_THREAD));
@@ -247,25 +237,13 @@ extern "C" JNIEXPORT jboolean JNICALL Java_Main_unwindOtherProcess(
     // See comment in unwindInProcess for non-exact stack matching.
     // "mini-debug-info" does not include parameters to save space.
     std::vector<std::string> seq = {
-        // "Java_Main_sleep",                        // The sleep function being executed in the
-                                                     // other runtime.
-                                                     // Note: For some reason, the name isn't
-                                                     // resolved, so don't look for it right now.
-        "Main.sleep",                                // The corresponding Java native method frame.
-        "int java.util.Arrays.binarySearch(java.lang.Object[], int, int, java.lang.Object, java.util.Comparator)",  // Framework method.
-        "Main.main"                                  // The Java entry method.
-    };
-    std::vector<std::string> full_seq = {
-        // "Java_Main_sleep",                        // The sleep function being executed in the
-                                                     // other runtime.
-                                                     // Note: For some reason, the name isn't
-                                                     // resolved, so don't look for it right now.
-        "boolean Main.sleep(int, boolean, double)",  // The corresponding Java native method frame.
-        "int java.util.Arrays.binarySearch(java.lang.Object[], int, int, java.lang.Object, java.util.Comparator)",  // Framework method.
-        "void Main.main(java.lang.String[])"         // The Java entry method.
+        "Java_Main_sigstop",                // The stop function in the other process.
+        "java.util.Arrays.binarySearch0",   // Framework method.
+        "Base.$noinline$runTest",           // Method in other dex file.
+        "Main.main"                         // The Java entry method.
     };
 
-    result = CheckStack(bt.get(), full_signatrues ? full_seq : seq);
+    result = CheckStack(bt.get(), seq);
   }
 
   constexpr bool kSigQuitOnFail = true;

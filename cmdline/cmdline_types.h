@@ -18,22 +18,26 @@
 
 #define CMDLINE_NDEBUG 1  // Do not output any debugging information for parsing.
 
-#include "memory_representation.h"
-#include "detail/cmdline_debug_detail.h"
-#include "cmdline_type_parser.h"
+#include <list>
 
+#include "cmdline_type_parser.h"
+#include "detail/cmdline_debug_detail.h"
+#include "memory_representation.h"
+
+#include "android-base/logging.h"
 #include "android-base/strings.h"
 
 // Includes for the types that are being specialized
 #include <string>
-#include "base/logging.h"
 #include "base/time_utils.h"
 #include "experimental_flags.h"
 #include "gc/collector_type.h"
 #include "gc/space/large_object_space.h"
 #include "jdwp/jdwp.h"
+#include "jdwp_provider.h"
 #include "jit/profile_saver_options.h"
 #include "plugin.h"
+#include "read_barrier_config.h"
 #include "ti/agent.h"
 #include "unit.h"
 
@@ -54,130 +58,38 @@ template <>
 struct CmdlineType<Unit> : CmdlineTypeParser<Unit> {
   Result Parse(const std::string& args) {
     if (args == "") {
-      return Result::Success(Unit{});  // NOLINT [whitespace/braces] [5]
+      return Result::Success(Unit{});
     }
     return Result::Failure("Unexpected extra characters " + args);
   }
 };
 
 template <>
-struct CmdlineType<JDWP::JdwpOptions> : CmdlineTypeParser<JDWP::JdwpOptions> {
+struct CmdlineType<JdwpProvider> : CmdlineTypeParser<JdwpProvider> {
   /*
-   * Handle one of the JDWP name/value pairs.
-   *
-   * JDWP options are:
-   *  help: if specified, show help message and bail
-   *  transport: may be dt_socket or dt_shmem
-   *  address: for dt_socket, "host:port", or just "port" when listening
-   *  server: if "y", wait for debugger to attach; if "n", attach to debugger
-   *  timeout: how long to wait for debugger to connect / listen
-   *
-   * Useful with server=n (these aren't supported yet):
-   *  onthrow=<exception-name>: connect to debugger when exception thrown
-   *  onuncaught=y|n: connect to debugger when uncaught exception thrown
-   *  launch=<command-line>: launch the debugger itself
-   *
-   * The "transport" option is required, as is "address" if server=n.
+   * Handle a single JDWP provider name. Must be either 'internal', 'default', or the file name of
+   * an agent. A plugin will make use of this and the jdwpOptions to set up jdwp when appropriate.
    */
-  Result Parse(const std::string& options) {
-    VLOG(jdwp) << "ParseJdwpOptions: " << options;
-
-    if (options == "help") {
+  Result Parse(const std::string& option) {
+    if (option == "help") {
       return Result::Usage(
-          "Example: -Xrunjdwp:transport=dt_socket,address=8000,server=y\n"
-          "Example: -Xrunjdwp:transport=dt_socket,address=localhost:6500,server=n\n");
-    }
-
-    const std::string s;
-
-    std::vector<std::string> pairs;
-    Split(options, ',', &pairs);
-
-    JDWP::JdwpOptions jdwp_options;
-
-    for (const std::string& jdwp_option : pairs) {
-      std::string::size_type equals_pos = jdwp_option.find('=');
-      if (equals_pos == std::string::npos) {
-        return Result::Failure(s +
-            "Can't parse JDWP option '" + jdwp_option + "' in '" + options + "'");
-      }
-
-      Result parse_attempt = ParseJdwpOption(jdwp_option.substr(0, equals_pos),
-                                             jdwp_option.substr(equals_pos + 1),
-                                             &jdwp_options);
-      if (parse_attempt.IsError()) {
-        // We fail to parse this JDWP option.
-        return parse_attempt;
-      }
-    }
-
-    if (jdwp_options.transport == JDWP::kJdwpTransportUnknown) {
-      return Result::Failure(s + "Must specify JDWP transport: " + options);
-    }
-    if (!jdwp_options.server && (jdwp_options.host.empty() || jdwp_options.port == 0)) {
-      return Result::Failure(s + "Must specify JDWP host and port when server=n: " + options);
-    }
-
-    return Result::Success(std::move(jdwp_options));
-  }
-
-  Result ParseJdwpOption(const std::string& name, const std::string& value,
-                         JDWP::JdwpOptions* jdwp_options) {
-    if (name == "transport") {
-      if (value == "dt_socket") {
-        jdwp_options->transport = JDWP::kJdwpTransportSocket;
-      } else if (value == "dt_android_adb") {
-        jdwp_options->transport = JDWP::kJdwpTransportAndroidAdb;
-      } else {
-        return Result::Failure("JDWP transport not supported: " + value);
-      }
-    } else if (name == "server") {
-      if (value == "n") {
-        jdwp_options->server = false;
-      } else if (value == "y") {
-        jdwp_options->server = true;
-      } else {
-        return Result::Failure("JDWP option 'server' must be 'y' or 'n'");
-      }
-    } else if (name == "suspend") {
-      if (value == "n") {
-        jdwp_options->suspend = false;
-      } else if (value == "y") {
-        jdwp_options->suspend = true;
-      } else {
-        return Result::Failure("JDWP option 'suspend' must be 'y' or 'n'");
-      }
-    } else if (name == "address") {
-      /* this is either <port> or <host>:<port> */
-      std::string port_string;
-      jdwp_options->host.clear();
-      std::string::size_type colon = value.find(':');
-      if (colon != std::string::npos) {
-        jdwp_options->host = value.substr(0, colon);
-        port_string = value.substr(colon + 1);
-      } else {
-        port_string = value;
-      }
-      if (port_string.empty()) {
-        return Result::Failure("JDWP address missing port: " + value);
-      }
-      char* end;
-      uint64_t port = strtoul(port_string.c_str(), &end, 10);
-      if (*end != '\0' || port > 0xffff) {
-        return Result::Failure("JDWP address has junk in port field: " + value);
-      }
-      jdwp_options->port = port;
-    } else if (name == "launch" || name == "onthrow" || name == "oncaught" || name == "timeout") {
-      /* valid but unsupported */
-      LOG(INFO) << "Ignoring JDWP option '" << name << "'='" << value << "'";
+          "Example: -XjdwpProvider:none to disable JDWP\n"
+          "Example: -XjdwpProvider:internal for internal jdwp implementation\n"
+          "Example: -XjdwpProvider:adbconnection for adb connection mediated jdwp implementation\n"
+          "Example: -XjdwpProvider:default for the default jdwp implementation\n");
+    } else if (option == "default") {
+      return Result::Success(JdwpProvider::kDefaultJdwpProvider);
+    } else if (option == "internal") {
+      return Result::Success(JdwpProvider::kInternal);
+    } else if (option == "adbconnection") {
+      return Result::Success(JdwpProvider::kAdbConnection);
+    } else if (option == "none") {
+      return Result::Success(JdwpProvider::kNone);
     } else {
-      LOG(INFO) << "Ignoring unrecognized JDWP option '" << name << "'='" << value << "'";
+      return Result::Failure(std::string("not a valid jdwp provider: ") + option);
     }
-
-    return Result::SuccessNoValue();
   }
-
-  static const char* Name() { return "JdwpOptions"; }
+  static const char* Name() { return "JdwpProvider"; }
 };
 
 template <size_t Divisor>
@@ -287,29 +199,45 @@ struct CmdlineType<double> : CmdlineTypeParser<double> {
   static const char* Name() { return "double"; }
 };
 
+template <typename T>
+static inline CmdlineParseResult<T> ParseNumeric(const std::string& str) {
+  static_assert(sizeof(T) < sizeof(long long int),  // NOLINT [runtime/int] [4]
+                "Current support is restricted.");
+
+  const char* begin = str.c_str();
+  char* end;
+
+  // Parse into a larger type (long long) because we can't use strtoul
+  // since it silently converts negative values into unsigned long and doesn't set errno.
+  errno = 0;
+  long long int result = strtoll(begin, &end, 10);  // NOLINT [runtime/int] [4]
+  if (begin == end || *end != '\0' || errno == EINVAL) {
+    return CmdlineParseResult<T>::Failure("Failed to parse integer from " + str);
+  } else if ((errno == ERANGE) ||  // NOLINT [runtime/int] [4]
+      result < std::numeric_limits<T>::min() || result > std::numeric_limits<T>::max()) {
+    return CmdlineParseResult<T>::OutOfRange(
+        "Failed to parse integer from " + str + "; out of range");
+  }
+
+  return CmdlineParseResult<T>::Success(static_cast<T>(result));
+}
+
 template <>
 struct CmdlineType<unsigned int> : CmdlineTypeParser<unsigned int> {
   Result Parse(const std::string& str) {
-    const char* begin = str.c_str();
-    char* end;
-
-    // Parse into a larger type (long long) because we can't use strtoul
-    // since it silently converts negative values into unsigned long and doesn't set errno.
-    errno = 0;
-    long long int result = strtoll(begin, &end, 10);  // NOLINT [runtime/int] [4]
-    if (begin == end || *end != '\0' || errno == EINVAL) {
-      return Result::Failure("Failed to parse integer from " + str);
-    } else if ((errno == ERANGE) ||  // NOLINT [runtime/int] [4]
-        result < std::numeric_limits<int>::min()
-        || result > std::numeric_limits<unsigned int>::max() || result < 0) {
-      return Result::OutOfRange(
-          "Failed to parse integer from " + str + "; out of unsigned int range");
-    }
-
-    return Result::Success(static_cast<unsigned int>(result));
+    return ParseNumeric<unsigned int>(str);
   }
 
   static const char* Name() { return "unsigned integer"; }
+};
+
+template <>
+struct CmdlineType<int> : CmdlineTypeParser<int> {
+  Result Parse(const std::string& str) {
+    return ParseNumeric<int>(str);
+  }
+
+  static const char* Name() { return "integer"; }
 };
 
 // Lightweight nanosecond value type. Allows parser to convert user-input from milliseconds
@@ -401,19 +329,19 @@ struct CmdlineType<std::vector<Plugin>> : CmdlineTypeParser<std::vector<Plugin>>
 };
 
 template <>
-struct CmdlineType<std::list<ti::Agent>> : CmdlineTypeParser<std::list<ti::Agent>> {
+struct CmdlineType<std::list<ti::AgentSpec>> : CmdlineTypeParser<std::list<ti::AgentSpec>> {
   Result Parse(const std::string& args) {
     assert(false && "Use AppendValues() for an Agent list type");
     return Result::Failure("Unconditional failure: Agent list must be appended: " + args);
   }
 
   Result ParseAndAppend(const std::string& args,
-                        std::list<ti::Agent>& existing_value) {
+                        std::list<ti::AgentSpec>& existing_value) {
     existing_value.emplace_back(args);
     return Result::SuccessNoValue();
   }
 
-  static const char* Name() { return "std::list<ti::Agent>"; }
+  static const char* Name() { return "std::list<ti::AgentSpec>"; }
 };
 
 template <>
@@ -488,8 +416,6 @@ static gc::CollectorType ParseCollectorType(const std::string& option) {
     return gc::kCollectorTypeGSS;
   } else if (option == "CC") {
     return gc::kCollectorTypeCC;
-  } else if (option == "MC") {
-    return gc::kCollectorTypeMC;
   } else {
     return gc::kCollectorTypeNone;
   }
@@ -501,6 +427,7 @@ struct XGcOption {
   gc::CollectorType collector_type_ = gc::kCollectorTypeDefault;
   bool verify_pre_gc_heap_ = false;
   bool verify_pre_sweeping_heap_ = kIsDebugBuild;
+  bool generational_cc = kEnableGenerationalCCByDefault;
   bool verify_post_gc_heap_ = false;
   bool verify_pre_gc_rosalloc_ = kIsDebugBuild;
   bool verify_pre_sweeping_rosalloc_ = false;
@@ -513,7 +440,7 @@ struct XGcOption {
 template <>
 struct CmdlineType<XGcOption> : CmdlineTypeParser<XGcOption> {
   Result Parse(const std::string& option) {  // -Xgc: already stripped
-    XGcOption xgc{};  // NOLINT [readability/braces] [4]
+    XGcOption xgc{};
 
     std::vector<std::string> gc_options;
     Split(option, ',', &gc_options);
@@ -529,6 +456,20 @@ struct CmdlineType<XGcOption> : CmdlineTypeParser<XGcOption> {
         xgc.verify_pre_sweeping_heap_ = true;
       } else if (gc_option == "nopresweepingverify") {
         xgc.verify_pre_sweeping_heap_ = false;
+      } else if (gc_option == "generational_cc") {
+        // Note: Option "-Xgc:generational_cc" can be passed directly by
+        // app_process/zygote (see `android::AndroidRuntime::startVm`). If this
+        // option is ever deprecated, it should still be accepted (but ignored)
+        // for compatibility reasons (this should not prevent the runtime from
+        // starting up).
+        xgc.generational_cc = true;
+      } else if (gc_option == "nogenerational_cc") {
+        // Note: Option "-Xgc:nogenerational_cc" can be passed directly by
+        // app_process/zygote (see `android::AndroidRuntime::startVm`). If this
+        // option is ever deprecated, it should still be accepted (but ignored)
+        // for compatibility reasons (this should not prevent the runtime from
+        // starting up).
+        xgc.generational_cc = false;
       } else if (gc_option == "postverify") {
         xgc.verify_post_gc_heap_ = true;
       } else if (gc_option == "nopostverify") {
@@ -650,6 +591,8 @@ struct CmdlineType<LogVerbosity> : CmdlineTypeParser<LogVerbosity> {
         log_verbosity.threads = true;
       } else if (verbose_options[j] == "verifier") {
         log_verbosity.verifier = true;
+      } else if (verbose_options[j] == "verifier-debug") {
+        log_verbosity.verifier_debug = true;
       } else if (verbose_options[j] == "image") {
         log_verbosity.image = true;
       } else if (verbose_options[j] == "systrace-locks") {
@@ -710,6 +653,21 @@ struct CmdlineType<ProfileSaverOptions> : CmdlineTypeParser<ProfileSaverOptions>
       return Result::SuccessNoValue();
     }
 
+    if (option == "profile-boot-class-path") {
+      existing.profile_boot_class_path_ = true;
+      return Result::SuccessNoValue();
+    }
+
+    if (option == "profile-aot-code") {
+      existing.profile_aot_code_ = true;
+      return Result::SuccessNoValue();
+    }
+
+    if (option == "save-without-jit-notifications") {
+      existing.wait_for_jit_notifications_to_save_ = false;
+      return Result::SuccessNoValue();
+    }
+
     // The rest of these options are always the wildcard from '-Xps-*'
     std::string suffix = RemovePrefix(option);
 
@@ -725,10 +683,10 @@ struct CmdlineType<ProfileSaverOptions> : CmdlineTypeParser<ProfileSaverOptions>
              &ProfileSaverOptions::save_resolved_classes_delay_ms_,
              type_parser.Parse(suffix));
     }
-    if (android::base::StartsWith(option, "startup-method-samples:")) {
+    if (android::base::StartsWith(option, "hot-startup-method-samples:")) {
       CmdlineType<unsigned int> type_parser;
       return ParseInto(existing,
-             &ProfileSaverOptions::startup_method_samples_,
+             &ProfileSaverOptions::hot_startup_method_samples_,
              type_parser.Parse(suffix));
     }
     if (android::base::StartsWith(option, "min-methods-to-save:")) {

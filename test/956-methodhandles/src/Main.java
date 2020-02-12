@@ -22,12 +22,15 @@ import java.lang.invoke.MethodType;
 import java.lang.invoke.WrongMethodTypeException;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+
+import other.Chatty;
 
 public class Main {
 
@@ -65,6 +68,30 @@ public class Main {
     public static final Lookup lookup = MethodHandles.lookup();
   }
 
+  private interface F {
+    public default void sayHi() {
+      System.out.println("F.sayHi()");
+    }
+  }
+
+  public static class G implements F {
+    public void sayHi() {
+      System.out.println("G.sayHi()");
+    }
+    public MethodHandles.Lookup getLookup() {
+      return MethodHandles.lookup();
+    }
+  }
+
+  public static class H implements Chatty {
+    public void chatter() {
+      System.out.println("H.chatter()");
+    }
+    public MethodHandles.Lookup getLookup() {
+      return MethodHandles.lookup();
+    }
+  }
+
   public static void main(String[] args) throws Throwable {
     testfindSpecial_invokeSuperBehaviour();
     testfindSpecial_invokeDirectBehaviour();
@@ -75,10 +102,12 @@ public class Main {
     testAsType();
     testConstructors();
     testStringConstructors();
+    testReturnValues();
     testReturnValueConversions();
     testVariableArity();
     testVariableArity_MethodHandles_bind();
     testRevealDirect();
+    testReflectiveCalls();
   }
 
   public static void testfindSpecial_invokeSuperBehaviour() throws Throwable {
@@ -171,7 +200,7 @@ public class Main {
       handle.invokeExact("a", new Object());
       System.out.println("invokeExact(\"a\", new Object()) unexpectedly succeeded.");
     } catch (WrongMethodTypeException ex) {
-      System.out.println("Received exception: " + ex.getMessage());
+      System.out.println("Received WrongMethodTypeException exception");
     }
   }
 
@@ -526,6 +555,34 @@ public class Main {
     privateStaticField.set(null, "updatedStaticValue");
     mh.invokeExact("updatedStaticValue2");
     assertEquals("updatedStaticValue2", (String) privateStaticField.get(null));
+
+    // unreflectSpecial testing - F is an interface that G implements
+
+    G g = new G();
+    g.sayHi();  // prints "G.sayHi()"
+
+    MethodHandles.Lookup lookupInG = g.getLookup();
+    Method methodInG = G.class.getDeclaredMethod("sayHi");
+    lookupInG.unreflectSpecial(methodInG, G.class).invoke(g); // prints "G.sayHi()"
+
+    Method methodInF = F.class.getDeclaredMethod("sayHi");
+    lookupInG.unreflect(methodInF).invoke(g);  // prints "G.sayHi()"
+    lookupInG.in(G.class).unreflectSpecial(methodInF, G.class).invoke(g);  // prints "F.sayHi()"
+    lookupInG.unreflectSpecial(methodInF, G.class).bindTo(g).invokeWithArguments();
+
+    // unreflectSpecial testing - other.Chatty is an interface that H implements
+
+    H h = new H();
+    h.chatter();
+
+    MethodHandles.Lookup lookupInH = h.getLookup();
+    Method methodInH = H.class.getDeclaredMethod("chatter");
+    lookupInH.unreflectSpecial(methodInH, H.class).invoke(h);
+
+    Method methodInChatty = Chatty.class.getDeclaredMethod("chatter");
+    lookupInH.unreflect(methodInChatty).invoke(h);
+    lookupInH.in(H.class).unreflectSpecial(methodInChatty, H.class).invoke(h);
+    lookupInH.unreflectSpecial(methodInChatty, H.class).bindTo(h).invokeWithArguments();
   }
 
   // This method only exists to fool Jack's handling of types. See b/32536744.
@@ -815,6 +872,89 @@ public class Main {
     }
 
     System.out.println("String constructors done.");
+  }
+
+  private static void testReturnValues() throws Throwable {
+    Lookup lookup = MethodHandles.lookup();
+
+    // byte
+    MethodHandle mhByteValue =
+        lookup.findVirtual(Byte.class, "byteValue", MethodType.methodType(byte.class));
+    assertEquals((byte) -77, (byte) mhByteValue.invokeExact(Byte.valueOf((byte) -77)));
+    assertEquals((byte) -77, (byte) mhByteValue.invoke(Byte.valueOf((byte) -77)));
+
+    // char
+    MethodHandle mhCharacterValue =
+        lookup.findStaticGetter(Character.class, "MAX_SURROGATE", char.class);
+    assertEquals(Character.MAX_SURROGATE, (char) mhCharacterValue.invokeExact());
+    assertEquals(Character.MAX_SURROGATE, (char) mhCharacterValue.invoke());
+
+    // double
+    MethodHandle mhSin =
+        lookup.findStatic(
+            Math.class, "sin", MethodType.methodType(double.class, double.class));
+    for (double i = -Math.PI; i <= Math.PI; i += Math.PI / 8) {
+      assertEquals(Math.sin(i), (double) mhSin.invokeExact(i));
+      assertEquals(Math.sin(i), (double) mhSin.invoke(i));
+    }
+
+    // float
+    MethodHandle mhAbsFloat =
+        lookup.findStatic(
+            Math.class, "abs", MethodType.methodType(float.class, float.class));
+    assertEquals(Math.abs(-3.3e6f), (float) mhAbsFloat.invokeExact(-3.3e6f));
+    assertEquals(Math.abs(-3.3e6f), (float) mhAbsFloat.invoke(-3.3e6f));
+
+    // int
+    MethodHandle mhAbsInt =
+        lookup.findStatic(Math.class, "abs", MethodType.methodType(int.class, int.class));
+    assertEquals(Math.abs(-1000), (int) mhAbsInt.invokeExact(-1000));
+    assertEquals(Math.abs(-1000), (int) mhAbsInt.invoke(-1000));
+
+    // long
+    MethodHandle mhMaxLong =
+        lookup.findStatic(
+            Math.class,
+            "max",
+            MethodType.methodType(long.class, long.class, long.class));
+    assertEquals(
+        Long.MAX_VALUE, (long) mhMaxLong.invokeExact(Long.MAX_VALUE, Long.MAX_VALUE / 2));
+    assertEquals(Long.MAX_VALUE, (long) mhMaxLong.invoke(Long.MAX_VALUE, Long.MAX_VALUE / 2));
+    assertEquals(0x0123456789abcdefL, (long) mhMaxLong.invokeExact(0x0123456789abcdefL, 0L));
+    assertEquals(0x0123456789abcdefL, (long) mhMaxLong.invoke(0x0123456789abcdefL, 0L));
+
+    // ref
+    MethodHandle mhShortValueOf =
+        lookup.findStatic(
+            Short.class, "valueOf", MethodType.methodType(Short.class, short.class));
+    assertEquals(
+        (short) -7890, ((Short) mhShortValueOf.invokeExact((short) -7890)).shortValue());
+    assertEquals((short) -7890, ((Short) mhShortValueOf.invoke((short) -7890)).shortValue());
+
+    // array
+    int [] array = {Integer.MIN_VALUE, -1, 0, +1, Integer.MAX_VALUE};
+    MethodHandle mhCopyOf =
+            lookup.findStatic(
+                Arrays.class, "copyOf", MethodType.methodType(int[].class, int[].class, int.class));
+    assertTrue(Arrays.equals(array, (int[]) mhCopyOf.invokeExact(array, array.length)));
+    assertTrue(Arrays.equals(array, (int[]) mhCopyOf.invoke(array, array.length)));
+
+    // short
+    MethodHandle mhShortValue =
+        lookup.findVirtual(Short.class, "shortValue", MethodType.methodType(short.class));
+    assertEquals((short) 12131, (short) mhShortValue.invokeExact(Short.valueOf((short) 12131)));
+    assertEquals((short) 12131, (short) mhShortValue.invoke(Short.valueOf((short) 12131)));
+
+    // boolean
+    MethodHandle mhBooleanValue =
+        lookup.findVirtual(
+            Boolean.class, "booleanValue", MethodType.methodType(boolean.class));
+    assertEquals(true, (boolean) mhBooleanValue.invokeExact(Boolean.valueOf(true)));
+    assertEquals(true, (boolean) mhBooleanValue.invoke(Boolean.valueOf(true)));
+    assertEquals(false, (boolean) mhBooleanValue.invokeExact(Boolean.valueOf(false)));
+    assertEquals(false, (boolean) mhBooleanValue.invoke(Boolean.valueOf(false)));
+
+    System.out.println("testReturnValues done.");
   }
 
   private static void testReferenceReturnValueConversions() throws Throwable {
@@ -1623,5 +1763,21 @@ public class Main {
     assertEquals(MethodHandleInfo.REF_getField, info.getReferenceKind());
     assertEquals(field, info.reflectAs(Field.class, MethodHandles.lookup()));
     assertEquals(MethodType.methodType(String.class), info.getMethodType());
+  }
+
+  public static void testReflectiveCalls() throws Throwable {
+    String[] methodNames = { "invoke", "invokeExact" };
+    for (String methodName : methodNames) {
+      Method invokeMethod = MethodHandle.class.getMethod(methodName, Object[].class);
+      MethodHandle instance =
+          MethodHandles.lookup().findVirtual(java.io.PrintStream.class, "println",
+                                             MethodType.methodType(void.class, String.class));
+      try {
+        invokeMethod.invoke(instance, new Object[] { new Object[] { Integer.valueOf(1) } } );
+        fail();
+      } catch (InvocationTargetException ite) {
+        assertEquals(ite.getCause().getClass(), UnsupportedOperationException.class);
+      }
+    }
   }
 }

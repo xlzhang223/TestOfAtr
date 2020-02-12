@@ -16,11 +16,19 @@
 
 #include <string>
 
-#include "prepare_for_register_allocation.h"
 #include "scheduler.h"
+
+#include "base/scoped_arena_allocator.h"
+#include "base/scoped_arena_containers.h"
+#include "data_type-inl.h"
+#include "prepare_for_register_allocation.h"
 
 #ifdef ART_ENABLE_CODEGEN_arm64
 #include "scheduler_arm64.h"
+#endif
+
+#ifdef ART_ENABLE_CODEGEN_arm
+#include "scheduler_arm.h"
 #endif
 
 namespace art {
@@ -62,32 +70,231 @@ static bool MayHaveReorderingDependency(SideEffects node, SideEffects other) {
   return false;
 }
 
+size_t SchedulingGraph::ArrayAccessHeapLocation(HInstruction* instruction) const {
+  DCHECK(heap_location_collector_ != nullptr);
+  size_t heap_loc = heap_location_collector_->GetArrayHeapLocation(instruction);
+  // This array access should be analyzed and added to HeapLocationCollector before.
+  DCHECK(heap_loc != HeapLocationCollector::kHeapLocationNotFound);
+  return heap_loc;
+}
 
-// Check whether `node` depends on `other`, taking into account `SideEffect`
-// information and `CanThrow` information.
-static bool HasSideEffectDependency(const HInstruction* node, const HInstruction* other) {
-  if (MayHaveReorderingDependency(node->GetSideEffects(), other->GetSideEffects())) {
+bool SchedulingGraph::ArrayAccessMayAlias(HInstruction* node,
+                                          HInstruction* other) const {
+  DCHECK(heap_location_collector_ != nullptr);
+  size_t node_heap_loc = ArrayAccessHeapLocation(node);
+  size_t other_heap_loc = ArrayAccessHeapLocation(other);
+
+  // For example: arr[0] and arr[0]
+  if (node_heap_loc == other_heap_loc) {
     return true;
   }
 
-  if (other->CanThrow() && node->GetSideEffects().DoesAnyWrite()) {
-    return true;
-  }
-
-  if (other->GetSideEffects().DoesAnyWrite() && node->CanThrow()) {
-    return true;
-  }
-
-  if (other->CanThrow() && node->CanThrow()) {
-    return true;
-  }
-
-  // Check side-effect dependency between ArrayGet and BoundsCheck.
-  if (node->IsArrayGet() && other->IsBoundsCheck() && node->InputAt(1) == other) {
+  // For example: arr[0] and arr[i]
+  if (heap_location_collector_->MayAlias(node_heap_loc, other_heap_loc)) {
     return true;
   }
 
   return false;
+}
+
+static bool IsArrayAccess(const HInstruction* instruction) {
+  return instruction->IsArrayGet() || instruction->IsArraySet();
+}
+
+static bool IsInstanceFieldAccess(const HInstruction* instruction) {
+  return instruction->IsInstanceFieldGet() ||
+         instruction->IsInstanceFieldSet() ||
+         instruction->IsUnresolvedInstanceFieldGet() ||
+         instruction->IsUnresolvedInstanceFieldSet();
+}
+
+static bool IsStaticFieldAccess(const HInstruction* instruction) {
+  return instruction->IsStaticFieldGet() ||
+         instruction->IsStaticFieldSet() ||
+         instruction->IsUnresolvedStaticFieldGet() ||
+         instruction->IsUnresolvedStaticFieldSet();
+}
+
+static bool IsResolvedFieldAccess(const HInstruction* instruction) {
+  return instruction->IsInstanceFieldGet() ||
+         instruction->IsInstanceFieldSet() ||
+         instruction->IsStaticFieldGet() ||
+         instruction->IsStaticFieldSet();
+}
+
+static bool IsUnresolvedFieldAccess(const HInstruction* instruction) {
+  return instruction->IsUnresolvedInstanceFieldGet() ||
+         instruction->IsUnresolvedInstanceFieldSet() ||
+         instruction->IsUnresolvedStaticFieldGet() ||
+         instruction->IsUnresolvedStaticFieldSet();
+}
+
+static bool IsFieldAccess(const HInstruction* instruction) {
+  return IsResolvedFieldAccess(instruction) || IsUnresolvedFieldAccess(instruction);
+}
+
+static const FieldInfo* GetFieldInfo(const HInstruction* instruction) {
+  if (instruction->IsInstanceFieldGet()) {
+    return &instruction->AsInstanceFieldGet()->GetFieldInfo();
+  } else if (instruction->IsInstanceFieldSet()) {
+    return &instruction->AsInstanceFieldSet()->GetFieldInfo();
+  } else if (instruction->IsStaticFieldGet()) {
+    return &instruction->AsStaticFieldGet()->GetFieldInfo();
+  } else if (instruction->IsStaticFieldSet()) {
+    return &instruction->AsStaticFieldSet()->GetFieldInfo();
+  } else {
+    LOG(FATAL) << "Unexpected field access type";
+    UNREACHABLE();
+  }
+}
+
+size_t SchedulingGraph::FieldAccessHeapLocation(HInstruction* obj, const FieldInfo* field) const {
+  DCHECK(obj != nullptr);
+  DCHECK(field != nullptr);
+  DCHECK(heap_location_collector_ != nullptr);
+
+  size_t heap_loc = heap_location_collector_->GetFieldHeapLocation(obj, field);
+  // This field access should be analyzed and added to HeapLocationCollector before.
+  DCHECK(heap_loc != HeapLocationCollector::kHeapLocationNotFound);
+
+  return heap_loc;
+}
+
+bool SchedulingGraph::FieldAccessMayAlias(const HInstruction* node,
+                                          const HInstruction* other) const {
+  DCHECK(heap_location_collector_ != nullptr);
+
+  // Static and instance field accesses should not alias.
+  if ((IsInstanceFieldAccess(node) && IsStaticFieldAccess(other)) ||
+      (IsStaticFieldAccess(node) && IsInstanceFieldAccess(other))) {
+    return false;
+  }
+
+  // If either of the field accesses is unresolved.
+  if (IsUnresolvedFieldAccess(node) || IsUnresolvedFieldAccess(other)) {
+    // Conservatively treat these two accesses may alias.
+    return true;
+  }
+
+  // If both fields accesses are resolved.
+  const FieldInfo* node_field = GetFieldInfo(node);
+  const FieldInfo* other_field = GetFieldInfo(other);
+
+  size_t node_loc = FieldAccessHeapLocation(node->InputAt(0), node_field);
+  size_t other_loc = FieldAccessHeapLocation(other->InputAt(0), other_field);
+
+  if (node_loc == other_loc) {
+    return true;
+  }
+
+  if (!heap_location_collector_->MayAlias(node_loc, other_loc)) {
+    return false;
+  }
+
+  return true;
+}
+
+bool SchedulingGraph::HasMemoryDependency(HInstruction* node,
+                                          HInstruction* other) const {
+  if (!MayHaveReorderingDependency(node->GetSideEffects(), other->GetSideEffects())) {
+    return false;
+  }
+
+  if (heap_location_collector_ == nullptr ||
+      heap_location_collector_->GetNumberOfHeapLocations() == 0) {
+    // Without HeapLocation information from load store analysis,
+    // we cannot do further disambiguation analysis on these two instructions.
+    // Just simply say that those two instructions have memory dependency.
+    return true;
+  }
+
+  if (IsArrayAccess(node) && IsArrayAccess(other)) {
+    return ArrayAccessMayAlias(node, other);
+  }
+  if (IsFieldAccess(node) && IsFieldAccess(other)) {
+    return FieldAccessMayAlias(node, other);
+  }
+
+  // TODO(xueliang): LSA to support alias analysis among HVecLoad, HVecStore and ArrayAccess
+  if (node->IsVecMemoryOperation() && other->IsVecMemoryOperation()) {
+    return true;
+  }
+  if (node->IsVecMemoryOperation() && IsArrayAccess(other)) {
+    return true;
+  }
+  if (IsArrayAccess(node) && other->IsVecMemoryOperation()) {
+    return true;
+  }
+
+  // Heap accesses of different kinds should not alias.
+  if (IsArrayAccess(node) && IsFieldAccess(other)) {
+    return false;
+  }
+  if (IsFieldAccess(node) && IsArrayAccess(other)) {
+    return false;
+  }
+  if (node->IsVecMemoryOperation() && IsFieldAccess(other)) {
+    return false;
+  }
+  if (IsFieldAccess(node) && other->IsVecMemoryOperation()) {
+    return false;
+  }
+
+  // We conservatively treat all other cases having dependency,
+  // for example, Invoke and ArrayGet.
+  return true;
+}
+
+bool SchedulingGraph::HasExceptionDependency(const HInstruction* node,
+                                             const HInstruction* other) const {
+  if (other->CanThrow() && node->GetSideEffects().DoesAnyWrite()) {
+    return true;
+  }
+  if (other->GetSideEffects().DoesAnyWrite() && node->CanThrow()) {
+    return true;
+  }
+  if (other->CanThrow() && node->CanThrow()) {
+    return true;
+  }
+
+  // Above checks should cover all cases where we cannot reorder two
+  // instructions which may throw exception.
+  return false;
+}
+
+// Check whether `node` depends on `other`, taking into account `SideEffect`
+// information and `CanThrow` information.
+bool SchedulingGraph::HasSideEffectDependency(HInstruction* node,
+                                              HInstruction* other) const {
+  if (HasMemoryDependency(node, other)) {
+    return true;
+  }
+
+  // Even if above memory dependency check has passed, it is still necessary to
+  // check dependencies between instructions that can throw and instructions
+  // that write to memory.
+  if (HasExceptionDependency(node, other)) {
+    return true;
+  }
+
+  return false;
+}
+
+// Check if the specified instruction is a better candidate which more likely will
+// have other instructions depending on it.
+static bool IsBetterCandidateWithMoreLikelyDependencies(HInstruction* new_candidate,
+                                                        HInstruction* old_candidate) {
+  if (!new_candidate->GetSideEffects().Includes(old_candidate->GetSideEffects())) {
+    // Weaker side effects.
+    return false;
+  }
+  if (old_candidate->GetSideEffects().Includes(new_candidate->GetSideEffects())) {
+    // Same side effects, check if `new_candidate` has stronger `CanThrow()`.
+    return new_candidate->CanThrow() && !old_candidate->CanThrow();
+  } else {
+    // Stronger side effects, check if `new_candidate` has at least as strong `CanThrow()`.
+    return new_candidate->CanThrow() || !old_candidate->CanThrow();
+  }
 }
 
 void SchedulingGraph::AddDependencies(HInstruction* instruction, bool is_scheduling_barrier) {
@@ -105,6 +312,10 @@ void SchedulingGraph::AddDependencies(HInstruction* instruction, bool is_schedul
     // barrier depend on it.
     for (HInstruction* other = instruction->GetNext(); other != nullptr; other = other->GetNext()) {
       SchedulingNode* other_node = GetNode(other);
+      CHECK(other_node != nullptr)
+          << other->DebugName()
+          << " is in block " << other->GetBlock()->GetBlockId()
+          << ", and expected in block " << instruction->GetBlock()->GetBlockId();
       bool other_is_barrier = other_node->IsSchedulingBarrier();
       if (is_scheduling_barrier || other_is_barrier) {
         AddOtherDependency(other_node, instruction_node);
@@ -137,6 +348,7 @@ void SchedulingGraph::AddDependencies(HInstruction* instruction, bool is_schedul
 
   // Side effect dependencies.
   if (!instruction->GetSideEffects().DoesNothing() || instruction->CanThrow()) {
+    HInstruction* dep_chain_candidate = nullptr;
     for (HInstruction* other = instruction->GetNext(); other != nullptr; other = other->GetNext()) {
       SchedulingNode* other_node = GetNode(other);
       if (other_node->IsSchedulingBarrier()) {
@@ -146,7 +358,18 @@ void SchedulingGraph::AddDependencies(HInstruction* instruction, bool is_schedul
         break;
       }
       if (HasSideEffectDependency(other, instruction)) {
-        AddOtherDependency(other_node, instruction_node);
+        if (dep_chain_candidate != nullptr &&
+            HasSideEffectDependency(other, dep_chain_candidate)) {
+          // Skip an explicit dependency to reduce memory usage, rely on the transitive dependency.
+        } else {
+          AddOtherDependency(other_node, instruction_node);
+        }
+        // Check if `other` is a better candidate which more likely will have other instructions
+        // depending on it.
+        if (dep_chain_candidate == nullptr ||
+            IsBetterCandidateWithMoreLikelyDependencies(other, dep_chain_candidate)) {
+          dep_chain_candidate = other;
+        }
       }
     }
   }
@@ -204,17 +427,7 @@ bool SchedulingGraph::HasImmediateOtherDependency(const HInstruction* instructio
 }
 
 static const std::string InstructionTypeId(const HInstruction* instruction) {
-  std::string id;
-  Primitive::Type type = instruction->GetType();
-  if (type == Primitive::kPrimNot) {
-    id.append("l");
-  } else {
-    id.append(Primitive::Descriptor(instruction->GetType()));
-  }
-  // Use lower-case to be closer to the `HGraphVisualizer` output.
-  id[0] = std::tolower(id[0]);
-  id.append(std::to_string(instruction->GetId()));
-  return id;
+  return DataType::TypeId(instruction->GetType()) + std::to_string(instruction->GetId());
 }
 
 // Ideally we would reuse the graph visualizer code, but it is not available
@@ -255,7 +468,7 @@ static void DumpAsDotNode(std::ostream& output, const SchedulingNode* node) {
 }
 
 void SchedulingGraph::DumpAsDotGraph(const std::string& description,
-                                     const ArenaVector<SchedulingNode*>& initial_candidates) {
+                                     const ScopedArenaVector<SchedulingNode*>& initial_candidates) {
   // TODO(xueliang): ideally we should move scheduling information into HInstruction, after that
   // we should move this dotty graph dump feature to visualizer, and have a compiler option for it.
   std::ofstream output("scheduling_graphs.dot", std::ofstream::out | std::ofstream::app);
@@ -264,10 +477,11 @@ void SchedulingGraph::DumpAsDotGraph(const std::string& description,
   // Start the dot graph. Use an increasing index for easier differentiation.
   output << "digraph G {\n";
   for (const auto& entry : nodes_map_) {
-    DumpAsDotNode(output, entry.second);
+    SchedulingNode* node = entry.second.get();
+    DumpAsDotNode(output, node);
   }
   // Create a fake 'end_of_scheduling' node to help visualization of critical_paths.
-  for (auto node : initial_candidates) {
+  for (SchedulingNode* node : initial_candidates) {
     const HInstruction* instruction = node->GetInstruction();
     output << InstructionTypeId(instruction) << ":s -> end_of_scheduling:n "
       << "[label=\"" << node->GetLatency() << "\",dir=back]\n";
@@ -278,7 +492,7 @@ void SchedulingGraph::DumpAsDotGraph(const std::string& description,
 }
 
 SchedulingNode* CriticalPathSchedulingNodeSelector::SelectMaterializedCondition(
-    ArenaVector<SchedulingNode*>* nodes, const SchedulingGraph& graph) const {
+    ScopedArenaVector<SchedulingNode*>* nodes, const SchedulingGraph& graph) const {
   // Schedule condition inputs that can be materialized immediately before their use.
   // In following example, after we've scheduled HSelect, we want LessThan to be scheduled
   // immediately, because it is a materialized condition, and will be emitted right before HSelect
@@ -318,7 +532,7 @@ SchedulingNode* CriticalPathSchedulingNodeSelector::SelectMaterializedCondition(
 }
 
 SchedulingNode* CriticalPathSchedulingNodeSelector::PopHighestPriorityNode(
-    ArenaVector<SchedulingNode*>* nodes, const SchedulingGraph& graph) {
+    ScopedArenaVector<SchedulingNode*>* nodes, const SchedulingGraph& graph) {
   DCHECK(!nodes->empty());
   SchedulingNode* select_node = nullptr;
 
@@ -358,50 +572,69 @@ SchedulingNode* CriticalPathSchedulingNodeSelector::GetHigherPrioritySchedulingN
 }
 
 void HScheduler::Schedule(HGraph* graph) {
+  // We run lsa here instead of in a separate pass to better control whether we
+  // should run the analysis or not.
+  const HeapLocationCollector* heap_location_collector = nullptr;
+  LoadStoreAnalysis lsa(graph);
+  if (!only_optimize_loop_blocks_ || graph->HasLoops()) {
+    lsa.Run();
+    heap_location_collector = &lsa.GetHeapLocationCollector();
+  }
+
   for (HBasicBlock* block : graph->GetReversePostOrder()) {
     if (IsSchedulable(block)) {
-      Schedule(block);
+      Schedule(block, heap_location_collector);
     }
   }
 }
 
-void HScheduler::Schedule(HBasicBlock* block) {
-  ArenaVector<SchedulingNode*> scheduling_nodes(arena_->Adapter(kArenaAllocScheduler));
+void HScheduler::Schedule(HBasicBlock* block,
+                          const HeapLocationCollector* heap_location_collector) {
+  ScopedArenaAllocator allocator(block->GetGraph()->GetArenaStack());
+  ScopedArenaVector<SchedulingNode*> scheduling_nodes(allocator.Adapter(kArenaAllocScheduler));
 
   // Build the scheduling graph.
-  scheduling_graph_.Clear();
+  SchedulingGraph scheduling_graph(this, &allocator, heap_location_collector);
   for (HBackwardInstructionIterator it(block->GetInstructions()); !it.Done(); it.Advance()) {
     HInstruction* instruction = it.Current();
-    SchedulingNode* node = scheduling_graph_.AddNode(instruction, IsSchedulingBarrier(instruction));
+    CHECK_EQ(instruction->GetBlock(), block)
+        << instruction->DebugName()
+        << " is in block " << instruction->GetBlock()->GetBlockId()
+        << ", and expected in block " << block->GetBlockId();
+    SchedulingNode* node = scheduling_graph.AddNode(instruction, IsSchedulingBarrier(instruction));
     CalculateLatency(node);
     scheduling_nodes.push_back(node);
   }
 
-  if (scheduling_graph_.Size() <= 1) {
-    scheduling_graph_.Clear();
+  if (scheduling_graph.Size() <= 1) {
     return;
   }
 
   cursor_ = block->GetLastInstruction();
 
+  // The list of candidates for scheduling. A node becomes a candidate when all
+  // its predecessors have been scheduled.
+  ScopedArenaVector<SchedulingNode*> candidates(allocator.Adapter(kArenaAllocScheduler));
+
   // Find the initial candidates for scheduling.
-  candidates_.clear();
   for (SchedulingNode* node : scheduling_nodes) {
     if (!node->HasUnscheduledSuccessors()) {
       node->MaybeUpdateCriticalPath(node->GetLatency());
-      candidates_.push_back(node);
+      candidates.push_back(node);
     }
   }
 
-  ArenaVector<SchedulingNode*> initial_candidates(arena_->Adapter(kArenaAllocScheduler));
+  ScopedArenaVector<SchedulingNode*> initial_candidates(allocator.Adapter(kArenaAllocScheduler));
   if (kDumpDotSchedulingGraphs) {
     // Remember the list of initial candidates for debug output purposes.
-    initial_candidates.assign(candidates_.begin(), candidates_.end());
+    initial_candidates.assign(candidates.begin(), candidates.end());
   }
 
   // Schedule all nodes.
-  while (!candidates_.empty()) {
-    Schedule(selector_->PopHighestPriorityNode(&candidates_, scheduling_graph_));
+  selector_->Reset();
+  while (!candidates.empty()) {
+    SchedulingNode* node = selector_->PopHighestPriorityNode(&candidates, scheduling_graph);
+    Schedule(node, &candidates);
   }
 
   if (kDumpDotSchedulingGraphs) {
@@ -410,11 +643,12 @@ void HScheduler::Schedule(HBasicBlock* block) {
     std::stringstream description;
     description << graph->GetDexFile().PrettyMethod(graph->GetMethodIdx())
         << " B" << block->GetBlockId();
-    scheduling_graph_.DumpAsDotGraph(description.str(), initial_candidates);
+    scheduling_graph.DumpAsDotGraph(description.str(), initial_candidates);
   }
 }
 
-void HScheduler::Schedule(SchedulingNode* scheduling_node) {
+void HScheduler::Schedule(SchedulingNode* scheduling_node,
+                          /*inout*/ ScopedArenaVector<SchedulingNode*>* candidates) {
   // Check whether any of the node's predecessors will be valid candidates after
   // this node is scheduled.
   uint32_t path_to_node = scheduling_node->GetCriticalPath();
@@ -423,7 +657,7 @@ void HScheduler::Schedule(SchedulingNode* scheduling_node) {
         path_to_node + predecessor->GetInternalLatency() + predecessor->GetLatency());
     predecessor->DecrementNumberOfUnscheduledSuccessors();
     if (!predecessor->HasUnscheduledSuccessors()) {
-      candidates_.push_back(predecessor);
+      candidates->push_back(predecessor);
     }
   }
   for (SchedulingNode* predecessor : scheduling_node->GetOtherPredecessors()) {
@@ -433,7 +667,7 @@ void HScheduler::Schedule(SchedulingNode* scheduling_node) {
     // correctness. So we do not use them to compute the critical path.
     predecessor->DecrementNumberOfUnscheduledSuccessors();
     if (!predecessor->HasUnscheduledSuccessors()) {
-      candidates_.push_back(predecessor);
+      candidates->push_back(predecessor);
     }
   }
 
@@ -446,7 +680,7 @@ static void MoveAfterInBlock(HInstruction* instruction, HInstruction* cursor) {
   DCHECK_NE(cursor, cursor->GetBlock()->GetLastInstruction());
   DCHECK(!instruction->IsControlFlow());
   DCHECK(!cursor->IsControlFlow());
-  instruction->MoveBefore(cursor->GetNext(), /* do_checks */ false);
+  instruction->MoveBefore(cursor->GetNext(), /* do_checks= */ false);
 }
 
 void HScheduler::Schedule(HInstruction* instruction) {
@@ -470,7 +704,8 @@ bool HScheduler::IsSchedulable(const HInstruction* instruction) const {
   // HUnaryOperation (or HBinaryOperation), check in debug mode that we have
   // the exhaustive lists here.
   if (instruction->IsUnaryOperation()) {
-    DCHECK(instruction->IsBooleanNot() ||
+    DCHECK(instruction->IsAbs() ||
+           instruction->IsBooleanNot() ||
            instruction->IsNot() ||
            instruction->IsNeg()) << "unexpected instruction " << instruction->DebugName();
     return true;
@@ -481,6 +716,8 @@ bool HScheduler::IsSchedulable(const HInstruction* instruction) const {
            instruction->IsCompare() ||
            instruction->IsCondition() ||
            instruction->IsDiv() ||
+           instruction->IsMin() ||
+           instruction->IsMax() ||
            instruction->IsMul() ||
            instruction->IsOr() ||
            instruction->IsRem() ||
@@ -516,8 +753,8 @@ bool HScheduler::IsSchedulable(const HInstruction* instruction) const {
       instruction->IsClassTableGet() ||
       instruction->IsCurrentMethod() ||
       instruction->IsDivZeroCheck() ||
-      instruction->IsInstanceFieldGet() ||
-      instruction->IsInstanceFieldSet() ||
+      (instruction->IsInstanceFieldGet() && !instruction->AsInstanceFieldGet()->IsVolatile()) ||
+      (instruction->IsInstanceFieldSet() && !instruction->AsInstanceFieldSet()->IsVolatile()) ||
       instruction->IsInstanceOf() ||
       instruction->IsInvokeInterface() ||
       instruction->IsInvokeStaticOrDirect() ||
@@ -533,14 +770,10 @@ bool HScheduler::IsSchedulable(const HInstruction* instruction) const {
       instruction->IsReturn() ||
       instruction->IsReturnVoid() ||
       instruction->IsSelect() ||
-      instruction->IsStaticFieldGet() ||
-      instruction->IsStaticFieldSet() ||
+      (instruction->IsStaticFieldGet() && !instruction->AsStaticFieldGet()->IsVolatile()) ||
+      (instruction->IsStaticFieldSet() && !instruction->AsStaticFieldSet()->IsVolatile()) ||
       instruction->IsSuspendCheck() ||
-      instruction->IsTypeConversion() ||
-      instruction->IsUnresolvedInstanceFieldGet() ||
-      instruction->IsUnresolvedInstanceFieldSet() ||
-      instruction->IsUnresolvedStaticFieldGet() ||
-      instruction->IsUnresolvedStaticFieldSet();
+      instruction->IsTypeConversion();
 }
 
 bool HScheduler::IsSchedulable(const HBasicBlock* block) const {
@@ -578,25 +811,37 @@ bool HScheduler::IsSchedulingBarrier(const HInstruction* instr) const {
       instr->IsSuspendCheck();
 }
 
-void HInstructionScheduling::Run(bool only_optimize_loop_blocks,
+bool HInstructionScheduling::Run(bool only_optimize_loop_blocks,
                                  bool schedule_randomly) {
+#if defined(ART_ENABLE_CODEGEN_arm64) || defined(ART_ENABLE_CODEGEN_arm)
+  // Phase-local allocator that allocates scheduler internal data structures like
+  // scheduling nodes, internel nodes map, dependencies, etc.
+  CriticalPathSchedulingNodeSelector critical_path_selector;
+  RandomSchedulingNodeSelector random_selector;
+  SchedulingNodeSelector* selector = schedule_randomly
+      ? static_cast<SchedulingNodeSelector*>(&random_selector)
+      : static_cast<SchedulingNodeSelector*>(&critical_path_selector);
+#else
   // Avoid compilation error when compiling for unsupported instruction set.
   UNUSED(only_optimize_loop_blocks);
   UNUSED(schedule_randomly);
+  UNUSED(codegen_);
+#endif
+
   switch (instruction_set_) {
 #ifdef ART_ENABLE_CODEGEN_arm64
-    case kArm64: {
-      // Phase-local allocator that allocates scheduler internal data structures like
-      // scheduling nodes, internel nodes map, dependencies, etc.
-      ArenaAllocator arena_allocator(graph_->GetArena()->GetArenaPool());
-
-      CriticalPathSchedulingNodeSelector critical_path_selector;
-      RandomSchedulingNodeSelector random_selector;
-      SchedulingNodeSelector* selector = schedule_randomly
-          ? static_cast<SchedulingNodeSelector*>(&random_selector)
-          : static_cast<SchedulingNodeSelector*>(&critical_path_selector);
-
-      arm64::HSchedulerARM64 scheduler(&arena_allocator, selector);
+    case InstructionSet::kArm64: {
+      arm64::HSchedulerARM64 scheduler(selector);
+      scheduler.SetOnlyOptimizeLoopBlocks(only_optimize_loop_blocks);
+      scheduler.Schedule(graph_);
+      break;
+    }
+#endif
+#if defined(ART_ENABLE_CODEGEN_arm)
+    case InstructionSet::kThumb2:
+    case InstructionSet::kArm: {
+      arm::SchedulingLatencyVisitorARM arm_latency_visitor(codegen_);
+      arm::HSchedulerARM scheduler(selector, &arm_latency_visitor);
       scheduler.SetOnlyOptimizeLoopBlocks(only_optimize_loop_blocks);
       scheduler.Schedule(graph_);
       break;
@@ -605,6 +850,7 @@ void HInstructionScheduling::Run(bool only_optimize_loop_blocks,
     default:
       break;
   }
+  return true;
 }
 
 }  // namespace art

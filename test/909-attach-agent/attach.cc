@@ -27,26 +27,43 @@
 namespace art {
 namespace Test909AttachAgent {
 
+static void Println(const char* c) {
+  fprintf(stdout, "%s\n", c);
+  fflush(stdout);
+}
+
+static constexpr jint kArtTiVersion = JVMTI_VERSION_1_2 | 0x40000000;
+
 jint OnAttach(JavaVM* vm,
             char* options ATTRIBUTE_UNUSED,
             void* reserved ATTRIBUTE_UNUSED) {
-  fprintf(stderr, "Attached Agent for test 909-attach-agent\n");
-  fsync(1);
+  Println("Attached Agent for test 909-attach-agent");
   jvmtiEnv* env = nullptr;
   jvmtiEnv* env2 = nullptr;
 
 #define CHECK_CALL_SUCCESS(c) \
   do { \
     if ((c) != JNI_OK) { \
-      fprintf(stderr, "call " #c " did not succeed\n"); \
+      Println("call " #c " did not succeed"); \
       return -1; \
     } \
   } while (false)
 
-  CHECK_CALL_SUCCESS(vm->GetEnv(reinterpret_cast<void**>(&env), JVMTI_VERSION_1_0));
+  if (vm->GetEnv(reinterpret_cast<void**>(&env), kArtTiVersion) == JNI_OK) {
+    Println("Created env for kArtTiVersion");
+    CHECK_CALL_SUCCESS(env->DisposeEnvironment());
+    env = nullptr;
+  } else {
+    Println("Failed to create env for kArtTiVersion");
+    return -1;
+  }
+  if (vm->GetEnv(reinterpret_cast<void**>(&env), JVMTI_VERSION_1_0) != JNI_OK) {
+    Println("Unable to create env for JVMTI_VERSION_1_0");
+    return 0;
+  }
   CHECK_CALL_SUCCESS(vm->GetEnv(reinterpret_cast<void**>(&env2), JVMTI_VERSION_1_0));
   if (env == env2) {
-    fprintf(stderr, "GetEnv returned same environment twice!\n");
+    Println("GetEnv returned same environment twice!");
     return -1;
   }
   unsigned char* local_data = nullptr;
@@ -56,19 +73,19 @@ jint OnAttach(JavaVM* vm,
   unsigned char* get_data = nullptr;
   CHECK_CALL_SUCCESS(env->GetEnvironmentLocalStorage(reinterpret_cast<void**>(&get_data)));
   if (get_data != local_data) {
-    fprintf(stderr, "Got different data from local storage then what was set!\n");
+    Println("Got different data from local storage then what was set!");
     return -1;
   }
   CHECK_CALL_SUCCESS(env2->GetEnvironmentLocalStorage(reinterpret_cast<void**>(&get_data)));
   if (get_data != nullptr) {
-    fprintf(stderr, "env2 did not have nullptr local storage.\n");
+    Println("env2 did not have nullptr local storage.");
     return -1;
   }
   CHECK_CALL_SUCCESS(env->Deallocate(local_data));
   jint version = 0;
   CHECK_CALL_SUCCESS(env->GetVersionNumber(&version));
   if ((version & JVMTI_VERSION_1) != JVMTI_VERSION_1) {
-    fprintf(stderr, "Unexpected version number!\n");
+    Println("Unexpected version number!");
     return -1;
   }
   CHECK_CALL_SUCCESS(env->DisposeEnvironment());

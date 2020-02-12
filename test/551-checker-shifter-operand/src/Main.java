@@ -234,8 +234,8 @@ public class Main {
   /// CHECK-START-ARM: void Main.$opt$noinline$testAnd(long, long) disassembly (after)
   /// CHECK:                            and lsl
   /// CHECK:                            sbfx
-  /// CHECK:                            asr
-  /// CHECK:                            and
+  /// CHECK:                            asr{{s?}}
+  /// CHECK:                            and{{s?}}
 
   /// CHECK-START-ARM64: void Main.$opt$noinline$testAnd(long, long) instruction_simplifier_arm64 (after)
   /// CHECK:                            DataProcWithShifterOp
@@ -259,7 +259,7 @@ public class Main {
   /// CHECK-START-ARM: void Main.$opt$noinline$testOr(int, int) disassembly (after)
   /// CHECK:                            orr asr
   /// CHECK:                            ubfx
-  /// CHECK:                            orr
+  /// CHECK:                            orr{{s?}}
 
   /// CHECK-START-ARM64: void Main.$opt$noinline$testOr(int, int) instruction_simplifier_arm64 (after)
   /// CHECK:                            DataProcWithShifterOp
@@ -282,9 +282,8 @@ public class Main {
 
   /// CHECK-START-ARM: void Main.$opt$noinline$testXor(long, long) disassembly (after)
   /// CHECK:                            eor lsr
-  /// CHECK:                            mov
-  /// CHECK:                            asr
-  /// CHECK:                            eor
+  /// CHECK:                            asr{{s?}}
+  /// CHECK:                            eor{{s?}}
 
   /// CHECK-START-ARM64: void Main.$opt$noinline$testXor(long, long) instruction_simplifier_arm64 (after)
   /// CHECK:                            DataProcWithShifterOp
@@ -328,6 +327,7 @@ public class Main {
    */
 
   /// CHECK-START-ARM: void Main.$opt$validateExtendByteInt1(int, byte) instruction_simplifier_arm (after)
+  /// CHECK:                            DataProcWithShifterOp
   /// CHECK-NOT:                        DataProcWithShifterOp
 
   /// CHECK-START-ARM64: void Main.$opt$validateExtendByteInt1(int, byte) instruction_simplifier_arm64 (after)
@@ -400,6 +400,8 @@ public class Main {
   }
 
   /// CHECK-START-ARM: void Main.$opt$validateExtendCharInt1(int, char) instruction_simplifier_arm (after)
+  /// CHECK:                            DataProcWithShifterOp
+  /// CHECK:                            DataProcWithShifterOp
   /// CHECK-NOT:                        DataProcWithShifterOp
 
   /// CHECK-START-ARM64: void Main.$opt$validateExtendCharInt1(int, char) instruction_simplifier_arm64 (after)
@@ -470,6 +472,8 @@ public class Main {
   }
 
   /// CHECK-START-ARM: void Main.$opt$validateExtendShortInt1(int, short) instruction_simplifier_arm (after)
+  /// CHECK:                            DataProcWithShifterOp
+  /// CHECK:                            DataProcWithShifterOp
   /// CHECK-NOT:                        DataProcWithShifterOp
 
   /// CHECK-START-ARM64: void Main.$opt$validateExtendShortInt1(int, short) instruction_simplifier_arm64 (after)
@@ -642,6 +646,124 @@ public class Main {
 
 
   // Each test line below should see one merge.
+  //
+  /// CHECK-START: void Main.$opt$validateShiftInt(int, int) instruction_simplifier$after_inlining (before)
+  /// CHECK:                            Shl
+  /// CHECK:                            Shl
+  /// CHECK:                            Shl
+  /// CHECK:                            Shl
+  /// CHECK:                            Shl
+  /// CHECK:                            Shl
+  /// CHECK:                            Shl
+  /// CHECK:                            Shl
+  /// CHECK:                            Shl
+  /// CHECK:                            Shl
+  /// CHECK:                            Shl
+  /// CHECK:                            Shl
+  /// CHECK-NOT:                        Shl
+  /// CHECK:                            Shr
+  /// CHECK:                            Shr
+  /// CHECK:                            Shr
+  /// CHECK:                            Shr
+  /// CHECK:                            Shr
+  /// CHECK:                            Shr
+  /// CHECK:                            Shr
+  /// CHECK:                            Shr
+  /// CHECK:                            Shr
+  /// CHECK:                            Shr
+  /// CHECK:                            Shr
+  /// CHECK:                            Shr
+  /// CHECK-NOT:                        Shl
+  /// CHECK:                            UShr
+  /// CHECK:                            UShr
+  /// CHECK:                            UShr
+  /// CHECK:                            UShr
+  /// CHECK:                            UShr
+  /// CHECK:                            UShr
+  /// CHECK:                            UShr
+  /// CHECK:                            UShr
+  /// CHECK:                            UShr
+  /// CHECK:                            UShr
+  /// CHECK:                            UShr
+  /// CHECK:                            UShr
+  /// CHECK-NOT:                        UShr
+  //
+  // Note: simplification after inlining removes `b << 32`, `b >> 32` and `b >>> 32`.
+  //
+  /// CHECK-START: void Main.$opt$validateShiftInt(int, int) instruction_simplifier$after_inlining (after)
+  /// CHECK:                            Shl
+  /// CHECK:                            Shl
+  /// CHECK:                            Shl
+  /// CHECK:                            Shl
+  /// CHECK:                            Shl
+  /// CHECK:                            Shl
+  /// CHECK:                            Shl
+  /// CHECK:                            Shl
+  /// CHECK:                            Shl
+  /// CHECK:                            Shl
+  /// CHECK:                            Shl
+  /// CHECK-NOT:                        Shl
+  /// CHECK:                            Shr
+  /// CHECK:                            Shr
+  /// CHECK:                            Shr
+  /// CHECK:                            Shr
+  /// CHECK:                            Shr
+  /// CHECK:                            Shr
+  /// CHECK:                            Shr
+  /// CHECK:                            Shr
+  /// CHECK:                            Shr
+  /// CHECK:                            Shr
+  /// CHECK:                            Shr
+  /// CHECK-NOT:                        Shl
+  /// CHECK:                            UShr
+  /// CHECK:                            UShr
+  /// CHECK:                            UShr
+  /// CHECK:                            UShr
+  /// CHECK:                            UShr
+  /// CHECK:                            UShr
+  /// CHECK:                            UShr
+  /// CHECK:                            UShr
+  /// CHECK:                            UShr
+  /// CHECK:                            UShr
+  /// CHECK:                            UShr
+  /// CHECK-NOT:                        UShr
+  //
+  // Note: running extra simplification after inlining and before GVN exposes the common
+  // subexpressions between shifts with larger distance `b << 62`, `b << 63` etc.
+  // and the equivalent smaller distances.
+  //
+  /// CHECK-START: void Main.$opt$validateShiftInt(int, int) GVN (after)
+  /// CHECK:                            Shl
+  /// CHECK:                            Shl
+  /// CHECK:                            Shl
+  /// CHECK:                            Shl
+  /// CHECK:                            Shl
+  /// CHECK:                            Shl
+  /// CHECK:                            Shl
+  /// CHECK:                            Shl
+  /// CHECK:                            Shl
+  /// CHECK-NOT:                        Shl
+  /// CHECK:                            Shr
+  /// CHECK:                            Shr
+  /// CHECK:                            Shr
+  /// CHECK:                            Shr
+  /// CHECK:                            Shr
+  /// CHECK:                            Shr
+  /// CHECK:                            Shr
+  /// CHECK:                            Shr
+  /// CHECK:                            Shr
+  /// CHECK-NOT:                        Shl
+  /// CHECK:                            UShr
+  /// CHECK:                            UShr
+  /// CHECK:                            UShr
+  /// CHECK:                            UShr
+  /// CHECK:                            UShr
+  /// CHECK:                            UShr
+  /// CHECK:                            UShr
+  /// CHECK:                            UShr
+  /// CHECK:                            UShr
+  /// CHECK-NOT:                        UShr
+  //
   /// CHECK-START-ARM: void Main.$opt$validateShiftInt(int, int) instruction_simplifier_arm (after)
   /// CHECK:                            DataProcWithShifterOp
   /// CHECK:                            DataProcWithShifterOp
@@ -670,14 +792,7 @@ public class Main {
   /// CHECK:                            DataProcWithShifterOp
   /// CHECK:                            DataProcWithShifterOp
   /// CHECK:                            DataProcWithShifterOp
-  /// CHECK:                            DataProcWithShifterOp
-  /// CHECK:                            DataProcWithShifterOp
-  /// CHECK:                            DataProcWithShifterOp
-  /// CHECK:                            DataProcWithShifterOp
-  /// CHECK:                            DataProcWithShifterOp
-  /// CHECK:                            DataProcWithShifterOp
   /// CHECK-NOT:                        DataProcWithShifterOp
-  // Note: `b << 32`, `b >> 32` and `b >>> 32` are optimized away by generic simplifier.
 
   /// CHECK-START-ARM: void Main.$opt$validateShiftInt(int, int) instruction_simplifier_arm (after)
   /// CHECK-NOT:                        Shl
@@ -712,14 +827,7 @@ public class Main {
   /// CHECK:                            DataProcWithShifterOp
   /// CHECK:                            DataProcWithShifterOp
   /// CHECK:                            DataProcWithShifterOp
-  /// CHECK:                            DataProcWithShifterOp
-  /// CHECK:                            DataProcWithShifterOp
-  /// CHECK:                            DataProcWithShifterOp
-  /// CHECK:                            DataProcWithShifterOp
-  /// CHECK:                            DataProcWithShifterOp
-  /// CHECK:                            DataProcWithShifterOp
   /// CHECK-NOT:                        DataProcWithShifterOp
-  // Note: `b << 32`, `b >> 32` and `b >>> 32` are optimized away by generic simplifier.
 
   /// CHECK-START-ARM64: void Main.$opt$validateShiftInt(int, int) instruction_simplifier_arm64 (after)
   /// CHECK-NOT:                        Shl
@@ -788,7 +896,7 @@ public class Main {
   }
 
   // Each test line below should see one merge.
-  /// CHECK-START-ARM: void Main.$opt$validateShiftLong(long, long) instruction_simplifier_arm (after)
+  /// CHECK-START-ARM: long[] Main.$opt$validateShiftLong(long, long) instruction_simplifier_arm (after)
   /// CHECK:                            DataProcWithShifterOp
   /// CHECK:                            DataProcWithShifterOp
   /// CHECK:                            DataProcWithShifterOp
@@ -825,7 +933,7 @@ public class Main {
   /// CHECK-NOT:                        DataProcWithShifterOp
 
   // On ARM shifts by 1 are not merged.
-  /// CHECK-START-ARM: void Main.$opt$validateShiftLong(long, long) instruction_simplifier_arm (after)
+  /// CHECK-START-ARM: long[] Main.$opt$validateShiftLong(long, long) instruction_simplifier_arm (after)
   /// CHECK:                            Shl
   /// CHECK-NOT:                        Shl
   /// CHECK:                            Shr
@@ -833,7 +941,7 @@ public class Main {
   /// CHECK:                            UShr
   /// CHECK-NOT:                        UShr
 
-  /// CHECK-START-ARM64: void Main.$opt$validateShiftLong(long, long) instruction_simplifier_arm64 (after)
+  /// CHECK-START-ARM64: long[] Main.$opt$validateShiftLong(long, long) instruction_simplifier_arm64 (after)
   /// CHECK:                            DataProcWithShifterOp
   /// CHECK:                            DataProcWithShifterOp
   /// CHECK:                            DataProcWithShifterOp
@@ -872,50 +980,98 @@ public class Main {
   /// CHECK:                            DataProcWithShifterOp
   /// CHECK-NOT:                        DataProcWithShifterOp
 
-  /// CHECK-START-ARM64: void Main.$opt$validateShiftLong(long, long) instruction_simplifier_arm64 (after)
+  /// CHECK-START-ARM64: long[] Main.$opt$validateShiftLong(long, long) instruction_simplifier_arm64 (after)
   /// CHECK-NOT:                        Shl
   /// CHECK-NOT:                        Shr
   /// CHECK-NOT:                        UShr
 
-  public static void $opt$validateShiftLong(long a, long b) {
-    assertLongEquals(a + $noinline$LongShl(b, 1),   a + (b <<  1));
-    assertLongEquals(a + $noinline$LongShl(b, 6),   a + (b <<  6));
-    assertLongEquals(a + $noinline$LongShl(b, 7),   a + (b <<  7));
-    assertLongEquals(a + $noinline$LongShl(b, 8),   a + (b <<  8));
-    assertLongEquals(a + $noinline$LongShl(b, 14),  a + (b << 14));
-    assertLongEquals(a + $noinline$LongShl(b, 15),  a + (b << 15));
-    assertLongEquals(a + $noinline$LongShl(b, 16),  a + (b << 16));
-    assertLongEquals(a + $noinline$LongShl(b, 30),  a + (b << 30));
-    assertLongEquals(a + $noinline$LongShl(b, 31),  a + (b << 31));
-    assertLongEquals(a + $noinline$LongShl(b, 32),  a + (b << 32));
-    assertLongEquals(a + $noinline$LongShl(b, 62),  a + (b << 62));
-    assertLongEquals(a + $noinline$LongShl(b, 63),  a + (b << 63));
+  public static long[] $opt$validateShiftLong(long a, long b) {
+    long[] results = new long[36];
 
-    assertLongEquals(a - $noinline$LongShr(b, 1),   a - (b >>  1));
-    assertLongEquals(a - $noinline$LongShr(b, 6),   a - (b >>  6));
-    assertLongEquals(a - $noinline$LongShr(b, 7),   a - (b >>  7));
-    assertLongEquals(a - $noinline$LongShr(b, 8),   a - (b >>  8));
-    assertLongEquals(a - $noinline$LongShr(b, 14),  a - (b >> 14));
-    assertLongEquals(a - $noinline$LongShr(b, 15),  a - (b >> 15));
-    assertLongEquals(a - $noinline$LongShr(b, 16),  a - (b >> 16));
-    assertLongEquals(a - $noinline$LongShr(b, 30),  a - (b >> 30));
-    assertLongEquals(a - $noinline$LongShr(b, 31),  a - (b >> 31));
-    assertLongEquals(a - $noinline$LongShr(b, 32),  a - (b >> 32));
-    assertLongEquals(a - $noinline$LongShr(b, 62),  a - (b >> 62));
-    assertLongEquals(a - $noinline$LongShr(b, 63),  a - (b >> 63));
+    results[0] = a + (b <<  1);
+    results[1] = a + (b <<  6);
+    results[2] = a + (b <<  7);
+    results[3] = a + (b <<  8);
+    results[4] = a + (b << 14);
+    results[5] = a + (b << 15);
+    results[6] = a + (b << 16);
+    results[7] = a + (b << 30);
+    results[8] = a + (b << 31);
+    results[9] = a + (b << 32);
+    results[10] = a + (b << 62);
+    results[11] = a + (b << 63);
 
-    assertLongEquals(a ^ $noinline$LongUshr(b, 1),   a ^ (b >>>  1));
-    assertLongEquals(a ^ $noinline$LongUshr(b, 6),   a ^ (b >>>  6));
-    assertLongEquals(a ^ $noinline$LongUshr(b, 7),   a ^ (b >>>  7));
-    assertLongEquals(a ^ $noinline$LongUshr(b, 8),   a ^ (b >>>  8));
-    assertLongEquals(a ^ $noinline$LongUshr(b, 14),  a ^ (b >>> 14));
-    assertLongEquals(a ^ $noinline$LongUshr(b, 15),  a ^ (b >>> 15));
-    assertLongEquals(a ^ $noinline$LongUshr(b, 16),  a ^ (b >>> 16));
-    assertLongEquals(a ^ $noinline$LongUshr(b, 30),  a ^ (b >>> 30));
-    assertLongEquals(a ^ $noinline$LongUshr(b, 31),  a ^ (b >>> 31));
-    assertLongEquals(a ^ $noinline$LongUshr(b, 32),  a ^ (b >>> 32));
-    assertLongEquals(a ^ $noinline$LongUshr(b, 62),  a ^ (b >>> 62));
-    assertLongEquals(a ^ $noinline$LongUshr(b, 63),  a ^ (b >>> 63));
+    results[12] = a - (b >>  1);
+    results[13] = a - (b >>  6);
+    results[14] = a - (b >>  7);
+    results[15] = a - (b >>  8);
+    results[16] = a - (b >> 14);
+    results[17] = a - (b >> 15);
+    results[18] = a - (b >> 16);
+    results[19] = a - (b >> 30);
+    results[20] = a - (b >> 31);
+    results[21] = a - (b >> 32);
+    results[22] = a - (b >> 62);
+    results[23] = a - (b >> 63);
+
+    results[24] = a ^ (b >>>  1);
+    results[25] = a ^ (b >>>  6);
+    results[26] = a ^ (b >>>  7);
+    results[27] = a ^ (b >>>  8);
+    results[28] = a ^ (b >>> 14);
+    results[29] = a ^ (b >>> 15);
+    results[30] = a ^ (b >>> 16);
+    results[31] = a ^ (b >>> 30);
+    results[32] = a ^ (b >>> 31);
+    results[33] = a ^ (b >>> 32);
+    results[34] = a ^ (b >>> 62);
+    results[35] = a ^ (b >>> 63);
+
+    return results;
+  }
+
+  public static void $opt$validateShiftLongAsserts(long a, long b) {
+    long[] results = $opt$validateShiftLong(a, b);
+    assertIntEquals(3 * 12, results.length);
+
+    assertLongEquals(a + $noinline$LongShl(b, 1),  results[0]);
+    assertLongEquals(a + $noinline$LongShl(b, 6),  results[1]);
+    assertLongEquals(a + $noinline$LongShl(b, 7),  results[2]);
+    assertLongEquals(a + $noinline$LongShl(b, 8),  results[3]);
+    assertLongEquals(a + $noinline$LongShl(b, 14), results[4]);
+    assertLongEquals(a + $noinline$LongShl(b, 15), results[5]);
+    assertLongEquals(a + $noinline$LongShl(b, 16), results[6]);
+    assertLongEquals(a + $noinline$LongShl(b, 30), results[7]);
+    assertLongEquals(a + $noinline$LongShl(b, 31), results[8]);
+    assertLongEquals(a + $noinline$LongShl(b, 32), results[9]);
+    assertLongEquals(a + $noinline$LongShl(b, 62), results[10]);
+    assertLongEquals(a + $noinline$LongShl(b, 63), results[11]);
+
+    assertLongEquals(a - $noinline$LongShr(b, 1),  results[12]);
+    assertLongEquals(a - $noinline$LongShr(b, 6),  results[13]);
+    assertLongEquals(a - $noinline$LongShr(b, 7),  results[14]);
+    assertLongEquals(a - $noinline$LongShr(b, 8),  results[15]);
+    assertLongEquals(a - $noinline$LongShr(b, 14), results[16]);
+    assertLongEquals(a - $noinline$LongShr(b, 15), results[17]);
+    assertLongEquals(a - $noinline$LongShr(b, 16), results[18]);
+    assertLongEquals(a - $noinline$LongShr(b, 30), results[19]);
+    assertLongEquals(a - $noinline$LongShr(b, 31), results[20]);
+    assertLongEquals(a - $noinline$LongShr(b, 32), results[21]);
+    assertLongEquals(a - $noinline$LongShr(b, 62), results[22]);
+    assertLongEquals(a - $noinline$LongShr(b, 63), results[23]);
+
+    assertLongEquals(a ^ $noinline$LongUshr(b, 1),  results[24]);
+    assertLongEquals(a ^ $noinline$LongUshr(b, 6),  results[25]);
+    assertLongEquals(a ^ $noinline$LongUshr(b, 7),  results[26]);
+    assertLongEquals(a ^ $noinline$LongUshr(b, 8),  results[27]);
+    assertLongEquals(a ^ $noinline$LongUshr(b, 14), results[28]);
+    assertLongEquals(a ^ $noinline$LongUshr(b, 15), results[29]);
+    assertLongEquals(a ^ $noinline$LongUshr(b, 16), results[30]);
+    assertLongEquals(a ^ $noinline$LongUshr(b, 30), results[31]);
+    assertLongEquals(a ^ $noinline$LongUshr(b, 31), results[32]);
+    assertLongEquals(a ^ $noinline$LongUshr(b, 32), results[33]);
+    assertLongEquals(a ^ $noinline$LongUshr(b, 62), results[34]);
+    assertLongEquals(a ^ $noinline$LongUshr(b, 63), results[35]);
   }
 
 
@@ -964,7 +1120,7 @@ public class Main {
         $opt$validateExtendLong(inputs[i], inputs[j]);
 
         $opt$validateShiftInt((int)inputs[i], (int)inputs[j]);
-        $opt$validateShiftLong(inputs[i], inputs[j]);
+        $opt$validateShiftLongAsserts(inputs[i], inputs[j]);
       }
     }
 

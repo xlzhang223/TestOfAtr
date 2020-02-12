@@ -411,7 +411,7 @@ public class Main {
   /// CHECK-START: int Main.periodicReturned9() loop_optimization (before)
   /// CHECK-DAG: <<Phi1:i\d+>> Phi               loop:<<Loop:B\d+>> outer_loop:none
   /// CHECK-DAG: <<Phi2:i\d+>> Phi               loop:<<Loop>>      outer_loop:none
-  /// CHECK-DAG:               Return [<<Phi2>>] loop:none
+  /// CHECK-DAG:               Return [<<Phi1>>] loop:none
   //
   /// CHECK-START: int Main.periodicReturned9() loop_optimization (after)
   /// CHECK-NOT:               Phi
@@ -430,7 +430,7 @@ public class Main {
   /// CHECK-START: int Main.periodicReturned10() loop_optimization (before)
   /// CHECK-DAG: <<Phi1:i\d+>> Phi               loop:<<Loop:B\d+>> outer_loop:none
   /// CHECK-DAG: <<Phi2:i\d+>> Phi               loop:<<Loop>>      outer_loop:none
-  /// CHECK-DAG:               Return [<<Phi2>>] loop:none
+  /// CHECK-DAG:               Return [<<Phi1>>] loop:none
   //
   /// CHECK-START: int Main.periodicReturned10() loop_optimization (after)
   /// CHECK-NOT:               Phi
@@ -450,7 +450,7 @@ public class Main {
   /// CHECK-DAG: <<Phi1:i\d+>> Phi               loop:<<Loop:B\d+>> outer_loop:none
   /// CHECK-DAG: <<Phi2:i\d+>> Phi               loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG: <<Phi3:i\d+>> Phi               loop:<<Loop>>      outer_loop:none
-  /// CHECK-DAG:               Return [<<Phi3>>] loop:none
+  /// CHECK-DAG:               Return [<<Phi2>>] loop:none
   //
   /// CHECK-START: int Main.getSum21() loop_optimization (after)
   /// CHECK-NOT:               Phi
@@ -464,6 +464,19 @@ public class Main {
     for (int i = 0; i < 6; i++) {
       k++;
       sum += k;
+    }
+    return sum;
+  }
+
+  // Ensure double induction does not "overshoot" the subscript range.
+  private static int getIncr2(int[] arr) {
+    for (int i = 0; i < 12; ) {
+      arr[i++] = 30;
+      arr[i++] = 29;
+    }
+    int sum = 0;
+    for (int i = 0; i < 12; i++) {
+      sum += arr[i];
     }
     return sum;
   }
@@ -492,7 +505,7 @@ public class Main {
   /// CHECK-START: int Main.periodicReturnedN(int) loop_optimization (before)
   /// CHECK-DAG: <<Phi1:i\d+>> Phi               loop:<<Loop:B\d+>> outer_loop:none
   /// CHECK-DAG: <<Phi2:i\d+>> Phi               loop:<<Loop>>      outer_loop:none
-  /// CHECK-DAG:               Return [<<Phi2>>] loop:none
+  /// CHECK-DAG:               Return [<<Phi1>>] loop:none
   //
   /// CHECK-START: int Main.periodicReturnedN(int) loop_optimization (after)
   /// CHECK-NOT:               Phi
@@ -621,7 +634,7 @@ public class Main {
   /// CHECK-START: boolean Main.periodicBoolIdiom1() loop_optimization (before)
   /// CHECK-DAG: <<Phi1:i\d+>> Phi               loop:<<Loop:B\d+>> outer_loop:none
   /// CHECK-DAG: <<Phi2:i\d+>> Phi               loop:<<Loop>>      outer_loop:none
-  /// CHECK-DAG:               Return [<<Phi2>>] loop:none
+  /// CHECK-DAG:               Return [<<Phi1>>] loop:none
   //
   /// CHECK-START: boolean Main.periodicBoolIdiom1() loop_optimization (after)
   /// CHECK-NOT:               Phi
@@ -640,7 +653,7 @@ public class Main {
   /// CHECK-START: boolean Main.periodicBoolIdiom2() loop_optimization (before)
   /// CHECK-DAG: <<Phi1:i\d+>> Phi               loop:<<Loop:B\d+>> outer_loop:none
   /// CHECK-DAG: <<Phi2:i\d+>> Phi               loop:<<Loop>>      outer_loop:none
-  /// CHECK-DAG:               Return [<<Phi2>>] loop:none
+  /// CHECK-DAG:               Return [<<Phi1>>] loop:none
   //
   /// CHECK-START: boolean Main.periodicBoolIdiom2() loop_optimization (after)
   /// CHECK-NOT:               Phi
@@ -659,7 +672,7 @@ public class Main {
   /// CHECK-START: boolean Main.periodicBoolIdiom3() loop_optimization (before)
   /// CHECK-DAG: <<Phi1:i\d+>> Phi               loop:<<Loop:B\d+>> outer_loop:none
   /// CHECK-DAG: <<Phi2:i\d+>> Phi               loop:<<Loop>>      outer_loop:none
-  /// CHECK-DAG:               Return [<<Phi2>>] loop:none
+  /// CHECK-DAG:               Return [<<Phi1>>] loop:none
   //
   /// CHECK-START: boolean Main.periodicBoolIdiom3() loop_optimization (after)
   /// CHECK-NOT:               Phi
@@ -869,6 +882,7 @@ public class Main {
     expectEquals(1, periodicReturned9());
     expectEquals(0, periodicReturned10());
     expectEquals(21, getSum21());
+    expectEquals(354, getIncr2(new int[12]));
     for (int n = -4; n < 4; n++) {
       int tc = (n <= 0) ? 0 : n;
       expectEquals(tc, mainIndexReturnedN(n));

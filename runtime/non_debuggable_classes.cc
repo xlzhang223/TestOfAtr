@@ -16,12 +16,12 @@
 
 #include "non_debuggable_classes.h"
 
-#include "base/logging.h"
-#include "jni_internal.h"
+#include "jni/jni_env_ext.h"
+#include "jni/jni_internal.h"
 #include "mirror/class-inl.h"
+#include "nativehelper/scoped_local_ref.h"
 #include "obj_ptr-inl.h"
-#include "ScopedLocalRef.h"
-#include "thread-inl.h"
+#include "thread-current-inl.h"
 
 namespace art {
 
@@ -32,7 +32,7 @@ void NonDebuggableClasses::AddNonDebuggableClass(jclass klass) {
   JNIEnvExt* env = self->GetJniEnv();
   ObjPtr<mirror::Class> mirror_klass(self->DecodeJObject(klass)->AsClass());
   for (jclass c : non_debuggable_classes) {
-    if (self->DecodeJObject(c)->AsClass() == mirror_klass.Ptr()) {
+    if (self->DecodeJObject(c)->AsClass() == mirror_klass) {
       return;
     }
   }

@@ -22,11 +22,11 @@
 #include "android-base/stringprintf.h"
 
 #include "common_throws.h"
+#include "dex/descriptors_names.h"
+#include "dex/primitive.h"
 #include "jvalue-inl.h"
 #include "mirror/object-inl.h"
 #include "obj_ptr-inl.h"
-#include "primitive.h"
-#include "utils.h"
 
 namespace art {
 
@@ -120,7 +120,7 @@ inline bool VerifyObjectIsClass(ObjPtr<mirror::Object> o, ObjPtr<mirror::Class> 
   if (UNLIKELY(o == nullptr)) {
     ThrowNullPointerException("null receiver");
     return false;
-  } else if (UNLIKELY(!o->InstanceOf(c.Ptr()))) {
+  } else if (UNLIKELY(!o->InstanceOf(c))) {
     InvalidReceiverError(o, c);
     return false;
   }

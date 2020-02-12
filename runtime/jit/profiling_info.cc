@@ -17,7 +17,7 @@
 #include "profiling_info.h"
 
 #include "art_method-inl.h"
-#include "dex_instruction.h"
+#include "dex/dex_instruction.h"
 #include "jit/jit.h"
 #include "jit/jit_code_cache.h"
 #include "scoped_thread_state_change-inl.h"
@@ -26,12 +26,12 @@
 namespace art {
 
 ProfilingInfo::ProfilingInfo(ArtMethod* method, const std::vector<uint32_t>& entries)
-      : number_of_inline_caches_(entries.size()),
-        method_(method),
-        is_method_being_compiled_(false),
-        is_osr_method_being_compiled_(false),
+      : method_(method),
+        saved_entry_point_(nullptr),
+        number_of_inline_caches_(entries.size()),
         current_inline_uses_(0),
-        saved_entry_point_(nullptr) {
+        is_method_being_compiled_(false),
+        is_osr_method_being_compiled_(false) {
   memset(&cache_, 0, number_of_inline_caches_ * sizeof(InlineCache));
   for (size_t i = 0; i < number_of_inline_caches_; ++i) {
     cache_[i].dex_pc_ = entries[i];
@@ -43,29 +43,21 @@ bool ProfilingInfo::Create(Thread* self, ArtMethod* method, bool retry_allocatio
   // instructions we are interested in profiling.
   DCHECK(!method->IsNative());
 
-  const DexFile::CodeItem& code_item = *method->GetCodeItem();
-  const uint16_t* code_ptr = code_item.insns_;
-  const uint16_t* code_end = code_item.insns_ + code_item.insns_size_in_code_units_;
-
-  uint32_t dex_pc = 0;
   std::vector<uint32_t> entries;
-  while (code_ptr < code_end) {
-    const Instruction& instruction = *Instruction::At(code_ptr);
-    switch (instruction.Opcode()) {
+  for (const DexInstructionPcPair& inst : method->DexInstructions()) {
+    switch (inst->Opcode()) {
       case Instruction::INVOKE_VIRTUAL:
       case Instruction::INVOKE_VIRTUAL_RANGE:
       case Instruction::INVOKE_VIRTUAL_QUICK:
       case Instruction::INVOKE_VIRTUAL_RANGE_QUICK:
       case Instruction::INVOKE_INTERFACE:
       case Instruction::INVOKE_INTERFACE_RANGE:
-        entries.push_back(dex_pc);
+        entries.push_back(inst.DexPc());
         break;
 
       default:
         break;
     }
-    dex_pc += instruction.SizeInCodeUnits();
-    code_ptr += instruction.SizeInCodeUnits();
   }
 
   // We always create a `ProfilingInfo` object, even if there is no instruction we are
@@ -102,8 +94,8 @@ void ProfilingInfo::AddInvokeInfo(uint32_t dex_pc, mirror::Class* cls) {
       // *after* this thread hits a suspend point.
       GcRoot<mirror::Class> expected_root(existing);
       GcRoot<mirror::Class> desired_root(cls);
-      if (!reinterpret_cast<Atomic<GcRoot<mirror::Class>>*>(&cache->classes_[i])->
-              CompareExchangeStrongSequentiallyConsistent(expected_root, desired_root)) {
+      auto atomic_root = reinterpret_cast<Atomic<GcRoot<mirror::Class>>*>(&cache->classes_[i]);
+      if (!atomic_root->CompareAndSetStrongSequentiallyConsistent(expected_root, desired_root)) {
         // Some other thread put a class in the cache, continue iteration starting at this
         // entry in case the entry contains `cls`.
         --i;

@@ -17,23 +17,26 @@
 #ifndef ART_RUNTIME_LOCK_WORD_H_
 #define ART_RUNTIME_LOCK_WORD_H_
 
+#include <cstdint>
 #include <iosfwd>
-#include <stdint.h>
+
+#include <android-base/logging.h>
 
 #include "base/bit_utils.h"
-#include "base/logging.h"
 #include "read_barrier.h"
 
 namespace art {
 namespace mirror {
-  class Object;
+class Object;
 }  // namespace mirror
 
 class Monitor;
 
-/* The lock value itself as stored in mirror::Object::monitor_.  The two most significant bits of
- * the state. The four possible states are fat locked, thin/unlocked, hash code, and forwarding
- * address. When the lock word is in the "thin" state and its bits are formatted as follows:
+/* The lock value itself as stored in mirror::Object::monitor_.  The two most significant bits
+ * encode the state. The four possible states are fat locked, thin/unlocked, hash code, and
+ * forwarding address.
+ *
+ * When the lock word is in the "thin" state and its bits are formatted as follows:
  *
  *  |33|2|2|222222221111|1111110000000000|
  *  |10|9|8|765432109876|5432109876543210|
@@ -58,7 +61,7 @@ class Monitor;
  *  |11|0| ForwardingAddress           |
  *
  * The `r` bit stores the read barrier state.
- * The `m` bit stores the mark state.
+ * The `m` bit stores the mark bit state.
  */
 class LockWord {
  public:
@@ -72,16 +75,18 @@ class LockWord {
     // Remaining bits are the recursive lock count.
     kThinLockCountSize = 32 - kThinLockOwnerSize - kStateSize - kReadBarrierStateSize -
         kMarkBitStateSize,
-    // Thin lock bits. Owner in lowest bits.
 
+    // Thin lock bits. Owner in lowest bits.
     kThinLockOwnerShift = 0,
     kThinLockOwnerMask = (1 << kThinLockOwnerSize) - 1,
+    kThinLockOwnerMaskShifted = kThinLockOwnerMask << kThinLockOwnerShift,
     kThinLockMaxOwner = kThinLockOwnerMask,
     // Count in higher bits.
     kThinLockCountShift = kThinLockOwnerSize + kThinLockOwnerShift,
     kThinLockCountMask = (1 << kThinLockCountSize) - 1,
     kThinLockMaxCount = kThinLockCountMask,
     kThinLockCountOne = 1 << kThinLockCountShift,  // == 65536 (0x10000)
+    kThinLockCountMaskShifted = kThinLockCountMask << kThinLockCountShift,
 
     // State in the highest bits.
     kStateShift = kReadBarrierStateSize + kThinLockCountSize + kThinLockCountShift +
@@ -205,7 +210,7 @@ class LockWord {
 
   void SetReadBarrierState(uint32_t rb_state) {
     DCHECK_EQ(rb_state & ~kReadBarrierStateMask, 0U);
-    DCHECK(rb_state == ReadBarrier::WhiteState() ||
+    DCHECK(rb_state == ReadBarrier::NonGrayState() ||
            rb_state == ReadBarrier::GrayState()) << rb_state;
     DCHECK_NE(static_cast<uint32_t>(GetState()), static_cast<uint32_t>(kForwardingAddress));
     // Clear and or the bits.
@@ -283,7 +288,7 @@ class LockWord {
       if (!kUseReadBarrier) {
         DCHECK_EQ(rb_state, 0U);
       } else {
-        DCHECK(rb_state == ReadBarrier::WhiteState() ||
+        DCHECK(rb_state == ReadBarrier::NonGrayState() ||
                rb_state == ReadBarrier::GrayState()) << rb_state;
       }
     }

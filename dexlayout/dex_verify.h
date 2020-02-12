@@ -30,8 +30,8 @@ bool VerifyOutputDexFile(dex_ir::Header* orig_header,
                          dex_ir::Header* output_header,
                          std::string* error_msg);
 
-template<class T> bool VerifyIds(std::vector<std::unique_ptr<T>>& orig,
-                                 std::vector<std::unique_ptr<T>>& output,
+template<class T> bool VerifyIds(dex_ir::CollectionVector<T>& orig,
+                                 dex_ir::CollectionVector<T>& output,
                                  const char* section_name,
                                  std::string* error_msg);
 bool VerifyId(dex_ir::StringId* orig, dex_ir::StringId* output, std::string* error_msg);
@@ -40,8 +40,8 @@ bool VerifyId(dex_ir::ProtoId* orig, dex_ir::ProtoId* output, std::string* error
 bool VerifyId(dex_ir::FieldId* orig, dex_ir::FieldId* output, std::string* error_msg);
 bool VerifyId(dex_ir::MethodId* orig, dex_ir::MethodId* output, std::string* error_msg);
 
-bool VerifyClassDefs(std::vector<std::unique_ptr<dex_ir::ClassDef>>& orig,
-                     std::vector<std::unique_ptr<dex_ir::ClassDef>>& output,
+bool VerifyClassDefs(dex_ir::CollectionVector<dex_ir::ClassDef>& orig,
+                     dex_ir::CollectionVector<dex_ir::ClassDef>& output,
                      std::string* error_msg);
 bool VerifyClassDef(dex_ir::ClassDef* orig, dex_ir::ClassDef* output, std::string* error_msg);
 
@@ -99,14 +99,6 @@ bool VerifyMethods(dex_ir::MethodItemVector* orig,
 bool VerifyCode(dex_ir::CodeItem* orig, dex_ir::CodeItem* output, std::string* error_msg);
 bool VerifyDebugInfo(dex_ir::DebugInfoItem* orig,
                      dex_ir::DebugInfoItem* output,
-                     std::string* error_msg);
-bool VerifyPositionInfo(dex_ir::PositionInfoVector& orig,
-                        dex_ir::PositionInfoVector& output,
-                        uint32_t orig_offset,
-                        std::string* error_msg);
-bool VerifyLocalInfo(dex_ir::LocalInfoVector& orig,
-                     dex_ir::LocalInfoVector& output,
-                     uint32_t orig_offset,
                      std::string* error_msg);
 bool VerifyTries(dex_ir::TryItemVector* orig,
                  dex_ir::TryItemVector* output,

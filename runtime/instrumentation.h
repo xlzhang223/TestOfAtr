@@ -19,25 +19,31 @@
 
 #include <stdint.h>
 #include <list>
+#include <memory>
 #include <unordered_set>
 
 #include "arch/instruction_set.h"
 #include "base/enums.h"
+#include "base/locks.h"
 #include "base/macros.h"
-#include "base/mutex.h"
+#include "base/safe_map.h"
 #include "gc_root.h"
-#include "safe_map.h"
 
 namespace art {
 namespace mirror {
-  class Class;
-  class Object;
-  class Throwable;
+class Class;
+class Object;
+class Throwable;
 }  // namespace mirror
 class ArtField;
 class ArtMethod;
+template <typename T> class Handle;
+template <typename T> class MutableHandle;
 union JValue;
+class SHARED_LOCKABLE ReaderWriterMutex;
+class ShadowFrame;
 class Thread;
+enum class DeoptimizationMethodType;
 
 namespace instrumentation {
 
@@ -62,37 +68,74 @@ struct InstrumentationListener {
   virtual ~InstrumentationListener() {}
 
   // Call-back for when a method is entered.
-  virtual void MethodEntered(Thread* thread, mirror::Object* this_object,
+  virtual void MethodEntered(Thread* thread,
+                             Handle<mirror::Object> this_object,
                              ArtMethod* method,
                              uint32_t dex_pc) REQUIRES_SHARED(Locks::mutator_lock_) = 0;
 
-  // Call-back for when a method is exited.
-  virtual void MethodExited(Thread* thread, mirror::Object* this_object,
-                            ArtMethod* method, uint32_t dex_pc,
+  virtual void MethodExited(Thread* thread,
+                            Handle<mirror::Object> this_object,
+                            ArtMethod* method,
+                            uint32_t dex_pc,
+                            Handle<mirror::Object> return_value)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+  // Call-back for when a method is exited. The implementor should either handler-ize the return
+  // value (if appropriate) or use the alternate MethodExited callback instead if they need to
+  // go through a suspend point.
+  virtual void MethodExited(Thread* thread,
+                            Handle<mirror::Object> this_object,
+                            ArtMethod* method,
+                            uint32_t dex_pc,
                             const JValue& return_value)
       REQUIRES_SHARED(Locks::mutator_lock_) = 0;
 
   // Call-back for when a method is popped due to an exception throw. A method will either cause a
   // MethodExited call-back or a MethodUnwind call-back when its activation is removed.
-  virtual void MethodUnwind(Thread* thread, mirror::Object* this_object,
-                            ArtMethod* method, uint32_t dex_pc)
+  virtual void MethodUnwind(Thread* thread,
+                            Handle<mirror::Object> this_object,
+                            ArtMethod* method,
+                            uint32_t dex_pc)
       REQUIRES_SHARED(Locks::mutator_lock_) = 0;
 
   // Call-back for when the dex pc moves in a method.
-  virtual void DexPcMoved(Thread* thread, mirror::Object* this_object,
-                          ArtMethod* method, uint32_t new_dex_pc)
+  virtual void DexPcMoved(Thread* thread,
+                          Handle<mirror::Object> this_object,
+                          ArtMethod* method,
+                          uint32_t new_dex_pc)
       REQUIRES_SHARED(Locks::mutator_lock_) = 0;
 
   // Call-back for when we read from a field.
-  virtual void FieldRead(Thread* thread, mirror::Object* this_object, ArtMethod* method,
-                         uint32_t dex_pc, ArtField* field) = 0;
+  virtual void FieldRead(Thread* thread,
+                         Handle<mirror::Object> this_object,
+                         ArtMethod* method,
+                         uint32_t dex_pc,
+                         ArtField* field) = 0;
+
+  virtual void FieldWritten(Thread* thread,
+                            Handle<mirror::Object> this_object,
+                            ArtMethod* method,
+                            uint32_t dex_pc,
+                            ArtField* field,
+                            Handle<mirror::Object> field_value)
+      REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Call-back for when we write into a field.
-  virtual void FieldWritten(Thread* thread, mirror::Object* this_object, ArtMethod* method,
-                            uint32_t dex_pc, ArtField* field, const JValue& field_value) = 0;
+  virtual void FieldWritten(Thread* thread,
+                            Handle<mirror::Object> this_object,
+                            ArtMethod* method,
+                            uint32_t dex_pc,
+                            ArtField* field,
+                            const JValue& field_value)
+      REQUIRES_SHARED(Locks::mutator_lock_) = 0;
 
-  // Call-back when an exception is caught.
-  virtual void ExceptionCaught(Thread* thread, mirror::Throwable* exception_object)
+  // Call-back when an exception is thrown.
+  virtual void ExceptionThrown(Thread* thread,
+                               Handle<mirror::Throwable> exception_object)
+      REQUIRES_SHARED(Locks::mutator_lock_) = 0;
+
+  // Call-back when an exception is caught/handled by java code.
+  virtual void ExceptionHandled(Thread* thread, Handle<mirror::Throwable> exception_object)
       REQUIRES_SHARED(Locks::mutator_lock_) = 0;
 
   // Call-back for when we execute a branch.
@@ -102,14 +145,31 @@ struct InstrumentationListener {
                       int32_t dex_pc_offset)
       REQUIRES_SHARED(Locks::mutator_lock_) = 0;
 
-  // Call-back for when we get an invokevirtual or an invokeinterface.
-  virtual void InvokeVirtualOrInterface(Thread* thread,
-                                        mirror::Object* this_object,
-                                        ArtMethod* caller,
-                                        uint32_t dex_pc,
-                                        ArtMethod* callee)
-      REQUIRES(Roles::uninterruptible_)
+  // Call-back when a shadow_frame with the needs_notify_pop_ boolean set is popped off the stack by
+  // either return or exceptions. Normally instrumentation listeners should ensure that there are
+  // shadow-frames by deoptimizing stacks.
+  virtual void WatchedFramePop(Thread* thread ATTRIBUTE_UNUSED,
+                               const ShadowFrame& frame ATTRIBUTE_UNUSED)
       REQUIRES_SHARED(Locks::mutator_lock_) = 0;
+};
+
+class Instrumentation;
+// A helper to send instrumentation events while popping the stack in a safe way.
+class InstrumentationStackPopper {
+ public:
+  explicit InstrumentationStackPopper(Thread* self);
+  ~InstrumentationStackPopper() REQUIRES_SHARED(Locks::mutator_lock_);
+
+  // Increase the number of frames being popped to 'desired_pops' return true if the frames were
+  // popped without any exceptions, false otherwise. The exception that caused the pop is
+  // 'exception'.
+  bool PopFramesTo(uint32_t desired_pops, /*in-out*/MutableHandle<mirror::Throwable>& exception)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+ private:
+  Thread* self_;
+  Instrumentation* instrumentation_;
+  uint32_t frames_to_remove_;
 };
 
 // Instrumentation is a catch-all for when extra information is required from the runtime. The
@@ -125,9 +185,10 @@ class Instrumentation {
     kDexPcMoved = 0x8,
     kFieldRead = 0x10,
     kFieldWritten = 0x20,
-    kExceptionCaught = 0x40,
+    kExceptionThrown = 0x40,
     kBranch = 0x80,
-    kInvokeVirtualOrInterface = 0x100,
+    kWatchedFramePop = 0x200,
+    kExceptionHandled = 0x400,
   };
 
   enum class InstrumentationLevel {
@@ -152,23 +213,27 @@ class Instrumentation {
   // Deoptimization.
   void EnableDeoptimization()
       REQUIRES(Locks::mutator_lock_)
-      REQUIRES(!deoptimized_methods_lock_);
+      REQUIRES(!GetDeoptimizedMethodsLock());
   // Calls UndeoptimizeEverything which may visit class linker classes through ConfigureStubs.
   void DisableDeoptimization(const char* key)
       REQUIRES(Locks::mutator_lock_, Roles::uninterruptible_)
-      REQUIRES(!deoptimized_methods_lock_);
+      REQUIRES(!GetDeoptimizedMethodsLock());
 
   bool AreAllMethodsDeoptimized() const {
     return interpreter_stubs_installed_;
   }
   bool ShouldNotifyMethodEnterExitEvents() const REQUIRES_SHARED(Locks::mutator_lock_);
 
+  bool CanDeoptimize() {
+    return deoptimization_enabled_;
+  }
+
   // Executes everything with interpreter.
   void DeoptimizeEverything(const char* key)
       REQUIRES(Locks::mutator_lock_, Roles::uninterruptible_)
       REQUIRES(!Locks::thread_list_lock_,
                !Locks::classlinker_classes_lock_,
-               !deoptimized_methods_lock_);
+               !GetDeoptimizedMethodsLock());
 
   // Executes everything with compiled code (or interpreter if there is no code). May visit class
   // linker classes through ConfigureStubs.
@@ -176,23 +241,23 @@ class Instrumentation {
       REQUIRES(Locks::mutator_lock_, Roles::uninterruptible_)
       REQUIRES(!Locks::thread_list_lock_,
                !Locks::classlinker_classes_lock_,
-               !deoptimized_methods_lock_);
+               !GetDeoptimizedMethodsLock());
 
   // Deoptimize a method by forcing its execution with the interpreter. Nevertheless, a static
   // method (except a class initializer) set to the resolution trampoline will be deoptimized only
   // once its declaring class is initialized.
   void Deoptimize(ArtMethod* method)
-      REQUIRES(Locks::mutator_lock_, !Locks::thread_list_lock_, !deoptimized_methods_lock_);
+      REQUIRES(Locks::mutator_lock_, !Locks::thread_list_lock_, !GetDeoptimizedMethodsLock());
 
   // Undeoptimze the method by restoring its entrypoints. Nevertheless, a static method
   // (except a class initializer) set to the resolution trampoline will be updated only once its
   // declaring class is initialized.
   void Undeoptimize(ArtMethod* method)
-      REQUIRES(Locks::mutator_lock_, !Locks::thread_list_lock_, !deoptimized_methods_lock_);
+      REQUIRES(Locks::mutator_lock_, !Locks::thread_list_lock_, !GetDeoptimizedMethodsLock());
 
   // Indicates whether the method has been deoptimized so it is executed with the interpreter.
   bool IsDeoptimized(ArtMethod* method)
-      REQUIRES(!deoptimized_methods_lock_) REQUIRES_SHARED(Locks::mutator_lock_);
+      REQUIRES(!GetDeoptimizedMethodsLock()) REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Enable method tracing by installing instrumentation entry/exit stubs or interpreter.
   void EnableMethodTracing(const char* key,
@@ -200,14 +265,14 @@ class Instrumentation {
       REQUIRES(Locks::mutator_lock_, Roles::uninterruptible_)
       REQUIRES(!Locks::thread_list_lock_,
                !Locks::classlinker_classes_lock_,
-               !deoptimized_methods_lock_);
+               !GetDeoptimizedMethodsLock());
 
   // Disable method tracing by uninstalling instrumentation entry/exit stubs or interpreter.
   void DisableMethodTracing(const char* key)
       REQUIRES(Locks::mutator_lock_, Roles::uninterruptible_)
       REQUIRES(!Locks::thread_list_lock_,
                !Locks::classlinker_classes_lock_,
-               !deoptimized_methods_lock_);
+               !GetDeoptimizedMethodsLock());
 
   InterpreterHandlerTable GetInterpreterHandlerTable() const
       REQUIRES_SHARED(Locks::mutator_lock_) {
@@ -226,11 +291,23 @@ class Instrumentation {
 
   // Update the code of a method respecting any installed stubs.
   void UpdateMethodsCode(ArtMethod* method, const void* quick_code)
-      REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!deoptimized_methods_lock_);
+      REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!GetDeoptimizedMethodsLock());
+
+  // Update the code of a native method to a JITed stub.
+  void UpdateNativeMethodsCodeToJitCode(ArtMethod* method, const void* quick_code)
+      REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!GetDeoptimizedMethodsLock());
+
+  // Update the code of a method to the interpreter respecting any installed stubs from debugger.
+  void UpdateMethodsCodeToInterpreterEntryPoint(ArtMethod* method)
+      REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!GetDeoptimizedMethodsLock());
 
   // Update the code of a method respecting any installed stubs from debugger.
   void UpdateMethodsCodeForJavaDebuggable(ArtMethod* method, const void* quick_code)
-      REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!deoptimized_methods_lock_);
+      REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!GetDeoptimizedMethodsLock());
+
+  // Return the code that we can execute for an invoke including from the JIT.
+  const void* GetCodeForInvoke(ArtMethod* method) const
+      REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Get the quick code for the given method. More efficient than asking the class linker as it
   // will short-cut to GetCode if instrumentation and static method resolution stubs aren't
@@ -285,31 +362,28 @@ class Instrumentation {
     return have_field_write_listeners_;
   }
 
-  bool HasExceptionCaughtListeners() const REQUIRES_SHARED(Locks::mutator_lock_) {
-    return have_exception_caught_listeners_;
+  bool HasExceptionThrownListeners() const REQUIRES_SHARED(Locks::mutator_lock_) {
+    return have_exception_thrown_listeners_;
   }
 
   bool HasBranchListeners() const REQUIRES_SHARED(Locks::mutator_lock_) {
     return have_branch_listeners_;
   }
 
-  bool HasInvokeVirtualOrInterfaceListeners() const REQUIRES_SHARED(Locks::mutator_lock_) {
-    return have_invoke_virtual_or_interface_listeners_;
+  bool HasWatchedFramePopListeners() const REQUIRES_SHARED(Locks::mutator_lock_) {
+    return have_watched_frame_pop_listeners_;
+  }
+
+  bool HasExceptionHandledListeners() const REQUIRES_SHARED(Locks::mutator_lock_) {
+    return have_exception_handled_listeners_;
   }
 
   bool IsActive() const REQUIRES_SHARED(Locks::mutator_lock_) {
     return have_dex_pc_listeners_ || have_method_entry_listeners_ || have_method_exit_listeners_ ||
         have_field_read_listeners_ || have_field_write_listeners_ ||
-        have_exception_caught_listeners_ || have_method_unwind_listeners_ ||
-        have_branch_listeners_ || have_invoke_virtual_or_interface_listeners_;
-  }
-
-  // Any instrumentation *other* than what is needed for Jit profiling active?
-  bool NonJitProfilingActive() const REQUIRES_SHARED(Locks::mutator_lock_) {
-    return have_dex_pc_listeners_ || have_method_exit_listeners_ ||
-        have_field_read_listeners_ || have_field_write_listeners_ ||
-        have_exception_caught_listeners_ || have_method_unwind_listeners_ ||
-        have_branch_listeners_;
+        have_exception_thrown_listeners_ || have_method_unwind_listeners_ ||
+        have_branch_listeners_ || have_watched_frame_pop_listeners_ ||
+        have_exception_handled_listeners_;
   }
 
   // Inform listeners that a method has been entered. A dex PC is provided as we may install
@@ -323,8 +397,10 @@ class Instrumentation {
   }
 
   // Inform listeners that a method has been exited.
-  void MethodExitEvent(Thread* thread, mirror::Object* this_object,
-                       ArtMethod* method, uint32_t dex_pc,
+  void MethodExitEvent(Thread* thread,
+                       mirror::Object* this_object,
+                       ArtMethod* method,
+                       uint32_t dex_pc,
                        const JValue& return_value) const
       REQUIRES_SHARED(Locks::mutator_lock_) {
     if (UNLIKELY(HasMethodExitListeners())) {
@@ -374,19 +450,21 @@ class Instrumentation {
     }
   }
 
-  void InvokeVirtualOrInterface(Thread* thread,
-                                mirror::Object* this_object,
-                                ArtMethod* caller,
-                                uint32_t dex_pc,
-                                ArtMethod* callee) const
+  // Inform listeners that a branch has been taken (only supported by the interpreter).
+  void WatchedFramePopped(Thread* thread, const ShadowFrame& frame) const
       REQUIRES_SHARED(Locks::mutator_lock_) {
-    if (UNLIKELY(HasInvokeVirtualOrInterfaceListeners())) {
-      InvokeVirtualOrInterfaceImpl(thread, this_object, caller, dex_pc, callee);
+    if (UNLIKELY(HasWatchedFramePopListeners())) {
+      WatchedFramePopImpl(thread, frame);
     }
   }
 
-  // Inform listeners that an exception was caught.
-  void ExceptionCaughtEvent(Thread* thread, mirror::Throwable* exception_object) const
+  // Inform listeners that an exception was thrown.
+  void ExceptionThrownEvent(Thread* thread, mirror::Throwable* exception_object) const
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+  // Inform listeners that an exception has been handled. This is not sent for native code or for
+  // exceptions which reach the end of the thread's stack.
+  void ExceptionHandledEvent(Thread* thread, mirror::Throwable* exception_object) const
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Called when an instrumented method is entered. The intended link register (lr) is saved so
@@ -396,30 +474,43 @@ class Instrumentation {
                                      bool interpreter_entry)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // Called when an instrumented method is exited. Removes the pushed instrumentation frame
-  // returning the intended link register. Generates method exit events.
-  TwoWordReturn PopInstrumentationStackFrame(Thread* self, uintptr_t* return_pc,
-                                             uint64_t gpr_result, uint64_t fpr_result)
-      REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!deoptimized_methods_lock_);
+  DeoptimizationMethodType GetDeoptimizationMethodType(ArtMethod* method)
+      REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // Pops an instrumentation frame from the current thread and generate an unwind event.
-  // Returns the return pc for the instrumentation frame that's popped.
-  uintptr_t PopMethodForUnwind(Thread* self, bool is_deoptimization) const
+  // Called when an instrumented method is exited. Removes the pushed instrumentation frame
+  // returning the intended link register. Generates method exit events. The gpr_result and
+  // fpr_result pointers are pointers to the locations where the integer/pointer and floating point
+  // result values of the function are stored. Both pointers must always be valid but the values
+  // held there will only be meaningful if interpreted as the appropriate type given the function
+  // being returned from.
+  TwoWordReturn PopInstrumentationStackFrame(Thread* self, uintptr_t* return_pc,
+                                             uint64_t* gpr_result, uint64_t* fpr_result)
+      REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!GetDeoptimizedMethodsLock());
+
+  // Pops nframes instrumentation frames from the current thread. Returns the return pc for the last
+  // instrumentation frame that's popped.
+  uintptr_t PopFramesForDeoptimization(Thread* self, size_t nframes) const
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Call back for configure stubs.
   void InstallStubsForClass(mirror::Class* klass) REQUIRES_SHARED(Locks::mutator_lock_)
-      REQUIRES(!deoptimized_methods_lock_);
+      REQUIRES(!GetDeoptimizedMethodsLock());
 
   void InstallStubsForMethod(ArtMethod* method)
-      REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!deoptimized_methods_lock_);
+      REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!GetDeoptimizedMethodsLock());
+
+  // Sets up instrumentation to allow single thread deoptimization using ForceInterpreterCount.
+  void EnableSingleThreadDeopt()
+      REQUIRES(Locks::mutator_lock_, Roles::uninterruptible_)
+      REQUIRES(!Locks::thread_list_lock_,
+               !Locks::classlinker_classes_lock_,
+               !GetDeoptimizedMethodsLock());
 
   // Install instrumentation exit stub on every method of the stack of the given thread.
   // This is used by the debugger to cause a deoptimization of the thread's stack after updating
   // local variable(s).
   void InstrumentThreadStack(Thread* thread)
-      REQUIRES_SHARED(Locks::mutator_lock_)
-      REQUIRES(!Locks::thread_list_lock_);
+      REQUIRES_SHARED(Locks::mutator_lock_);
 
   static size_t ComputeFrameId(Thread* self,
                                size_t frame_depth,
@@ -446,7 +537,16 @@ class Instrumentation {
   // becomes the highest instrumentation level required by a client.
   void ConfigureStubs(const char* key, InstrumentationLevel desired_instrumentation_level)
       REQUIRES(Locks::mutator_lock_, Roles::uninterruptible_)
-      REQUIRES(!deoptimized_methods_lock_,
+      REQUIRES(!GetDeoptimizedMethodsLock(),
+               !Locks::thread_list_lock_,
+               !Locks::classlinker_classes_lock_);
+  void UpdateStubs() REQUIRES(Locks::mutator_lock_, Roles::uninterruptible_)
+      REQUIRES(!GetDeoptimizedMethodsLock(),
+               !Locks::thread_list_lock_,
+               !Locks::classlinker_classes_lock_);
+  void UpdateInstrumentationLevels(InstrumentationLevel level)
+      REQUIRES(Locks::mutator_lock_, Roles::uninterruptible_)
+      REQUIRES(!GetDeoptimizedMethodsLock(),
                !Locks::thread_list_lock_,
                !Locks::classlinker_classes_lock_);
 
@@ -465,47 +565,57 @@ class Instrumentation {
   // exclusive access to mutator lock which you can't get if the runtime isn't started.
   void SetEntrypointsInstrumented(bool instrumented) NO_THREAD_SAFETY_ANALYSIS;
 
-  void MethodEnterEventImpl(Thread* thread, mirror::Object* this_object,
-                            ArtMethod* method, uint32_t dex_pc) const
+  void MethodEnterEventImpl(Thread* thread,
+                            ObjPtr<mirror::Object> this_object,
+                            ArtMethod* method,
+                            uint32_t dex_pc) const
       REQUIRES_SHARED(Locks::mutator_lock_);
-  void MethodExitEventImpl(Thread* thread, mirror::Object* this_object,
+  void MethodExitEventImpl(Thread* thread,
+                           ObjPtr<mirror::Object> this_object,
                            ArtMethod* method,
-                           uint32_t dex_pc, const JValue& return_value) const
+                           uint32_t dex_pc,
+                           const JValue& return_value) const
       REQUIRES_SHARED(Locks::mutator_lock_);
-  void DexPcMovedEventImpl(Thread* thread, mirror::Object* this_object,
-                           ArtMethod* method, uint32_t dex_pc) const
+  void DexPcMovedEventImpl(Thread* thread,
+                           ObjPtr<mirror::Object> this_object,
+                           ArtMethod* method,
+                           uint32_t dex_pc) const
       REQUIRES_SHARED(Locks::mutator_lock_);
   void BranchImpl(Thread* thread, ArtMethod* method, uint32_t dex_pc, int32_t offset) const
       REQUIRES_SHARED(Locks::mutator_lock_);
-  void InvokeVirtualOrInterfaceImpl(Thread* thread,
-                                    mirror::Object* this_object,
-                                    ArtMethod* caller,
-                                    uint32_t dex_pc,
-                                    ArtMethod* callee) const
+  void WatchedFramePopImpl(Thread* thread, const ShadowFrame& frame) const
       REQUIRES_SHARED(Locks::mutator_lock_);
-  void FieldReadEventImpl(Thread* thread, mirror::Object* this_object,
-                           ArtMethod* method, uint32_t dex_pc,
-                           ArtField* field) const
+  void FieldReadEventImpl(Thread* thread,
+                          ObjPtr<mirror::Object> this_object,
+                          ArtMethod* method,
+                          uint32_t dex_pc,
+                          ArtField* field) const
       REQUIRES_SHARED(Locks::mutator_lock_);
-  void FieldWriteEventImpl(Thread* thread, mirror::Object* this_object,
-                           ArtMethod* method, uint32_t dex_pc,
-                           ArtField* field, const JValue& field_value) const
+  void FieldWriteEventImpl(Thread* thread,
+                           ObjPtr<mirror::Object> this_object,
+                           ArtMethod* method,
+                           uint32_t dex_pc,
+                           ArtField* field,
+                           const JValue& field_value) const
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Read barrier-aware utility functions for accessing deoptimized_methods_
   bool AddDeoptimizedMethod(ArtMethod* method)
-      REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(deoptimized_methods_lock_);
+      REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(GetDeoptimizedMethodsLock());
   bool IsDeoptimizedMethod(ArtMethod* method)
-      REQUIRES_SHARED(Locks::mutator_lock_, deoptimized_methods_lock_);
+      REQUIRES_SHARED(Locks::mutator_lock_, GetDeoptimizedMethodsLock());
   bool RemoveDeoptimizedMethod(ArtMethod* method)
-      REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(deoptimized_methods_lock_);
+      REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(GetDeoptimizedMethodsLock());
   ArtMethod* BeginDeoptimizedMethod()
-      REQUIRES_SHARED(Locks::mutator_lock_, deoptimized_methods_lock_);
+      REQUIRES_SHARED(Locks::mutator_lock_, GetDeoptimizedMethodsLock());
   bool IsDeoptimizedMethodsEmpty() const
-      REQUIRES_SHARED(Locks::mutator_lock_, deoptimized_methods_lock_);
+      REQUIRES_SHARED(Locks::mutator_lock_, GetDeoptimizedMethodsLock());
   void UpdateMethodsCodeImpl(ArtMethod* method, const void* quick_code)
-      REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!deoptimized_methods_lock_);
+      REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!GetDeoptimizedMethodsLock());
 
+  ReaderWriterMutex* GetDeoptimizedMethodsLock() const {
+    return deoptimized_methods_lock_.get();
+  }
 
   // Have we hijacked ArtMethod::code_ so that it calls instrumentation/interpreter code?
   bool instrumentation_stubs_installed_;
@@ -546,14 +656,18 @@ class Instrumentation {
   // instrumentation_lock_.
   bool have_field_write_listeners_ GUARDED_BY(Locks::mutator_lock_);
 
-  // Do we have any exception caught listeners? Short-cut to avoid taking the instrumentation_lock_.
-  bool have_exception_caught_listeners_ GUARDED_BY(Locks::mutator_lock_);
+  // Do we have any exception thrown listeners? Short-cut to avoid taking the instrumentation_lock_.
+  bool have_exception_thrown_listeners_ GUARDED_BY(Locks::mutator_lock_);
+
+  // Do we have any frame pop listeners? Short-cut to avoid taking the instrumentation_lock_.
+  bool have_watched_frame_pop_listeners_ GUARDED_BY(Locks::mutator_lock_);
 
   // Do we have any branch listeners? Short-cut to avoid taking the instrumentation_lock_.
   bool have_branch_listeners_ GUARDED_BY(Locks::mutator_lock_);
 
-  // Do we have any invoke listeners? Short-cut to avoid taking the instrumentation_lock_.
-  bool have_invoke_virtual_or_interface_listeners_ GUARDED_BY(Locks::mutator_lock_);
+  // Do we have any exception handled listeners? Short-cut to avoid taking the
+  // instrumentation_lock_.
+  bool have_exception_handled_listeners_ GUARDED_BY(Locks::mutator_lock_);
 
   // Contains the instrumentation level required by each client of the instrumentation identified
   // by a string key.
@@ -574,17 +688,17 @@ class Instrumentation {
   std::list<InstrumentationListener*> method_exit_listeners_ GUARDED_BY(Locks::mutator_lock_);
   std::list<InstrumentationListener*> method_unwind_listeners_ GUARDED_BY(Locks::mutator_lock_);
   std::list<InstrumentationListener*> branch_listeners_ GUARDED_BY(Locks::mutator_lock_);
-  std::list<InstrumentationListener*> invoke_virtual_or_interface_listeners_
-      GUARDED_BY(Locks::mutator_lock_);
   std::list<InstrumentationListener*> dex_pc_listeners_ GUARDED_BY(Locks::mutator_lock_);
   std::list<InstrumentationListener*> field_read_listeners_ GUARDED_BY(Locks::mutator_lock_);
   std::list<InstrumentationListener*> field_write_listeners_ GUARDED_BY(Locks::mutator_lock_);
-  std::list<InstrumentationListener*> exception_caught_listeners_ GUARDED_BY(Locks::mutator_lock_);
+  std::list<InstrumentationListener*> exception_thrown_listeners_ GUARDED_BY(Locks::mutator_lock_);
+  std::list<InstrumentationListener*> watched_frame_pop_listeners_ GUARDED_BY(Locks::mutator_lock_);
+  std::list<InstrumentationListener*> exception_handled_listeners_ GUARDED_BY(Locks::mutator_lock_);
 
   // The set of methods being deoptimized (by the debugger) which must be executed with interpreter
   // only.
-  mutable ReaderWriterMutex deoptimized_methods_lock_ DEFAULT_MUTEX_ACQUIRED_AFTER;
-  std::unordered_set<ArtMethod*> deoptimized_methods_ GUARDED_BY(deoptimized_methods_lock_);
+  mutable std::unique_ptr<ReaderWriterMutex> deoptimized_methods_lock_ BOTTOM_MUTEX_ACQUIRED_AFTER;
+  std::unordered_set<ArtMethod*> deoptimized_methods_ GUARDED_BY(GetDeoptimizedMethodsLock());
   bool deoptimization_enabled_;
 
   // Current interpreter handler table. This is updated each time the thread state flags are
@@ -599,7 +713,13 @@ class Instrumentation {
   // alloc_entrypoints_instrumented_ change during suspend points.
   bool alloc_entrypoints_instrumented_;
 
+  // If we can use instrumentation trampolines. After the first time we instrument something with
+  // the interpreter we can no longer use trampolines because it can lead to stack corruption.
+  // TODO Figure out a way to remove the need for this.
+  bool can_use_instrumentation_trampolines_;
+
   friend class InstrumentationTest;  // For GetCurrentInstrumentationLevel and ConfigureStubs.
+  friend class InstrumentationStackPopper;  // For popping instrumentation frames.
 
   DISALLOW_COPY_AND_ASSIGN(Instrumentation);
 };
@@ -608,9 +728,15 @@ std::ostream& operator<<(std::ostream& os, const Instrumentation::Instrumentatio
 
 // An element in the instrumentation side stack maintained in art::Thread.
 struct InstrumentationStackFrame {
-  InstrumentationStackFrame(mirror::Object* this_object, ArtMethod* method,
-                            uintptr_t return_pc, size_t frame_id, bool interpreter_entry)
-      : this_object_(this_object), method_(method), return_pc_(return_pc), frame_id_(frame_id),
+  InstrumentationStackFrame(mirror::Object* this_object,
+                            ArtMethod* method,
+                            uintptr_t return_pc,
+                            size_t frame_id,
+                            bool interpreter_entry)
+      : this_object_(this_object),
+        method_(method),
+        return_pc_(return_pc),
+        frame_id_(frame_id),
         interpreter_entry_(interpreter_entry) {
   }
 

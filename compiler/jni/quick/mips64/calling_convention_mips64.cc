@@ -16,7 +16,9 @@
 
 #include "calling_convention_mips64.h"
 
-#include "base/logging.h"
+#include <android-base/logging.h>
+
+#include "arch/instruction_set.h"
 #include "handle_scope-inl.h"
 #include "utils/mips64/managed_register_mips64.h"
 
@@ -108,7 +110,7 @@ bool Mips64ManagedRuntimeCallingConvention::IsCurrentParamOnStack() {
 
 ManagedRegister Mips64ManagedRuntimeCallingConvention::CurrentParamRegister() {
   LOG(FATAL) << "Should not reach here";
-  return ManagedRegister::NoRegister();
+  UNREACHABLE();
 }
 
 FrameOffset Mips64ManagedRuntimeCallingConvention::CurrentParamStackOffset() {

@@ -21,13 +21,34 @@
 #include "handle_scope-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/object-inl.h"
+#include "mirror/object_array-alloc-inl.h"
 #include "mirror/object_array-inl.h"
 #include "scoped_thread_state_change-inl.h"
 
 namespace art {
 namespace gc {
 
-class HeapTest : public CommonRuntimeTest {};
+class HeapTest : public CommonRuntimeTest {
+ public:
+  void SetUp() override {
+    MemMap::Init();
+    std::string error_msg;
+    // Reserve the preferred address to force the heap to use another one for testing.
+    reserved_ = MemMap::MapAnonymous("ReserveMap",
+                                     gc::Heap::kPreferredAllocSpaceBegin,
+                                     16 * KB,
+                                     PROT_READ,
+                                     /*low_4gb=*/ true,
+                                     /*reuse=*/ false,
+                                     /*reservation=*/ nullptr,
+                                     &error_msg);
+    ASSERT_TRUE(reserved_.IsValid()) << error_msg;
+    CommonRuntimeTest::SetUp();
+  }
+
+ private:
+  MemMap reserved_;
+};
 
 TEST_F(HeapTest, ClearGrowthLimit) {
   Heap* heap = Runtime::Current()->GetHeap();
@@ -53,13 +74,14 @@ TEST_F(HeapTest, GarbageCollectClassLinkerInit) {
       Handle<mirror::ObjectArray<mirror::Object>> array(hs2.NewHandle(
           mirror::ObjectArray<mirror::Object>::Alloc(soa.Self(), c.Get(), 2048)));
       for (size_t j = 0; j < 2048; ++j) {
-        mirror::String* string = mirror::String::AllocFromModifiedUtf8(soa.Self(), "hello, world!");
+        ObjPtr<mirror::String> string =
+            mirror::String::AllocFromModifiedUtf8(soa.Self(), "hello, world!");
         // handle scope operator -> deferences the handle scope before running the method.
         array->Set<false>(j, string);
       }
     }
   }
-  Runtime::Current()->GetHeap()->CollectGarbage(false);
+  Runtime::Current()->GetHeap()->CollectGarbage(/* clear_soft_references= */ false);
 }
 
 TEST_F(HeapTest, HeapBitmapCapacityTest) {
@@ -73,12 +95,12 @@ TEST_F(HeapTest, HeapBitmapCapacityTest) {
 }
 
 TEST_F(HeapTest, DumpGCPerformanceOnShutdown) {
-  Runtime::Current()->GetHeap()->CollectGarbage(/* clear_soft_references */ false);
+  Runtime::Current()->GetHeap()->CollectGarbage(/* clear_soft_references= */ false);
   Runtime::Current()->SetDumpGCPerformanceOnShutdown(true);
 }
 
 class ZygoteHeapTest : public CommonRuntimeTest {
-  void SetUpRuntimeOptions(RuntimeOptions* options) {
+  void SetUpRuntimeOptions(RuntimeOptions* options) override {
     CommonRuntimeTest::SetUpRuntimeOptions(options);
     options->push_back(std::make_pair("-Xzygote", nullptr));
   }

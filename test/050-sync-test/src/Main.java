@@ -39,7 +39,7 @@ public class Main {
             Thread.sleep(1000);
         } catch (InterruptedException ie) {
             System.out.println("INTERRUPT!");
-            ie.printStackTrace();
+            ie.printStackTrace(System.out);
         }
         System.out.println("GONE");
     }
@@ -56,7 +56,7 @@ public class Main {
                 one.wait();
             } catch (InterruptedException ie) {
                 System.out.println("INTERRUPT!");
-                ie.printStackTrace();
+                ie.printStackTrace(System.out);
             }
         }
 
@@ -69,7 +69,7 @@ public class Main {
             two.join();
         } catch (InterruptedException ie) {
             System.out.println("INTERRUPT!");
-            ie.printStackTrace();
+            ie.printStackTrace(System.out);
         }
         System.out.println("main: all done");
     }
@@ -133,11 +133,13 @@ class CpuThread extends Thread {
 class SleepyThread extends Thread {
     private SleepyThread mOther;
     private Integer[] mWaitOnMe;      // any type of object will do
+    private volatile boolean otherDone;
 
     private static int count = 0;
 
     SleepyThread(SleepyThread other) {
         mOther = other;
+        otherDone = false;
         mWaitOnMe = new Integer[] { 1, 2 };
 
         setName("thread#" + count);
@@ -158,16 +160,18 @@ class SleepyThread extends Thread {
             boolean intr = false;
 
             try {
+              do {
                 synchronized (mWaitOnMe) {
                     mWaitOnMe.wait(9000);
                 }
+              } while (!otherDone);
             } catch (InterruptedException ie) {
                 // Expecting this; interrupted should be false.
                 System.out.println(Thread.currentThread().getName() +
                         " interrupted, flag=" + Thread.interrupted());
                 intr = true;
             } catch (Exception ex) {
-                ex.printStackTrace();
+                ex.printStackTrace(System.out);
             }
 
             if (!intr)
@@ -182,6 +186,7 @@ class SleepyThread extends Thread {
             System.out.println("interrupting other (isAlive="
                 + mOther.isAlive() + ")");
             mOther.interrupt();
+            mOther.otherDone = true;
         }
     }
 }

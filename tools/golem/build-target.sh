@@ -147,12 +147,8 @@ get_build_var() {
   [[ -n $target_product ]] && extras+=" TARGET_PRODUCT=$target_product"
   [[ -n $target_build_variant ]] && extras+=" TARGET_BUILD_VARIANT=$target_build_variant"
 
-  # call dumpvar-$name from the makefile system.
-  (\cd "$(gettop)";
-  CALLED_FROM_SETUP=true BUILD_SYSTEM=build/core \
-    command make --no-print-directory -f build/core/config.mk \
-    $extras \
-    dumpvar-$varname)
+  # call dumpvar from the build system.
+  (\cd "$(gettop)"; env $extras build/soong/soong_ui.bash --dumpvar-mode $varname)
 }
 
 # Defaults from command-line.
@@ -160,7 +156,7 @@ get_build_var() {
 mode=""  # blank or 'golem' if --golem was specified.
 golem_target="" # --golem=$golem_target
 config="" # --machine-type=$config
-j_arg="-j8"
+j_arg=""
 showcommands=""
 simulate=""
 make_tarball=""
@@ -271,8 +267,6 @@ if [[ $mode == "golem" ]]; then
   execute 'source' build/envsetup.sh
   # Build generic targets (as opposed to something specific like aosp_angler-eng).
   execute lunch "$lunch_target"
-  setenv JACK_SERVER false
-  setenv_escape JACK_REPOSITORY "$PWD/prebuilts/sdk/tools/jacks" '$PWD/prebuilts/sdk/tools/jacks'
   # Golem uses master-art repository which is missing a lot of other libraries.
   setenv SOONG_ALLOW_MISSING_DEPENDENCIES true
   # Golem may be missing tools such as javac from its path.
@@ -353,7 +347,7 @@ fi
 #  and maybe calls lunch).
 #
 
-execute make "${j_arg}" "${make_target}"
+execute build/soong/soong_ui.bash --make-mode "${j_arg}" "${make_target}"
 
 if $strip_symbols; then
   # Further reduce size by stripping symbols.
@@ -373,7 +367,7 @@ if [[ "$make_tarball" == "make_tarball" ]]; then
     dirs_rooted+=("$root_dir/$tar_dir")
   done
 
-  execute tar -czf "${tarball}" "${dirs_rooted[@]}" --exclude .git --exclude .gitignore
+  execute tar -czf "${tarball}" --exclude ".git" --exclude ".gitignore" "${dirs_rooted[@]}"
   tar_result=$?
   if [[ $tar_result -ne 0 ]]; then
     [[ -f $tarball ]] && rm $tarball

@@ -17,9 +17,9 @@
 #ifndef ART_RUNTIME_INTERPRETER_INTERPRETER_MTERP_IMPL_H_
 #define ART_RUNTIME_INTERPRETER_INTERPRETER_MTERP_IMPL_H_
 
+#include "base/locks.h"
 #include "base/macros.h"
-#include "base/mutex.h"
-#include "dex_file.h"
+#include "dex/dex_file.h"
 #include "jvalue.h"
 #include "obj_ptr.h"
 
@@ -32,7 +32,7 @@ namespace interpreter {
 
 // Mterp does not support transactions or access check, thus no templated versions.
 extern "C" bool ExecuteMterpImpl(Thread* self,
-                                 const DexFile::CodeItem* code_item,
+                                 const uint16_t* dex_instructions,
                                  ShadowFrame* shadow_frame,
                                  JValue* result_register) REQUIRES_SHARED(Locks::mutator_lock_);
 

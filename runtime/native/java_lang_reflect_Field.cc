@@ -17,19 +17,23 @@
 #include "java_lang_reflect_Field.h"
 
 #include "android-base/stringprintf.h"
+#include "nativehelper/jni_macros.h"
 
 #include "art_field-inl.h"
-#include "class_linker.h"
+#include "base/utils.h"
 #include "class_linker-inl.h"
+#include "class_linker.h"
 #include "common_throws.h"
-#include "dex_file-inl.h"
-#include "dex_file_annotations.h"
-#include "jni_internal.h"
+#include "dex/dex_file-inl.h"
+#include "dex/dex_file_annotations.h"
+#include "jni/jni_internal.h"
+#include "jvalue-inl.h"
 #include "mirror/class-inl.h"
-#include "mirror/field.h"
+#include "mirror/field-inl.h"
+#include "mirror/object_array-alloc-inl.h"
+#include "native_util.h"
 #include "reflection-inl.h"
 #include "scoped_fast_native_object_access-inl.h"
-#include "utils.h"
 #include "well_known_classes.h"
 
 namespace art {
@@ -330,14 +334,15 @@ static void Field_set(JNIEnv* env, jobject javaField, jobject javaObj, jobject j
     return;
   }
   ObjPtr<mirror::Class> field_type;
-  const char* field_type_desciptor = f->GetArtField()->GetTypeDescriptor();
-  Primitive::Type field_prim_type = Primitive::GetType(field_type_desciptor[0]);
+  const char* field_type_descriptor = f->GetArtField()->GetTypeDescriptor();
+  Primitive::Type field_prim_type = Primitive::GetType(field_type_descriptor[0]);
   if (field_prim_type == Primitive::kPrimNot) {
     field_type = f->GetType();
-    DCHECK(field_type != nullptr);
   } else {
-    field_type = Runtime::Current()->GetClassLinker()->FindPrimitiveClass(field_type_desciptor[0]);
+    field_type =
+        Runtime::Current()->GetClassLinker()->LookupPrimitiveClass(field_type_descriptor[0]);
   }
+  DCHECK(field_type != nullptr) << field_type_descriptor;
   // We now don't expect suspension unless an exception is thrown.
   // Unbox the value, if necessary.
   ObjPtr<mirror::Object> boxed_value = soa.Decode<mirror::Object>(javaValue);
@@ -458,11 +463,10 @@ static jlong Field_getArtField(JNIEnv* env, jobject javaField) {
   return reinterpret_cast<jlong>(field);
 }
 
-static jobject Field_getNameInternal(JNIEnv* env, jobject javaField) {
+static jstring Field_getNameInternal(JNIEnv* env, jobject javaField) {
   ScopedFastNativeObjectAccess soa(env);
   ArtField* field = soa.Decode<mirror::Field>(javaField)->GetArtField();
-  return soa.AddLocalReference<jobject>(
-      field->GetStringName(soa.Self(), true /* resolve */));
+  return soa.AddLocalReference<jstring>(field->ResolveNameString());
 }
 
 static jobjectArray Field_getDeclaredAnnotations(JNIEnv* env, jobject javaField) {
@@ -473,7 +477,7 @@ static jobjectArray Field_getDeclaredAnnotations(JNIEnv* env, jobject javaField)
     ObjPtr<mirror::Class> annotation_array_class =
         soa.Decode<mirror::Class>(WellKnownClasses::java_lang_annotation_Annotation__array);
     ObjPtr<mirror::ObjectArray<mirror::Object>> empty_array =
-        mirror::ObjectArray<mirror::Object>::Alloc(soa.Self(), annotation_array_class.Ptr(), 0);
+        mirror::ObjectArray<mirror::Object>::Alloc(soa.Self(), annotation_array_class, 0);
     return soa.AddLocalReference<jobjectArray>(empty_array);
   }
   return soa.AddLocalReference<jobjectArray>(annotations::GetAnnotationsForField(field));
