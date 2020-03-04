@@ -146,6 +146,9 @@ void MarkSweep::InitializePhase() {
 
 void MarkSweep::RunPhases() {
   Thread* self = Thread::Current();
+  //zhang
+  leakleak::getInstance()->dump_str("mark_sweep");
+  //end
   InitializePhase();
   Locks::mutator_lock_->AssertNotHeld(self);
   if (IsConcurrent()) {

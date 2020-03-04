@@ -116,6 +116,9 @@ SemiSpace::SemiSpace(Heap* heap, bool generational, const std::string& name_pref
 
 void SemiSpace::RunPhases() {
   Thread* self = Thread::Current();
+  //zhang
+  leakleak::getInstance()->dump_str("semi_space GC");
+  //end
   InitializePhase();
   // Semi-space collector is special since it is sometimes called with the mutators suspended
   // during the zygote creation and collector transitions. If we already exclusively hold the

@@ -23,8 +23,16 @@
 #include "jit/jit.h"
 #include "jit/jit_code_cache.h"
 #include "gc/collector/gc_type.h"
+#include "gc/accounting/heap_bitmap.h"
 namespace art {
-
+    namespace gc {
+        class Heap;
+        namespace accounting {
+            template <size_t kAlignment> class SpaceBitmap;
+            typedef SpaceBitmap<kObjectAlignment> ContinuousSpaceBitmap;
+            class HeapBitmap;
+        } 
+    }
     class ArtMethod;
     namespace mirror {
         class Object;
@@ -35,7 +43,7 @@ namespace art {
         class Jit;
         class JitCodeCache;
     }
-
+    // gc::accounting
     namespace leakleak{
         const int len = 127;
         class myio{
@@ -46,10 +54,11 @@ namespace art {
             void put_ans(std::string ans);
         };
         const int LEN = 127;
-
+        //space->GetLiveBitmap();
         class Leaktrace{
             private:
             myio io;
+            gc::accounting::HeapBitmap* live_bitmap;
             int objcnt;
             int t_size;
             bool istrace;
@@ -57,14 +66,16 @@ namespace art {
             int GC_K;
             uint32_t large_size;
             std::set<std::pair<mirror::Class *,void*>> classes_;
-            uint64_t main_begin;
-            uint64_t main_end;
+            uintptr_t main_begin;
+            uintptr_t main_end;
             uint64_t bitmap_ptr;
-            std::unordered_map<uint32_t,std::pair<uintptr_t,uint16_t>> addr_pc;
-            std::unordered_map<uint32_t,std::pair<uintptr_t,uint16_t>> addr_large_pc;
+            size_t map_cnt;
+            std::mutex *my_lock;
+            std::unordered_map<mirror::Object *,std::pair<uintptr_t,uint16_t>> *addr_pc;
+            std::unordered_map<mirror::Object *,std::pair<uintptr_t,uint16_t>> addr_large_pc;
             std::unordered_map<uintptr_t,int> m_ans;
-            uint32_t low(mirror::Object * o){return (uint32_t)(reinterpret_cast<uint64_t>((void*)o)-main_begin);};
-            mirror::Object * high(uint32_t o){return reinterpret_cast<mirror::Object *>((void*)(o+main_begin));};
+            // uint32_t low(mirror::Object * o){return (uint32_t)(reinterpret_cast<uint64_t>((void*)o)-main_begin);};
+            // mirror::Object * high(uint32_t o){return reinterpret_cast<mirror::Object *>((void*)(o+main_begin));};
             void NewClass(mirror::Class *klass,void* pc);
             void NewMethodLinked(const std::string& class_name, ArtMethod &method);
             int try_thread_istrace();
@@ -95,11 +106,19 @@ namespace art {
 
             void set_main_begin(uint64_t _begin);
 
+            void set_bitmap(gc::accounting::HeapBitmap* _live_bitmap);
+
             void set_main_end(uint64_t _end);
 
             void set_large_size(uint32_t large_size_){
                 large_size = large_size_;
             }
+
+            void new_map();
+
+            void clear_map(size_t idx);
+
+            size_t get_obj_idx(mirror::Object *obj);
 
             void set_bitmap_ptr(uint64_t _end);
 
@@ -129,7 +148,7 @@ namespace art {
 
             void dump_vct();
 
-            void addedge(mirror::Object *obj,gc::collector::GcType ty);
+            void addedge(mirror::Object *obj,gc::collector::GcType ty,gc::Heap* heap_);
 
             void dump_str(std::string S);
 
@@ -147,7 +166,7 @@ namespace art {
 
             void interpreter_touch_obj(mirror::Object *I);
 
-            void CC_move_from_to(mirror::Object *I,mirror::Object *J);
+            void CC_move_from_to(mirror::Object *I,mirror::Object *J,gc::Heap* heap_);
 
             void new_obj(mirror::Object *obj,uint32_t _byte);
 

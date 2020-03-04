@@ -593,6 +593,7 @@ Heap::Heap(size_t initial_size,
   if(leakleak::getInstance()->get_istrace()){
     leakleak::getInstance()->set_main_begin(0);
     leakleak::getInstance()->set_main_end(0);
+    leakleak::getInstance()->set_bitmap(GetLiveBitmap());
     LOG(WARNING)<<"zhang SECOND";
       for (auto& lt_csp: continuous_spaces_) {
         if(strstr(lt_csp->GetName(),"main")!=NULL){
@@ -603,10 +604,31 @@ Heap::Heap(size_t initial_size,
         LOG(WARNING)<<"zhang Space_end: " <<  reinterpret_cast<uint64_t>(lt_csp->End());
         //LOG(WARNING)<<"zhang Space_lim: " <<  reinterpret_cast<uint64_t>(lt_csp->Limit());
       }
-    LOG(WARNING)<<"zhang Space Name:" << (large_object_space_->GetName());
+
+      for (auto& lt_csp: discontinuous_spaces_) {
+
+        LOG(WARNING)<<"zhang Space Name:" << (lt_csp->GetName());
+        // LOG(WARNING)<<"zhang Space_start: " << reinterpret_cast<uint64_t>(lt_csp->Begin());
+        // LOG(WARNING)<<"zhang Space_end: " <<  reinterpret_cast<uint64_t>(lt_csp->End());
+        //LOG(WARNING)<<"zhang Space_lim: " <<  reinterpret_cast<uint64_t>(lt_csp->Limit());
+      }
+    if(main_space_!= nullptr){
+      LOG(WARNING)<<"zhang Space Name:" << (main_space_->GetName());
+      LOG(WARNING)<<"zhang Space_start: " << reinterpret_cast<uint64_t>(main_space_->Begin());
+      LOG(WARNING)<<"zhang Space_end: " <<  reinterpret_cast<uint64_t>(main_space_->End());
+      // leakleak::getInstance()->set_main_end(reinterpret_cast<uint64_t>(main_space_->End()));
+    }
+    if(rosalloc_space_!= nullptr){
+      LOG(WARNING)<<"zhang Space Name:" << (rosalloc_space_->GetName());
+      LOG(WARNING)<<"zhang Space_start: " << reinterpret_cast<uint64_t>(rosalloc_space_->Begin());
+      LOG(WARNING)<<"zhang Space_end: " <<  reinterpret_cast<uint64_t>(rosalloc_space_->End());
+      // leakleak::getInstance()->set_main_end(reinterpret_cast<uint64_t>(rosalloc_space_->End()));
+    }
+     LOG(WARNING)<<"zhang Space Name:" << (large_object_space_->GetName());
     LOG(WARNING)<<"zhang Space_start: " << reinterpret_cast<uint64_t>(large_object_space_->Begin());
     LOG(WARNING)<<"zhang Space_end: " <<  reinterpret_cast<uint64_t>(large_object_space_->End());
     leakleak::getInstance()->set_main_end(reinterpret_cast<uint64_t>(large_object_space_->End()));
+    leakleak::getInstance()->new_map();
     //leakleak::set_heap_end(reinterpret_cast<uint64_t>(heap_end));
     LOG(WARNING)<<"zhang heap_begin: " <<  reinterpret_cast<uint64_t>(heap_begin);
     LOG(WARNING)<<"zhang heap_end: " <<  reinterpret_cast<uint64_t>(heap_end);

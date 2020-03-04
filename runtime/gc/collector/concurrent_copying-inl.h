@@ -154,8 +154,8 @@ inline mirror::Object* ConcurrentCopying::Mark(Thread* const self,
     // are consulted. If they look like gray but aren't really, the
     // read barriers slow path can trigger when it shouldn't. To guard
     // against this, return here if the CC collector isn't running.
-    if(from_ref!=nullptr )
-        leakleak::getInstance()->addedge(from_ref,GetGcType());
+    // if(from_ref!=nullptr )
+    //     leakleak::getInstance()->addedge(from_ref,GetGcType(),GetHeap());
     return from_ref;
   }
   DCHECK(region_space_ != nullptr) << "Read barrier slow path taken when CC isn't running?";
@@ -164,8 +164,8 @@ inline mirror::Object* ConcurrentCopying::Mark(Thread* const self,
     switch (rtype) {
       case space::RegionSpace::RegionType::kRegionTypeToSpace:
         // It's already marked.
-        if(from_ref!=nullptr )
-          leakleak::getInstance()->addedge(from_ref,GetGcType());
+        // if(from_ref!=nullptr )
+        //   leakleak::getInstance()->addedge(from_ref,GetGcType(),GetHeap());
         return from_ref;
       case space::RegionSpace::RegionType::kRegionTypeFromSpace: {
             //zhang
@@ -183,7 +183,7 @@ inline mirror::Object* ConcurrentCopying::Mark(Thread* const self,
           //end
           {
             // WriterMutexLock mu(Thread::Current(), *Locks::mutator_lock_); 
-            leakleak::getInstance()->CC_move_from_to(from_ref,to_ref);
+            leakleak::getInstance()->CC_move_from_to(from_ref,to_ref,GetHeap());
           }
         }
             //zhang
@@ -194,8 +194,8 @@ inline mirror::Object* ConcurrentCopying::Mark(Thread* const self,
             << "from_ref=" << from_ref << " to_ref=" << to_ref;
           
         // zhang
-        if(to_ref!=nullptr )
-            leakleak::getInstance()->addedge(to_ref,GetGcType());
+        // if(to_ref!=nullptr )
+        //     leakleak::getInstance()->addedge(to_ref,GetGcType(),GetHeap());
         // end
         return to_ref;
       }
@@ -204,14 +204,14 @@ inline mirror::Object* ConcurrentCopying::Mark(Thread* const self,
           if (!kFromGCThread) {
             DCHECK(IsMarkedInUnevacFromSpace(from_ref)) << "Returning unmarked object to mutator";
           }
-          if(from_ref!=nullptr )
-            leakleak::getInstance()->addedge(from_ref,GetGcType());
+          // if(from_ref!=nullptr )
+          //   leakleak::getInstance()->addedge(from_ref,GetGcType(),GetHeap());
           return from_ref;
         }
         //zhang
         ret = MarkUnevacFromSpaceRegion(self, from_ref, region_space_bitmap_);
-        if(ret!=nullptr )
-            leakleak::getInstance()->addedge(ret,GetGcType());
+        // if(ret!=nullptr )
+        //     leakleak::getInstance()->addedge(ret,GetGcType(),GetHeap());
         return ret;
         //end
         // return MarkUnevacFromSpaceRegion(self, from_ref, region_space_bitmap_);
@@ -228,16 +228,16 @@ inline mirror::Object* ConcurrentCopying::Mark(Thread* const self,
     if (immune_spaces_.ContainsObject(from_ref)) {
       //zhang
         ret = MarkImmuneSpace<kGrayImmuneObject>(self, from_ref);
-        if(ret!=nullptr )
-            leakleak::getInstance()->addedge(ret,GetGcType());
+        // if(ret!=nullptr )
+        //     leakleak::getInstance()->addedge(ret,GetGcType(),GetHeap());
         return ret;
         //end
       // return MarkImmuneSpace<kGrayImmuneObject>(self, from_ref);
     } else {
       //zhang
         ret = MarkNonMoving(self, from_ref, holder, offset);
-        if(ret!=nullptr )
-            leakleak::getInstance()->addedge(ret,GetGcType());
+        // if(ret!=nullptr )
+        //     leakleak::getInstance()->addedge(ret,GetGcType(),GetHeap());
         return ret;
         //end
       // return MarkNonMoving(self, from_ref, holder, offset);
@@ -250,6 +250,10 @@ inline mirror::Object* ConcurrentCopying::MarkFromReadBarrier(mirror::Object* fr
   Thread* const self = Thread::Current();
   // We can get here before marking starts since we gray immune objects before the marking phase.
   if (from_ref == nullptr || !self->GetIsGcMarking()) {
+    //zhang
+    // if(from_ref!=nullptr )
+    //       leakleak::getInstance()->addedge(from_ref,GetGcType(),GetHeap());
+    //end
     return from_ref;
   }
   // TODO: Consider removing this check when we are done investigating slow paths. b/30162165

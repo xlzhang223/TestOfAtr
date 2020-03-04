@@ -227,6 +227,7 @@ class RegionSpace final : public ContinuousMemMapAllocSpace {
   // Object alignment within the space.
   static constexpr size_t kAlignment = kObjectAlignment;
   // The region size.
+  //zhang region size
   static constexpr size_t kRegionSize = 256 * KB;
 
   bool IsInFromSpace(mirror::Object* ref) {
@@ -340,7 +341,7 @@ class RegionSpace final : public ContinuousMemMapAllocSpace {
       }
     }
   }
-
+  //zhang how to get idx of obj unsafe
   size_t RegionIdxForRefUnchecked(mirror::Object* ref) const NO_THREAD_SAFETY_ANALYSIS {
     DCHECK(HasAddress(ref));
     uintptr_t offset = reinterpret_cast<uintptr_t>(ref) - reinterpret_cast<uintptr_t>(Begin());

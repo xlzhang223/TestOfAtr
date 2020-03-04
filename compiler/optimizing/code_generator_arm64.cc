@@ -1070,7 +1070,7 @@ void CodeGeneratorARM64::genaccessbit(Register obj,int obj_size = (1<<20)){
   if(leakleak::getInstance()->get_istrace()==0)return;
   if(leakleak::getInstance()->get_bitmap_ptr()!=0){
   if(obj_size<leakleak::getInstance()->getTsize()) return;
-  // LOG(WARNING)<<"Leakleak,genaccessbit";
+  LOG(WARNING)<<"Leakleak,genaccessbit";
   //locations->AddRegisterTemps(3);
   //int n = locations->GetTempCount();
   //leakleak::log_app_name();
@@ -2009,13 +2009,13 @@ void InstructionCodeGeneratorARM64::HandleFieldGet(HInstruction* instruction,
         /* needs_null_check= */ true,
         field_info.IsVolatile());
        //zhang    get
-    // if(leakleak::getInstance()->get_istrace()!=0){
-    //   uint32_t obj_size =0; 
-    //   ReaderMutexLock mu(Thread::Current(), *Locks::mutator_lock_);
-    //   // ObjPtr<mirror::Class> class_ptr = field_info.GetField()->GetDeclaringClass();
-    //   obj_size = field_info.GetField()->GetDeclaringClass() -> GetObjectSize();
-    //   codegen_->genaccessbit(InputRegisterAt(instruction, 0),obj_size);//,locations);
-    // }
+      if(leakleak::getInstance()->get_istrace()!=0){
+        uint32_t obj_size =0; 
+        ReaderMutexLock mu(Thread::Current(), *Locks::mutator_lock_);
+        // ObjPtr<mirror::Class> class_ptr = field_info.GetField()->GetDeclaringClass();
+        obj_size = field_info.GetField()->GetDeclaringClass() -> GetObjectSize();
+        codegen_->genaccessbit(InputRegisterAt(instruction, 0),obj_size);//,locations);
+      }
     //end
   } else {
     // General case.
@@ -2614,8 +2614,8 @@ void InstructionCodeGeneratorARM64::VisitArrayGet(HArrayGet* instruction) {
       codegen_->MaybeRecordImplicitNullCheck(instruction);
     }
 
+    codegen_->genaccessbit(obj);
     if (type == DataType::Type::kReference) {
-      codegen_->genaccessbit(obj);
       //zhang
       // if(type == Primitive::kPrimNot)  
       //end
@@ -2721,7 +2721,7 @@ void InstructionCodeGeneratorARM64::VisitArraySet(HArraySet* instruction) {
 
       //zhang
       //if(value_type == Primitive::kPrimNot) 
-      if (value_type == DataType::Type::kReference)
+      // if (value_type == DataType::Type::kReference)
         codegen_->genaccessbit(array);
       //end
     }

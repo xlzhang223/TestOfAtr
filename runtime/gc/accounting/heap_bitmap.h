@@ -23,7 +23,9 @@
 #include "base/locks.h"
 #include "base/macros.h"
 #include "space_bitmap.h"
-
+//zhang
+#include "leakleak/leakleak.h"
+//end
 namespace art {
 namespace gc {
 

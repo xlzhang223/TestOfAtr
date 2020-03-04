@@ -1333,7 +1333,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
                        runtime_options.Exists(Opt::IgnoreMaxFootprint),
                        //zhang config
                        runtime_options.GetOrDefault(Opt::UseTLAB),
-                        // false,
+                      //  false,
                        //
                        xgc_option.verify_pre_gc_heap_,
                        xgc_option.verify_pre_sweeping_heap_,

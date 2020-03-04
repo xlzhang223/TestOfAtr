@@ -23,7 +23,9 @@
 #include "mirror/class-inl.h"
 #include "mirror/object-inl.h"
 #include "thread_list.h"
-
+//zhang
+#include "leakleak/leakleak.h"
+//end
 namespace art {
 namespace gc {
 namespace space {
@@ -963,6 +965,10 @@ size_t RegionSpace::AllocationSizeNonvirtual(mirror::Object* obj, size_t* usable
 }
 
 void RegionSpace::Region::Clear(bool zero_and_release_pages) {
+  //zhang
+  // leakleak::getInstance()->dump_str("Region Clear");
+  leakleak::getInstance()->clear_map(Idx());
+  //end
   top_.store(begin_, std::memory_order_relaxed);
   state_ = RegionState::kRegionStateFree;
   type_ = RegionType::kRegionTypeNone;

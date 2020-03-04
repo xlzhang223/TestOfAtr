@@ -1060,6 +1060,7 @@ class ConcurrentCopying::ComputeLiveBytesAndMarkRefFieldsVisitor {
       ALWAYS_INLINE
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES_SHARED(Locks::heap_bitmap_lock_) {
+
     DCHECK_EQ(collector_->RegionSpace()->RegionIdxForRef(obj), obj_region_idx_);
     DCHECK(kHandleInterRegionRefs || collector_->immune_spaces_.ContainsObject(obj));
     CheckReference(obj->GetFieldObject<mirror::Object, kVerifyNone, kWithoutReadBarrier>(offset));
@@ -1128,6 +1129,10 @@ void ConcurrentCopying::AddLiveBytesAndScanRef(mirror::Object* ref) {
   DCHECK(ref != nullptr);
   DCHECK(!immune_spaces_.ContainsObject(ref));
   DCHECK(TestMarkBitmapForRef(ref));
+  //zhang
+  // if(ref!=nullptr )
+  //           leakleak::getInstance()->addedge(ref,GetGcType(),GetHeap());
+  //end
   size_t obj_region_idx = static_cast<size_t>(-1);
   if (LIKELY(region_space_->HasAddress(ref))) {
     obj_region_idx = region_space_->RegionIdxForRefUnchecked(ref);
@@ -2164,9 +2169,9 @@ inline void ConcurrentCopying::ProcessMarkStackRef(mirror::Object* to_ref) {
         << " runtime->sentinel=" << Runtime::Current()->GetSentinel().Read<kWithoutReadBarrier>();
   }
   //zhang maybe replace process
-  //end// zhang
+  // zhang
   // if(to_ref!=nullptr)
-  //     leakleak::getInstance()->addedge(to_ref);
+  //     leakleak::getInstance()->addedge(to_ref,GetGcType(),GetHeap());
   // end
   bool add_to_live_bytes = false;
   // Invariant: There should be no object from a newly-allocated
