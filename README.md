@@ -59,10 +59,17 @@ adb remount
 adb push app.txt data/local/tmp
 adb push GC_K.txt /data/local/tmp/
 adb push Tsize.txt /data/local/tmp/
-app.txt 表示要监测的应用程序
-GC_K.txt 表示要监测机制触发间隔CG次数
-Tsize.txt 表示要监测的对象大小阈值
-```
 
+app.txt 表示要监测的应用程序（与pid获得的进程名对应）
+GC_K.txt 表示要监测机制触发间隔CG次数（如：8）
+Tsize.txt 表示要监测的对象大小阈值（如：48）
+```
+以dalvikvm启动的程序为例：
+将项目中的三个文本格式文件上传到手机中，即可监测dalvikvm启动的程序，并以8为间隔，追踪大于48字节的对象。
 #### 6.输出结果
 所有输出结果在data/local/tmp/result.txt中
+可以使用
+```
+adb pull data/local/tmp/result.txt {your_path}
+```
+将输出文本dump到本地。
