@@ -73,3 +73,19 @@ Tsize.txt 表示要监测的对象大小阈值（如：48）
 adb pull data/local/tmp/result.txt {your_path}
 ```
 将输出文本dump到本地。
+#### 7.eembc测试
+当确保执行完步骤4（修改后的代码部署到开发机后），可将测试的配置文件及测试dex分别push到机器上进行测试。
+```
+adb root                                              
+adb remount                                           //进行挂载
+adb push app.txt data/local/tmp 
+adb push GC_K.txt /data/local/tmp/
+adb push Tsize.txt /data/local/tmp/                   //push相关配置
+adb push eembcBM.jar data/local/tmp/
+adb shell                                             //adb shell下启动eembcBM
+cd data/local/tmp
+dalvikvm -cp eembcBM.jar com.sun.mep.bench.main       //运行eembcBM
+exit
+adb pull data/local/tmp/result.txt                    //抓取结果到本地
+```
+项目附带了eembc及其子程序的dex，如需测试其他java程序，需要用当前版本的dx工具将.class转换为.dex。
